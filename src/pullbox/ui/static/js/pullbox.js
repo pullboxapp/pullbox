@@ -14221,10 +14221,22 @@ function issueSearchResultActions(config) {
       }
     },
 
-    grabRelease: function (button) {
+    grabRelease: async function (button) {
       var self = this;
       if (self.grabbing || self.blocked) {
         return;
+      }
+
+      if (cfg.hasLibraryFile) {
+        self.grabbing = true;
+        var confirmed = await pbConfirm({
+          title: "Download replacement?",
+          message: "The selected download will replace the current library file after validation. The current file stays in place until replacement succeeds. Cancel leaves it unchanged.",
+          confirmText: "Download replacement",
+          destructive: true,
+        });
+        self.grabbing = false;
+        if (!confirmed) return;
       }
 
       var directAttemptId = parseInt(button.dataset.directAttempt, 10) || 0;
@@ -19264,6 +19276,20 @@ function issueDetailPage(config) {
   var cfg = config || {};
 
   return Object.assign(fileBrowserMixin(cfg), readerMixin(cfg), {
+    replacementAction: "",
+    init: function () {
+      readerMixin(cfg).init.call(this);
+      var url = new URL(window.location.href);
+      var action = url.searchParams.get("replacement");
+      if (action !== "search" && action !== "import") return;
+      this.replacementAction = action;
+      url.searchParams.delete("replacement");
+      window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash);
+      this.$nextTick(() => {
+        if (action === "search") this.openManualSearchModal();
+        else this.openImportFileBrowser();
+      });
+    },
     coverModalOpen: false,
     coverModalUrl: "",
     searching: false,

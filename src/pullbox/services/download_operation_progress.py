@@ -5,6 +5,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+from pullbox.core.partial_issue import (
+    INCOMPLETE_RECOVERY_DISMISSED,
+    QUIET_METADATA_RECOVERY_MESSAGES,
+)
 from pullbox.models.download import DownloadClientType, DownloadState
 from pullbox.models.operation_progress import (
     OperationProgressState,
@@ -118,7 +122,7 @@ def build_download_operation_update(
         == "AirDC++ merged this request into an existing Pullbox download."
     ) or (
         download.download_client is DownloadClientType.DIRECT
-        and download.error_message == PACK_FULFILLED_MESSAGE
+        and download.error_message in {PACK_FULFILLED_MESSAGE, *QUIET_METADATA_RECOVERY_MESSAGES}
     )
     if client_state:
         client_state = {
@@ -161,7 +165,13 @@ def build_download_operation_update(
         revision=None,
         state=shared_state,
         phase=str(
-            ("superseded" if superseded else client_state)
+            (
+                "dismissed"
+                if superseded and download.error_message == INCOMPLETE_RECOVERY_DISMISSED
+                else "superseded"
+                if superseded
+                else client_state
+            )
             or (
                 "cancelled"
                 if shared_state is OperationProgressState.CANCELLED

@@ -195,6 +195,19 @@ async def process_completed(
 
                         await session.commit()
                         try:
+                            from pullbox.services.direct_metadata_recovery import (
+                                reconcile_metadata_replacements,
+                            )
+
+                            await reconcile_metadata_replacements(session, download.issue_id)
+                        except Exception:
+                            # Recovery follow-up must not fail an already committed import.
+                            log.warning(
+                                "partial_issue_replacement_reconciliation_failed_after_completion",
+                                download_id=dl_id,
+                                exc_info=True,
+                            )
+                        try:
                             request_story_arc_sync_now()
                         except Exception:
                             # Canonical completion is already durable. This

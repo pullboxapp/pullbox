@@ -9,11 +9,18 @@ from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from uuid import NAMESPACE_URL, uuid5
 
+import structlog
 from pydantic import BaseModel, Field, TypeAdapter
 from sqlalchemy import select
 
 from pullbox.config import get_settings
+from pullbox.core.partial_issue import (
+    INCOMPLETE_RECOVERY_DISMISSED,
+    METADATA_RECOVERY_SUPERSEDED,
+    needs_complete_copy,
+)
 from pullbox.models import Issue, LibraryFile
 from pullbox.models.direct_acquisition import (
     DirectAcquisitionAttempt,
@@ -65,6 +72,112 @@ class DirectMetadataRecoveryError(ValueError):
     """An operator-actionable recovery error without a download URL or secret."""
 
 
+async def reconcile_metadata_replacements(session: AsyncSession, issue_id: int) -> None:
+    """Post-commit follow-up only; never restore, rewrite, or undo a completed import."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    if session.new or session.dirty or session.deleted or session.in_transaction():
+        raise ValueError("Replacement reconciliation requires a committed session")
+    # A failed follow-up must not expire the completed import's response objects.
+    async with async_sessionmaker(session.bind, expire_on_commit=False)() as recovery_session:
+        try:
+            await _reconcile_metadata_replacements(recovery_session, issue_id)
+        except Exception:
+            await recovery_session.rollback()
+            structlog.get_logger(__name__).exception(
+                "partial_issue_replacement_followup_failed", issue_id=issue_id
+            )
+
+
+async def _reconcile_metadata_replacements(session: AsyncSession, issue_id: int) -> None:
+    from pullbox.services.archive_metadata_binding import revalidate_archive_metadata_target
+
+    pending = list(
+        await session.scalars(
+            select(PendingMatch)
+            .where(
+                PendingMatch.issue_id == issue_id, PendingMatch.status == PendingMatchStatus.PENDING
+            )
+            .order_by(PendingMatch.id)
+            .limit(100)
+        )
+    )
+    ids = [p.id for p in pending if needs_complete_copy(p.match_details or {}, p.release_title)]
+    await session.commit()
+    for pending_id in ids:
+        try:
+            prepared = await prepare_direct_metadata_recovery(session, pending_id)
+            if not (
+                prepared.preview.superseded
+                and prepared.preview.ready
+                and prepared.preview.unchanged
+            ):
+                await session.rollback()
+                continue
+            assert prepared.file_target is not None
+            await session.commit()
+            await lock_file_mutation_admission(session)
+            await revalidate_archive_metadata_target(session, prepared.file_target)
+            await asyncio.to_thread(prepared.file_target.check_unchanged)
+            await _check_source(prepared.owner)
+            file = await session.get(LibraryFile, prepared.owner.file_id)
+            if file is None or file.issue_id != issue_id:
+                raise DirectMetadataRecoveryError("The replacement library binding changed.")
+            await _complete(
+                session,
+                prepared.owner,
+                file,
+                uuid5(
+                    NAMESPACE_URL, f"partial-replacement:{pending_id}:{prepared.preview.review_key}"
+                ),
+                prepared.preview.review_key,
+            )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            structlog.get_logger(__name__).warning(
+                "partial_issue_replacement_unverified",
+                issue_id=issue_id,
+                pending_id=pending_id,
+                exc_info=True,
+            )
+
+
+async def dismiss_incomplete_recovery(session: AsyncSession, pending_id: int) -> None:
+    """Dismiss the notification, not the issue or files; do not blocklist a release."""
+    await lock_file_mutation_admission(session)
+    owner = await _read_owner(session, pending_id, validate_library=False)
+    pending = await session.get(PendingMatch, pending_id)
+    assert pending is not None
+    if not needs_complete_copy(pending.match_details or {}, pending.release_title):
+        raise DirectMetadataRecoveryError("This recovery does not identify an incomplete copy.")
+    attempt = await session.get(DirectAcquisitionAttempt, owner.attempt_id)
+    artifact = await session.get(DirectArtifactAttempt, owner.artifact_id)
+    assert attempt is not None and artifact is not None
+    now = datetime.now(UTC)
+    transition_acquisition(attempt, DirectAcquisitionState.FAILED, at=now)
+    transition_artifact(artifact, DirectArtifactState.FAILED, at=now)
+    attempt.error_message = artifact.error_message = INCOMPLETE_RECOVERY_DISMISSED
+    attempt.next_retry_at = artifact.next_retry_at = None
+    advance_acquisition_progress(
+        attempt,
+        revision=attempt.progress_revision + 1,
+        snapshot={"schema_version": 1, "stage": "failed", "artifact_attempt_id": artifact.id},
+    )
+    history = await sync_direct_download_history(
+        session, attempt, artifact, at=now, update_issue_status=False
+    )
+    await project_post_processing_operation_progress(session, history)
+    pending.status = PendingMatchStatus.REJECTED
+    pending.resolved_at = now
+    pending.resolved_by = "user"
+    pending.match_details = {
+        **pending.match_details,
+        "resolution_reason": "incomplete_copy_dismissed",
+    }
+    await session.flush()
+
+
 class DirectMetadataRecoveryPreview(BaseModel):
     issue_id: int
     file_name: str
@@ -76,6 +189,7 @@ class DirectMetadataRecoveryPreview(BaseModel):
     converts_to_cbz: bool = False
     restores_copy: bool = False
     superseded: bool = False
+    replacement_required: bool = False
 
 
 @dataclass(frozen=True)
@@ -103,7 +217,27 @@ class PreparedRecovery:
     file_target: ArchiveMetadataTarget | None
 
 
-async def _read_owner(session: AsyncSession, pending_id: int) -> RecoveryOwner:
+async def record_incomplete_recovery(
+    session: AsyncSession, pending_id: int
+) -> DirectMetadataRecoveryPreview:
+    """Persist a typed partial-issue diagnostic after verified preview rejection."""
+    owner = await _read_owner(session, pending_id)
+    pending = await session.get(PendingMatch, pending_id)
+    assert pending is not None
+    pending.match_details = {**pending.match_details, "metadata_failure_code": "partial_issue"}
+    await session.flush()
+    return DirectMetadataRecoveryPreview(
+        issue_id=owner.issue_id,
+        file_name=owner.source.name,
+        review_key="0" * 64,
+        ready=False,
+        replacement_required=True,
+    )
+
+
+async def _read_owner(
+    session: AsyncSession, pending_id: int, *, validate_library: bool = True
+) -> RecoveryOwner:
     pending = await session.get(PendingMatch, pending_id, populate_existing=True)
     if (
         pending is None
@@ -169,17 +303,21 @@ async def _read_owner(session: AsyncSession, pending_id: int) -> RecoveryOwner:
         raise DirectMetadataRecoveryError(
             "The download history changed. Refresh the queue before retrying."
         )
-    files = list(
-        await session.scalars(
-            select(LibraryFile).where(LibraryFile.issue_id == pending.issue_id).limit(2)
+    files = (
+        list(
+            await session.scalars(
+                select(LibraryFile).where(LibraryFile.issue_id == pending.issue_id).limit(2)
+            )
         )
+        if validate_library
+        else []
     )
     if len(files) > 1:
         raise DirectMetadataRecoveryError(
             "This issue has multiple registered files. Reconcile them before recovery."
         )
     file = files[0] if files else None
-    if file is None:
+    if file is None and validate_library:
         issue = await session.get(Issue, pending.issue_id)
         if issue is None or issue.status is not IssueStatus.WANTED:
             raise DirectMetadataRecoveryError(
@@ -334,10 +472,7 @@ async def _complete(
     if owner.superseded:
         transition_acquisition(attempt, DirectAcquisitionState.FAILED, at=now)
         transition_artifact(artifact, DirectArtifactState.FAILED, at=now)
-        attempt.error_message = (
-            "Superseded by a verified library copy; "
-            "the previous transfer was not marked successful."
-        )
+        attempt.error_message = METADATA_RECOVERY_SUPERSEDED
         artifact.error_message = attempt.error_message
     else:
         transition_acquisition(attempt, DirectAcquisitionState.POST_PROCESSING, at=now)
@@ -362,7 +497,12 @@ async def _complete(
         },
     )
     history = await sync_direct_download_history(
-        session, attempt, artifact, at=now, final_path=file.file_path
+        session,
+        attempt,
+        artifact,
+        at=now,
+        final_path=file.file_path,
+        update_issue_status=not owner.superseded,
     )
     await project_post_processing_operation_progress(session, history, None)
     pending.status = PendingMatchStatus.APPROVED

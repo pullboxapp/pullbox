@@ -12,7 +12,16 @@
         <div class="modal-body min-h-0 space-y-4 p-5" :aria-busy="busy">
           <p class="text-sm text-pb-text-sec" x-show="!recovery && (!preview || !preview.converts_to_cbz)">ComicInfo.xml and MetronInfo.xml will use the same reconciled metadata. Comic pages and your edits are preserved. This does not rename or move the file.</p>
           <p class="text-sm text-pb-text-sec" x-show="!recovery && preview && preview.converts_to_cbz" x-cloak>This managed file will be converted to CBZ with both reconciled XML files. Reading order and your metadata choices are preserved. Its original is saved in your configured library trash directory. Download originals are not changed. After completion, retry the failed download in Post-processing.</p>
-          <p class="text-sm text-pb-text-sec" x-show="recovery">Review the retained file and reconcile its metadata. No new download is requested, and the original download is preserved. The recovery entry clears only after verified completion.</p>
+          <p class="text-sm text-pb-text-sec" x-show="recovery && !(preview && preview.replacement_required)">Review the retained file and reconcile its metadata. No new download is requested, and the original download is preserved. The recovery entry clears only after verified completion.</p>
+          <div x-show="preview && preview.replacement_required" x-cloak class="space-y-3" data-testid="incomplete-copy-recovery">
+            <h3 class="text-pb-text font-semibold">Incomplete copy: replacement needed</h3>
+            <p class="text-sm text-pb-text-sec">This file contains a story-only extract, not a complete issue. Changing metadata cannot restore missing stories. Find or import a complete copy, then confirm replacement. The current file stays in place until replacement succeeds.</p>
+            <div class="flex flex-wrap gap-2">
+              <a class="btn-primary" :href="replacementUrl('search')" hx-boost="false">Find complete copy</a>
+              <a class="btn-ghost" :href="replacementUrl('import')" hx-boost="false">Import replacement</a>
+              <button type="button" class="btn-ghost" @click="dismissReplacement()" :disabled="busy">Dismiss recovery</button>
+            </div>
+          </div>
           <p class="text-sm text-pb-text-sec" x-show="recovery && preview && preview.restores_copy" x-cloak>The library copy is no longer registered. Your approval will restore a managed copy from the retained download, without replacing an existing library file.</p>
           <p class="text-sm text-pb-text-sec" x-show="recovery && preview && preview.converts_to_cbz" x-cloak>The managed copy will be converted to CBZ with reconciled ComicInfo.xml and MetronInfo.xml. Comic pages are preserved.</p>
           <p class="text-sm text-pb-text-sec" x-show="recovery && preview && preview.superseded" x-cloak>A different, verified library copy now owns this issue. This closes the obsolete recovery entry without changing that copy or marking the earlier transfer successful.</p>
@@ -60,8 +69,9 @@
           <button type="button" class="btn-ghost" @click="close()">Close</button>
           <button type="button" class="btn-ghost" @click="cancel()" x-show="active()" :disabled="busy || (job && job.state === 'CANCELLING')">Cancel write</button>
           <button type="button" class="btn-primary" @click="loadPreview()" x-show="!resolved && !active() && (!preview || job) && (!job || job.state !== 'PAUSED')" :disabled="busy">Preview again</button>
+          <button type="button" class="btn-ghost" @click="loadPreview()" x-show="preview && preview.replacement_required && !job" :disabled="busy">Recheck replacement</button>
           <button type="button" class="btn-ghost" @click="loadPreview(false)" x-show="preview && !job && ((preview.conflicts || []).length || choicesDirty)" :disabled="busy || !choicesDirty">Update preview</button>
-          <button type="button" class="btn-primary" @click="write()" x-show="preview && !job && (!preview.unchanged || recovery)" :disabled="busy || !canWrite()" x-text="recovery ? (preview && preview.restores_copy ? 'Restore and finish recovery' : 'Finish recovery') : (preview && preview.converts_to_cbz ? 'Convert to CBZ and write metadata' : 'Write both metadata files')">Write both metadata files</button>
+          <button type="button" class="btn-primary" @click="write()" x-show="preview && !preview.replacement_required && !job && (!preview.unchanged || recovery)" :disabled="busy || !canWrite()" x-text="recovery ? (preview && preview.restores_copy ? 'Restore and finish recovery' : 'Finish recovery') : (preview && preview.converts_to_cbz ? 'Convert to CBZ and write metadata' : 'Write both metadata files')">Write both metadata files</button>
         </footer>
       </section>
     </div>

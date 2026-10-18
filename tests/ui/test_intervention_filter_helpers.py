@@ -115,6 +115,7 @@ def test_build_intervention_item_meta_formats_protocol_outcome_and_source() -> N
     )
 
     assert build_intervention_item_meta(pending_match) == {
+        "replacement_recovery": False,
         "pack_recovery": False,
         "pack_review_reason": "",
         "protocol_label": "Torrent",

@@ -842,6 +842,9 @@ async def htmx_intervention_reject(
         return Response(status_code=404)
 
     release_title = pm.release_title
+    from pullbox.core.partial_issue import needs_complete_copy
+
+    incomplete_copy = needs_complete_copy(pm.match_details or {}, pm.release_title)
     form_getter = getattr(request, "form", None)
     form = await form_getter() if callable(form_getter) else {}
     reason = str(form.get("reason", "") or "")
@@ -882,7 +885,9 @@ async def htmx_intervention_reject(
         return _toast_response(
             _templates().TemplateResponse(request, template_name, ctx),
             (
-                "Release rejected and added to the blocklist."
+                "Recovery dismissed. The incomplete file and ownership were left unchanged."
+                if incomplete_copy
+                else "Release rejected and added to the blocklist."
                 if blocklisted
                 else "Failed release dismissed without blocklisting."
             ),

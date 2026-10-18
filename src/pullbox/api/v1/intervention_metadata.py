@@ -9,10 +9,13 @@ from pullbox.api.deps import DbSession, InteractiveOperatorUser
 from pullbox.api.v1.issue_metadata_links import LocalId, file_job_status
 from pullbox.models.pending_match import PendingMatch, PendingMatchStatus
 from pullbox.schemas.issue_file_metadata import FileMetadataApproval, FileMetadataReview
+from pullbox.services.archive_metadata_binding import ArchiveMetadataBindingError
 from pullbox.services.direct_metadata_recovery import (
     DirectMetadataRecoveryError,
     DirectMetadataRecoveryPreview,
+    dismiss_incomplete_recovery,
     prepare_direct_metadata_recovery,
+    record_incomplete_recovery,
 )
 from pullbox.services.issue_file_metadata import file_metadata_error
 from pullbox.services.library_mutation_coordination import lock_file_mutation_admission
@@ -42,6 +45,25 @@ async def preview(
                 session, pending_id, choices=body.choices if body else None
             )
         ).preview
+    except (ValueError, OSError) as exc:
+        if isinstance(exc, ArchiveMetadataBindingError) and exc.code == "partial_issue":
+            try:
+                replacement = await record_incomplete_recovery(session, pending_id)
+                await session.commit()
+                return replacement
+            except (ValueError, OSError) as changed:
+                raise _error(changed) from changed
+        raise _error(exc) from exc
+
+
+@router.post("/{pending_id}/file-metadata/dismiss")
+async def dismiss(
+    pending_id: LocalId, session: DbSession, _user: InteractiveOperatorUser
+) -> dict[str, bool]:
+    try:
+        await dismiss_incomplete_recovery(session, pending_id)
+        await session.commit()
+        return {"dismissed": True}
     except (ValueError, OSError) as exc:
         raise _error(exc) from exc
 

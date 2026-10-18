@@ -34,6 +34,238 @@ from tests.integration.metadata_identity.test_direct_paired_metadata import (
 from tests.unit.test_nonzip_metadata_writing import nonzip_archive
 
 
+async def _partial_case(factory, tmp_path):
+    attempt_id, artifact_id, issue_id, source = await direct_artifact(factory, tmp_path)
+    with ZipFile(source, "w") as archive:
+        archive.writestr("page.jpg", b"story pages")
+        archive.writestr("ComicInfo.xml", "<ComicInfo><Number>50-X (B Story)</Number></ComicInfo>")
+    assert (
+        await execute(factory, tmp_path, attempt_id, artifact_id)
+    ).state is DirectAcquisitionState.INTERVENTION
+    async with factory() as session:
+        pending = await session.scalar(select(PendingMatch))
+        return pending.id, attempt_id, issue_id, source
+
+
+@pytest.mark.usefixtures("paired_download_setting")
+async def test_embedded_partial_preview_returns_replacement_actions_and_blocks_write(
+    identity_probe_db, tmp_path
+):
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    from pullbox.api.v1 import intervention_metadata
+    from pullbox.schemas.issue_file_metadata import FileMetadataApproval
+
+    _, factory, _ = identity_probe_db
+    pending_id, _, issue_id, source = await _partial_case(factory, tmp_path)
+    before = source.read_bytes()
+    async with factory() as session:
+        preview = await intervention_metadata.preview(pending_id, session, SimpleNamespace())
+        assert preview.replacement_required is True
+        assert preview.issue_id == issue_id and not preview.ready
+        with pytest.raises(HTTPException) as error:
+            await intervention_metadata.write(
+                pending_id, FileMetadataApproval(review_key="a" * 64), session, SimpleNamespace()
+            )
+        assert error.value.status_code == 409
+    async with factory() as session:
+        pending = await session.get(PendingMatch, pending_id)
+        assert pending.status == "pending"
+        assert pending.match_details["metadata_failure_code"] == "partial_issue"
+    assert source.read_bytes() == before
+
+
+@pytest.mark.usefixtures("paired_download_setting")
+@pytest.mark.parametrize(
+    "issue_status", [IssueStatus.OWNED, IssueStatus.DOWNLOADING, IssueStatus.SKIPPED]
+)
+async def test_dismissing_incomplete_recovery_preserves_files_and_does_not_blocklist(
+    identity_probe_db, tmp_path, issue_status
+):
+    from pullbox.models.blocklist import BlocklistEntry
+
+    _, factory, _ = identity_probe_db
+    pending_id, attempt_id, issue_id, source = await _partial_case(factory, tmp_path)
+    before = source.read_bytes()
+    async with factory() as session:
+        file = await session.scalar(select(LibraryFile))
+        path = Path(file.file_path)
+        copy = path.read_bytes()
+        issue = await session.get(Issue, issue_id)
+        issue.status = issue_status
+        if issue_status is IssueStatus.SKIPPED:
+            await session.delete(file)
+        await session.commit()
+        assert await InterventionService().reject_match(session, pending_id) is False
+        await session.commit()
+        pending = await session.get(PendingMatch, pending_id)
+        assert pending.status == "rejected"
+        assert pending.match_details["resolution_reason"] == "incomplete_copy_dismissed"
+        assert (
+            await session.get(DirectAcquisitionAttempt, attempt_id)
+        ).state is DirectAcquisitionState.FAILED
+        assert (await session.get(Issue, issue_id)).status is issue_status
+        history = await session.scalar(select(DownloadHistory))
+        assert history.state is DownloadState.FAILED
+        await _assert_recovery_notifications_quiet(session, history.id)
+        assert await session.scalar(select(func.count()).select_from(BlocklistEntry)) == 0
+    assert source.read_bytes() == before and path.read_bytes() == copy
+
+
+async def _assert_recovery_notifications_quiet(session, history_id):
+    from pullbox.models.operation_progress import (
+        OperationProgress,
+        OperationProgressType,
+        OperationProgressVisibility,
+    )
+
+    operations = list(
+        await session.scalars(
+            select(OperationProgress).where(
+                OperationProgress.operation_key == str(history_id),
+                OperationProgress.operation_type.in_(
+                    [
+                        OperationProgressType.DOWNLOAD,
+                        OperationProgressType.POST_PROCESSING,
+                    ]
+                ),
+            )
+        )
+    )
+    assert len(operations) == 2
+    assert all(not op.attention_required for op in operations)
+    assert all(op.visibility is OperationProgressVisibility.QUIET for op in operations)
+
+
+@pytest.mark.usefixtures("paired_download_setting")
+@pytest.mark.parametrize("replacement", ["complete", "partial", "wrong_issue", "changed_source"])
+async def test_partial_recovery_closes_only_after_verified_complete_replacement(
+    identity_probe_db, tmp_path, replacement
+):
+    from pullbox.services.direct_metadata_recovery import reconcile_metadata_replacements
+    from pullbox.services.issue_import_service import (
+        execute_manual_issue_import,
+        prepare_manual_issue_import,
+    )
+
+    _, factory, _ = identity_probe_db
+    pending_id, attempt_id, issue_id, source = await _partial_case(factory, tmp_path)
+    original = source.read_bytes()
+    if replacement in {"complete", "changed_source"}:
+        complete = tmp_path / "complete.cbz"
+        with ZipFile(complete, "w") as archive:
+            archive.writestr("page.jpg", b"complete issue pages")
+        async with factory() as session:
+            prepared = await prepare_manual_issue_import(
+                session, issue_id=issue_id, file_path=str(complete), move_to_library=True
+            )
+            await execute_manual_issue_import(session, prepared)
+            await session.commit()
+        if replacement == "changed_source":
+            source.write_bytes(b"different retained download")
+    elif replacement == "wrong_issue":
+        async with factory() as session:
+            file = await session.scalar(select(LibraryFile))
+            with ZipFile(file.file_path, "w") as archive:
+                archive.writestr("page.jpg", b"other issue")
+                archive.writestr("ComicInfo.xml", "<ComicInfo><Number>51</Number></ComicInfo>")
+    async with factory() as session:
+        file = await session.scalar(select(LibraryFile))
+        path = Path(file.file_path)
+        before = path.read_bytes(), path.stat().st_mtime_ns
+        await session.commit()
+        await reconcile_metadata_replacements(session, issue_id)
+        await reconcile_metadata_replacements(session, issue_id)
+    async with factory() as session:
+        pending = await session.get(PendingMatch, pending_id)
+        assert pending.status == ("approved" if replacement == "complete" else "pending")
+        if replacement == "complete":
+            assert pending.match_details["resolution_reason"] == "metadata_superseded"
+            assert (
+                await session.get(DirectAcquisitionAttempt, attempt_id)
+            ).state is DirectAcquisitionState.FAILED
+            history = await session.scalar(select(DownloadHistory))
+            await _assert_recovery_notifications_quiet(session, history.id)
+        assert (await session.scalar(select(DownloadHistory))).state is DownloadState.FAILED
+    assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+    if replacement != "changed_source":
+        assert source.read_bytes() == original
+
+
+@pytest.mark.usefixtures("paired_download_setting")
+@pytest.mark.parametrize("entrypoint", ["api", "background", "direct"])
+async def test_successful_replacement_entrypoints_retire_partial_recovery(
+    identity_probe_db, tmp_path, monkeypatch, entrypoint
+):
+    from types import SimpleNamespace
+
+    from pullbox.api.v1.issues import import_file_for_issue
+    from pullbox.models.direct_acquisition import DirectArtifactState
+    from pullbox.schemas.issue import ManualFileImportRequest
+    from pullbox.services.direct_artifact_quarantine import DirectArtifactQuarantine
+    from pullbox.tasks import issue_import_task
+    from tests.unit.test_direct_acquisition_executor import _attempt
+
+    _, factory, _ = identity_probe_db
+    pending_id, attempt_id, issue_id, source = await _partial_case(factory, tmp_path)
+    original = source.read_bytes()
+    complete = tmp_path / "complete.cbz"
+    with ZipFile(complete, "w") as archive:
+        archive.writestr("page.jpg", b"complete issue pages")
+    if entrypoint == "api":
+        async with factory() as session:
+            response = await import_file_for_issue(
+                issue_id,
+                ManualFileImportRequest(file_path=str(complete)),
+                SimpleNamespace(),
+                session,
+            )
+            assert response.issue_id == issue_id
+    elif entrypoint == "background":
+        monkeypatch.setattr(issue_import_task, "get_session_factory", lambda: factory)
+        monkeypatch.setattr(issue_import_task, "_queue_issue_import_progress", AsyncMock())
+        await issue_import_task._run_issue_import(issue_id, {"file_path": str(complete)})
+        assert issue_import_task.get_issue_import_progress_state(issue_id).state == "completed"
+    else:
+        async with factory() as session:
+            replacement = _attempt()
+            replacement.request_key = "complete-replacement"
+            replacement.issue_id = issue_id
+            replacement.replace_existing_file = True
+            replacement.state = DirectAcquisitionState.POST_PROCESSING
+            artifact = replacement.artifact_attempts[0]
+            artifact.state = DirectArtifactState.VALIDATING
+            session.add(replacement)
+            await session.commit()
+            workspace = DirectArtifactQuarantine(tmp_path / "quarantine").prepare(
+                acquisition_id=replacement.id, artifact_id=artifact.id
+            )
+            target = workspace.directory / f"artifact-{artifact.id}.cbz"
+            target.write_bytes(complete.read_bytes())
+            artifact.quarantine_path = str(target)
+            await session.commit()
+            replacement_id, artifact_id = replacement.id, artifact.id
+        result = await execute(factory, tmp_path, replacement_id, artifact_id)
+        assert result.state is DirectAcquisitionState.COMPLETED
+    async with factory() as session:
+        pending = await session.get(PendingMatch, pending_id)
+        assert pending.status == "approved"
+        assert pending.match_details["resolution_reason"] == "metadata_superseded"
+        assert (
+            await session.get(DirectAcquisitionAttempt, attempt_id)
+        ).state is DirectAcquisitionState.FAILED
+        history = await session.scalar(
+            select(DownloadHistory).where(DownloadHistory.external_id == f"direct:{attempt_id}")
+        )
+        assert history.state is DownloadState.FAILED and history.imported_at is None
+        file = await session.scalar(select(LibraryFile).where(LibraryFile.issue_id == issue_id))
+        with ZipFile(file.file_path) as archive:
+            assert archive.read("page.jpg") == b"complete issue pages"
+    assert source.read_bytes() == original
+
+
 @pytest.mark.usefixtures("paired_download_setting")
 @pytest.mark.parametrize("remounted", [False, True])
 async def test_story_only_retained_copy_cannot_be_completed_as_full_issue(

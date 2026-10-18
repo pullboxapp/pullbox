@@ -889,7 +889,10 @@ async def test_import_file_and_progress_route_branches(
                 select(Issue).options(joinedload(Issue.series)).where(Issue.id == issue_id)
             )
         ).scalar_one()
-        issue.series.library_root_id = 1
+        root = LibraryRoot(name="Manual import", path=str(tmp_path))
+        session.add(root)
+        await session.flush()
+        issue.series.library_root_id = root.id
         prepared = SimpleNamespace(
             source_path=tmp_path / "issue.cbz",
             issue=issue,
@@ -898,7 +901,7 @@ async def test_import_file_and_progress_route_branches(
         library_file = LibraryFile(
             id=55,
             issue_id=issue_id,
-            library_root_id=1,
+            library_root_id=root.id,
             file_path="/library/issue.cbz",
             file_name="issue.cbz",
             file_size=123,

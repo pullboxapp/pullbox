@@ -41,6 +41,36 @@ if TYPE_CHECKING:
 os.environ.setdefault("PULLBOX_SECRET_KEY", "test-secret-key-for-intervention-ui")
 
 
+@pytest.mark.parametrize("embedded_only", [False, True])
+async def test_partial_issue_recovery_offers_replacement_not_metadata_review(
+    client, _db_factory, embedded_only
+):
+    [pending_id] = await _seed_pending_matches(_db_factory, count=1)
+    async with _db_factory.begin() as session:
+        pending = await session.get(PendingMatch, pending_id)
+        issue_id = pending.issue_id
+        pending.release_title = (
+            "Marvel Comics Presents 158.cbz"
+            if embedded_only
+            else "Marvel Comics Presents 158 B Story (1994) (digital)"
+        )
+        pending.match_details = {
+            "source_kind": "direct",
+            "failure_class": "post_process",
+            "failure_code": "direct_metadata_review_required",
+            "metadata_failure_code": "partial_issue" if embedded_only else None,
+        }
+    response = await client.get("/intervention?tab=recovery")
+    assert response.status_code == 200
+    assert "Incomplete copy: replacement needed" in response.text
+    assert f'href="/issues/{issue_id}?replacement=search"' in response.text
+    assert f'href="/issues/{issue_id}?replacement=import"' in response.text
+    assert "Find complete copy" in response.text
+    assert "Import replacement" in response.text
+    assert f'data-testid="intervention-review-metadata-{pending_id}"' not in response.text
+    assert "does not fix or delete the incomplete file" in response.text
+
+
 @pytest.mark.parametrize("action", ["recheck", "retry", "cancel"])
 async def test_airdcpp_recovery_actions_use_verified_queue_path(
     client, _db_factory, monkeypatch, action

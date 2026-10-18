@@ -7,6 +7,7 @@ from typing import cast as typing_cast
 
 from sqlalchemy import ColumnElement, and_, case, func, or_, true
 
+from pullbox.core.partial_issue import needs_complete_copy
 from pullbox.models.indexer import IndexerConfig
 from pullbox.models.issue import Issue
 from pullbox.models.pending_match import PendingMatch, PendingMatchStatus
@@ -319,7 +320,9 @@ def build_intervention_item_meta(pending_match: Any) -> dict[str, object]:
     )
     safety_block = details.get("safety_block")
     safety_block = safety_block if isinstance(safety_block, dict) else {}
+    replacement = needs_complete_copy(details, getattr(pending_match, "release_title", None))
     return {
+        "replacement_recovery": lane == "recovery" and replacement,
         "pack_recovery": lane == "recovery"
         and details.get("failure_code") in RECOVERABLE_PACK_FAILURES,
         "pack_review_reason": str(details.get("pack_review_reason") or ""),
@@ -333,7 +336,13 @@ def build_intervention_item_meta(pending_match: Any) -> dict[str, object]:
             bool(pending_match.is_torrent),
             str(details.get("source_kind") or ""),
         ),
-        "outcome_label": intervention_outcome_label(str(pending_match.status)),
+        "outcome_label": (
+            "Dismissed (incomplete copy)"
+            if details.get("resolution_reason") == "incomplete_copy_dismissed"
+            else "Resolved by replacement"
+            if details.get("resolution_reason") == "metadata_superseded"
+            else intervention_outcome_label(str(pending_match.status))
+        ),
         "review_reason_codes": reason_codes,
         "review_reason_labels": reason_labels,
         "review_reason_summary": intervention_review_reason_summary(reason_codes),
@@ -342,7 +351,13 @@ def build_intervention_item_meta(pending_match: Any) -> dict[str, object]:
         "source_label": source_label.strip() or "Unknown",
         "rejection_reason": str(details.get("rejection_reason") or "").strip(),
         "lane": lane,
-        "recovery_summary": _direct_recovery_summary(details) if lane == "recovery" else "",
+        "recovery_summary": (
+            "Incomplete copy: replacement needed"
+            if lane == "recovery" and replacement
+            else _direct_recovery_summary(details)
+            if lane == "recovery"
+            else ""
+        ),
         "metadata_recovery": lane == "recovery"
         and details.get("failure_code") == "direct_metadata_review_required",
     }

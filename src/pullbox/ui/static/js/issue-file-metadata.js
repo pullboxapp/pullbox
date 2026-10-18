@@ -67,6 +67,32 @@ function issueFileMetadata(issueId) {
     canWrite: function () {
       return !!this.preview && this.preview.ready !== false && !this.choicesDirty;
     },
+    replacementUrl: function (action) {
+      return this.preview && Number.isSafeInteger(this.preview.issue_id)
+        ? "/issues/" + this.preview.issue_id + "?replacement=" + action : "#";
+    },
+    dismissReplacement: async function () {
+      if (this.busy || !this.recovery || !this.preview || !this.preview.replacement_required) return;
+      this.open = false;
+      await this.$nextTick();
+      var confirmed = await pbConfirm({ title: "Dismiss recovery?", message: "This removes the recovery notification. It does not fix or delete the incomplete file, change ownership, or blocklist the release.", confirmText: "Dismiss recovery" });
+      if (!confirmed) {
+        this.open = true;
+        this.$nextTick(() => this.$refs.dialog.focus({ preventScroll: true }));
+        return;
+      }
+      this.busy = true;
+      try {
+        await this.request(endpoint + "/dismiss", {});
+        this.resolved = true;
+        this.close();
+      } catch (error) {
+        this.error = error.message;
+        this.open = true;
+        this.$nextTick(() => this.$refs.dialog.focus({ preventScroll: true }));
+      }
+      finally { this.busy = false; }
+    },
     loadPreview: async function (reset = true) {
       if (this.busy) return;
       clearTimeout(this.timer);

@@ -47,6 +47,11 @@ _COPY_KEY = "paired_metadata_copy"
 class DirectMetadataReviewError(ValidationError):
     """A managed direct copy needs attention before acquisition completion."""
 
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        if code is not None:
+            self.code = code
+
 
 @dataclass
 class DirectMetadataHandoff:
@@ -204,6 +209,10 @@ class DirectMetadataHandoff:
             await session.refresh(attempt)
             return Path(self.final_path)
         except ValueError as exc:
+            if getattr(exc, "code", None) == "partial_issue":
+                raise DirectMetadataReviewError(
+                    file_metadata_error(exc), code="partial_issue"
+                ) from exc
             raise DirectMetadataReviewError(
                 f"{file_metadata_error(exc)} Review file metadata on the issue, "
                 "then retry this acquisition."

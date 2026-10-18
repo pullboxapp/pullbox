@@ -320,6 +320,8 @@ class InterventionService:
         )
         if artifact_host_kind is not None:
             details["artifact_host_kind"] = artifact_host_kind
+        if (attempt.plan_snapshot or {}).get("metadata_failure_code") == "partial_issue":
+            details["metadata_failure_code"] = "partial_issue"
         safety_review = (attempt.plan_snapshot or {}).get("safety_review")
         if isinstance(safety_review, dict):
             details["safety_block"] = dict(safety_review)
@@ -671,6 +673,14 @@ class InterventionService:
             raise ValueError(f"Pending match {pending_id} not found")
         if pm.status != PendingMatchStatus.PENDING:
             raise ValueError(f"Pending match {pending_id} is not pending (status={pm.status})")
+
+        from pullbox.core.partial_issue import needs_complete_copy
+
+        if needs_complete_copy(pm.match_details, pm.release_title):
+            from pullbox.services.direct_metadata_recovery import dismiss_incomplete_recovery
+
+            await dismiss_incomplete_recovery(session, pending_id)
+            return False
 
         if pm.match_details.get("source_kind") == "dc" and pm.match_details.get("failure_class"):
             raise ValueError("Use Cancel request to safely stop this AirDC++ request.")

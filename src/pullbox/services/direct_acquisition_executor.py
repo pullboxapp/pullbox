@@ -728,6 +728,8 @@ class DirectAcquisitionExecutor:
             artifact.failure_class = DirectArtifactFailureClass.POST_PROCESS
             artifact.failure_code = attempt.failure_code
             artifact.error_message = attempt.error_message
+            if isinstance(exc, DirectMetadataReviewError) and exc.code == "partial_issue":
+                attempt.plan_snapshot = {**attempt.plan_snapshot, "metadata_failure_code": exc.code}
             transition_artifact(artifact, DirectArtifactState.INTERVENTION, at=self._now())
             transition_acquisition(attempt, DirectAcquisitionState.INTERVENTION, at=self._now())
             await InterventionService().create_direct_attempt_intervention(session, attempt)
@@ -750,6 +752,11 @@ class DirectAcquisitionExecutor:
             force=True,
             final_path=str(processed.final_path),
         )
+        from pullbox.services.direct_metadata_recovery import reconcile_metadata_replacements
+
+        for imported_issue_id in processed.imported_issue_ids:
+            await reconcile_metadata_replacements(session, imported_issue_id)
+        attempt, artifact = await _load_attempt(session, acquisition_id, artifact_id)
         if len(pack_coverage) > 1:
             from pullbox.services.direct_pack_completion import reconcile_completed_pack_issues
 

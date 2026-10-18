@@ -8,6 +8,206 @@ from tests.e2e.accessibility import assert_no_axe_violations
 pytestmark = pytest.mark.e2e
 
 
+def test_partial_queue_dismiss_confirmation(authed_page, seeded_server):
+    from pullbox.database import get_session_factory
+    from pullbox.models.pending_match import PendingMatch
+    from tests.e2e.conftest import _run_async_blocking
+
+    async def seed():
+        async with get_session_factory()() as session:
+            pending = PendingMatch(
+                issue_id=1,
+                release_title="Batman 001 (B Story).cbz",
+                download_url="pullbox-direct://attempt/100",
+                confidence="high",
+                match_details={
+                    "source_kind": "direct",
+                    "failure_class": "post_process",
+                    "failure_code": "direct_metadata_review_required",
+                },
+            )
+            session.add(pending)
+            await session.commit()
+            return pending.id
+
+    pending_id = _run_async_blocking(seed())
+
+    async def cleanup():
+        async with get_session_factory()() as session:
+            pending = await session.get(PendingMatch, pending_id)
+            if pending:
+                await session.delete(pending)
+                await session.commit()
+
+    page = authed_page
+    dismissed = []
+    page.route(
+        f"**/htmx/intervention/{pending_id}/reject",
+        lambda route: (dismissed.append(route.request.method), route.fulfill(status=204)),
+    )
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    try:
+        page.goto(f"{seeded_server}/intervention?tab=recovery")
+        trigger = page.get_by_test_id(f"intervention-reject-{pending_id}")
+        expect(page.get_by_role("link", name="Find complete copy", exact=True)).to_be_visible()
+        expect(page.get_by_role("link", name="Import replacement", exact=True)).to_be_visible()
+        trigger.click()
+        confirm = page.get_by_role("dialog", name="Dismiss recovery?", exact=True)
+        confirm.get_by_role("button", name="Cancel", exact=True).click()
+        assert dismissed == []
+        trigger.click()
+        confirm.get_by_role("button", name="Dismiss recovery", exact=True).click()
+        expect(confirm).not_to_be_visible()
+        page.wait_for_function("() => !document.querySelector('.htmx-request')")
+        assert dismissed == ["POST"]
+        assert not errors
+    finally:
+        _run_async_blocking(cleanup())
+
+
+def test_replacement_download_requires_confirmation_before_grab(authed_page, seeded_server):
+    page = authed_page
+    page.route(
+        "**/htmx/issues/1/search-results*",
+        lambda route: route.fulfill(
+            content_type="text/html",
+            body="""<div x-data="issueSearchResultActions({issueId: 1, hasLibraryFile: true})">
+            <button class="btn btn-primary" @click="grabRelease($el)" :disabled="grabbing"
+                    data-direct-attempt="42">Download complete copy</button></div>""",
+        ),
+    )
+    grabs = []
+    page.route(
+        "**/api/v1/issues/1/direct-grab",
+        lambda route: (
+            grabs.append(route.request.post_data_json),
+            route.fulfill(json={"queued": True}),
+        ),
+    )
+    page.goto(f"{seeded_server}/issues/1?replacement=search")
+    search = page.get_by_test_id("issue-search-modal")
+    trigger = search.get_by_role("button", name="Download complete copy", exact=True)
+    trigger.click()
+    confirm = page.get_by_role("dialog", name="Download replacement?", exact=True)
+    expect(
+        confirm.get_by_text("stays in place until replacement succeeds", exact=False)
+    ).to_be_visible()
+    assert grabs == []
+    confirm.get_by_role("button", name="Cancel", exact=True).click()
+    expect(search).to_be_visible()
+    expect(trigger).to_be_enabled()
+    assert grabs == []
+    trigger.click()
+    confirm.get_by_role("button", name="Download replacement", exact=True).click()
+    expect(trigger).to_be_enabled()
+    assert grabs == [{"direct_attempt_id": 42}]
+
+
+@pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 390), ("tron", 1280)])
+@pytest.mark.parametrize("action", ["search", "import"])
+def test_partial_recovery_links_open_existing_replacement_workflows(
+    authed_page, seeded_server, theme, width, action
+):
+    page = authed_page
+    page.set_viewport_size({"width": width, "height": 650})
+    endpoint = "**/api/v1/intervention/100/file-metadata"
+    page.route(endpoint + "/job", lambda route: route.fulfill(json={"job": None}))
+    page.route(
+        endpoint + "/preview",
+        lambda route: route.fulfill(
+            json={
+                "issue_id": 1,
+                "file_name": "MCP 158 (B Story).cbz",
+                "review_key": "0" * 64,
+                "ready": False,
+                "replacement_required": True,
+                "conflicts": [],
+                "changes": [],
+            }
+        ),
+    )
+    page.route(
+        "**/htmx/issues/1/search-results*",
+        lambda route: route.fulfill(
+            body="<p>Complete copy candidates</p>", content_type="text/html"
+        ),
+    )
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.goto(f"{seeded_server}/intervention?tab=recovery")
+    page.evaluate("theme => applyTheme(theme)", theme)
+    page.evaluate(
+        "window.dispatchEvent(new CustomEvent('review-direct-metadata', {detail: {pendingId: 100}}))"
+    )
+    dialog = page.get_by_role("dialog", name="Recover downloaded file", exact=True)
+    expect(dialog.get_by_text("Incomplete copy: replacement needed", exact=True)).to_be_visible()
+    expect(dialog.get_by_role("button", name="Finish recovery", exact=True)).not_to_be_visible()
+    expect(dialog.get_by_role("button", name="Preview again", exact=True)).not_to_be_visible()
+    assert_no_axe_violations(
+        page,
+        name=f"partial-recovery-{theme}-{action}",
+        include=['[aria-labelledby="file-metadata-title"]'],
+    )
+    dialog.get_by_role(
+        "link",
+        name="Find complete copy" if action == "search" else "Import replacement",
+        exact=True,
+    ).click()
+    if action == "search":
+        expect(page.get_by_test_id("issue-search-modal")).to_be_visible()
+        expect(page.get_by_text("Complete copy candidates", exact=True)).to_be_visible()
+    else:
+        expect(page.get_by_test_id("file-browser-title")).to_have_text("Select Comic File")
+        expect(page.get_by_test_id("file-browser-title")).to_be_visible()
+    assert "replacement=" not in page.url
+    assert not errors
+
+
+def test_partial_recovery_dismiss_requires_confirmation_without_repairing(
+    authed_page, seeded_server
+):
+    page = authed_page
+    endpoint = "**/api/v1/intervention/100/file-metadata"
+    page.route(endpoint + "/job", lambda route: route.fulfill(json={"job": None}))
+    page.route(
+        endpoint + "/preview",
+        lambda route: route.fulfill(
+            json={
+                "issue_id": 1,
+                "file_name": "MCP 158 (B Story).cbz",
+                "review_key": "0" * 64,
+                "ready": False,
+                "replacement_required": True,
+                "conflicts": [],
+                "changes": [],
+            }
+        ),
+    )
+    dismissed = []
+    page.route(
+        endpoint + "/dismiss",
+        lambda route: (
+            dismissed.append(route.request.method),
+            route.fulfill(json={"dismissed": True}),
+        ),
+    )
+    page.goto(f"{seeded_server}/intervention?tab=recovery")
+    page.evaluate(
+        "window.dispatchEvent(new CustomEvent('review-direct-metadata', {detail: {pendingId: 100}}))"
+    )
+    dialog = page.get_by_role("dialog", name="Recover downloaded file", exact=True)
+    dialog.get_by_role("button", name="Dismiss recovery", exact=True).click()
+    confirm = page.get_by_role("dialog", name="Dismiss recovery?", exact=True)
+    expect(confirm.get_by_text("does not fix or delete", exact=False)).to_be_visible()
+    confirm.get_by_role("button", name="Cancel", exact=True).click()
+    assert not dismissed
+    dialog.get_by_role("button", name="Dismiss recovery", exact=True).click()
+    confirm.get_by_role("button", name="Dismiss recovery", exact=True).click()
+    expect(dialog).not_to_be_visible()
+    assert dismissed == ["POST"]
+
+
 @pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 390), ("tron", 1280)])
 def test_recovery_review_scrolls_and_finishes_without_reacquisition(
     authed_page, seeded_server, theme, width

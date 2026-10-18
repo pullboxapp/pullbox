@@ -106,6 +106,9 @@
                     </form>
                     {% endif %}
                     {% endfor %}
+                    {% elif meta.replacement_recovery %}
+                    <a class="btn-primary btn-sm" href="/issues/{{ pm.issue_id }}?replacement=search" hx-boost="false">Find complete copy</a>
+                    <a class="btn-ghost btn-sm" href="/issues/{{ pm.issue_id }}?replacement=import" hx-boost="false">Import replacement</a>
                     {% elif meta.metadata_recovery %}
                     <button type="button" class="btn-primary btn-sm" data-testid="intervention-review-metadata-{{ pm.id }}"
                       @click="$dispatch('review-direct-metadata', { pendingId: {{ pm.id }} })">Review metadata</button>
@@ -163,10 +166,14 @@
                     {% if not (meta.lane == 'recovery' and pm.match_details.get('source_kind') == 'dc') %}
                     <form
                       hx-post="/htmx/intervention/{{ pm.id }}/reject"
+                      {% if meta.replacement_recovery %}
+                      @submit.prevent="if (await pbConfirm({ title: 'Dismiss recovery?', message: 'This removes the recovery notification. It does not fix or delete the incomplete file, change ownership, or blocklist the release.', confirmText: 'Dismiss recovery' })) htmx.trigger($el, 'confirmed-dismiss')"
+                      hx-trigger="confirmed-dismiss"
+                      {% endif %}
                       hx-target="#intervention-queue-results"
                       hx-swap="outerHTML"
                       hx-sync="#intervention-queue-results:replace"
-                      hx-on::after-request="if ($event.detail.successful) { removeSelection({{ pm.id }}) }"
+                      @htmx:after-request.camel="if ($event.detail.successful) { removeSelection({{ pm.id }}) }"
                     >
                       <input type="hidden" name="tab" value="{{ tab }}">
                       <input type="hidden" name="reason" value="{{ reason_filter }}">
@@ -177,14 +184,16 @@
                       <button
                         type="submit"
                         data-testid="intervention-reject-{{ pm.id }}"
-                        class="downloads-action-btn is-danger"
+                        class="{{ 'btn-ghost btn-sm' if meta.replacement_recovery else 'downloads-action-btn is-danger' }}"
                         data-tip="{{ 'Dismiss recovery' if meta.lane == 'recovery' else 'Reject' }}"
                         data-tip-pos="left"
                         aria-label="{{ 'Dismiss recovery' if meta.lane == 'recovery' else 'Reject' }}"
                       >
+                        {% if meta.replacement_recovery %}Dismiss recovery{% else %}
                         <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                           <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
                         </svg>
+                        {% endif %}
                       </button>
                     </form>
                     {% endif %}
@@ -198,6 +207,11 @@
                       <div class="rounded-2xl border border-pb-border bg-pb-card px-4 py-3">
                         <div class="text-[10px] font-semibold uppercase tracking-wider text-pb-text-dim">{{ 'Recovery needed' if meta.lane == 'recovery' else 'Why it needs review' }}</div>
                         <div class="mt-2 text-sm text-pb-text-sec">{{ meta.recovery_summary if meta.lane == 'recovery' else meta.review_reason_summary }}</div>
+                        {% if meta.replacement_recovery %}
+                        <p class="mt-2 text-sm text-pb-text-sec">This file contains a story-only extract. Find or import a complete copy, then confirm replacement. Changing metadata cannot restore missing stories. The current file stays in place until replacement succeeds.</p>
+                        <p class="mt-2 text-sm text-pb-text-sec">Already replaced it? Recheck the library copy to finish recovery without another download.</p>
+                        <button type="button" class="btn-ghost btn-sm mt-2" @click="$dispatch('review-direct-metadata', { pendingId: {{ pm.id }} })">Recheck replacement</button>
+                        {% endif %}
                         {% if meta.pack_recovery %}
                         <div class="mt-2 text-sm text-pb-text-sec">{{ meta.pack_review_reason }}</div>
                         <div class="mt-2 text-sm text-pb-text-sec">No new download is needed. After correcting the issue match or pack contents, Retry import rechecks the retained pack. You can also choose the correct file using manual import on the issue page. Existing owned and skipped issues are not replaced automatically.</div>

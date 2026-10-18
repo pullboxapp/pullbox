@@ -110,6 +110,7 @@ async def sync_direct_download_history(
     *,
     at: datetime,
     final_path: str | None = None,
+    update_issue_status: bool = True,
 ) -> DownloadHistory:
     """Project durable direct state onto the existing download UI record."""
     history = await ensure_direct_download_history(session, attempt, artifact, at=at)
@@ -129,7 +130,8 @@ async def sync_direct_download_history(
         history.error_message = "Cancelled by user"
     elif attempt.state is DirectAcquisitionState.FAILED:
         history.completed_at = at
-    await _sync_issue_status(session, attempt)
+    if update_issue_status:
+        await _sync_issue_status(session, attempt)
     from pullbox.services.download_operation_progress import (
         project_download_operation_progress,
     )

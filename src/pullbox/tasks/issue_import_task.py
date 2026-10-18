@@ -260,6 +260,9 @@ async def _run_issue_import(issue_id: int, request_payload: dict[str, Any]) -> N
             cancel_requested_after_file_work = issue_id in _issue_import_cancel_requests
             _issue_import_cancel_requests.discard(issue_id)
             await session.commit()
+            from pullbox.services.direct_metadata_recovery import reconcile_metadata_replacements
+
+            await reconcile_metadata_replacements(session, issue_id)
             completed = _set_issue_import_state(
                 issue_id,
                 state="completed",

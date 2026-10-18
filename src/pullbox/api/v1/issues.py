@@ -1236,6 +1236,11 @@ async def import_file_for_issue(
         transfer_method=result.ingest_policy.post_processing_method,
     )
 
+    from pullbox.services.direct_metadata_recovery import reconcile_metadata_replacements
+
+    await session.commit()
+    await reconcile_metadata_replacements(session, issue_id)
+
     return _build_manual_file_import_response(
         issue_id=issue_id,
         library_file=library_file,

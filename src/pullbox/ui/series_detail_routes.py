@@ -803,6 +803,10 @@ async def htmx_issue_search_results(
         "id": bundle.issue.id,
         "series_id": bundle.target.series_id,
         "issue_number": bundle.issue.issue_number,
+        "has_library_file": await session.scalar(
+            select(LibraryFile.id).where(LibraryFile.issue_id == issue_id).limit(1)
+        )
+        is not None,
     }
 
     if bundle.runtime is None:

@@ -120,6 +120,10 @@ async def test_run_issue_import_accepts_positional_progress_callbacks(monkeypatc
     """Converter-style positional progress callbacks should not fail the run."""
 
     issue_import_task._issue_import_states.clear()
+    reconcile = AsyncMock()
+    monkeypatch.setattr(
+        "pullbox.services.direct_metadata_recovery.reconcile_metadata_replacements", reconcile
+    )
 
     prepared = SimpleNamespace(
         source_path=Path("/tmp/imports/Henchgirl 001.pdf"),
@@ -197,6 +201,8 @@ async def test_run_issue_import_accepts_positional_progress_callbacks(monkeypatc
     assert state.state == "completed"
     assert state.file_name == "Henchgirl 001.cbz"
     assert state.match_confidence == "manual"
+    reconcile.assert_awaited_once()
+    assert reconcile.call_args.args[1] == 7
 
 
 @pytest.mark.asyncio
@@ -204,6 +210,10 @@ async def test_run_issue_import_accepts_worker_thread_progress_callbacks(monkeyp
     """Off-thread ComicInfo materialization should still update live progress."""
 
     issue_import_task._issue_import_states.clear()
+    reconcile = AsyncMock()
+    monkeypatch.setattr(
+        "pullbox.services.direct_metadata_recovery.reconcile_metadata_replacements", reconcile
+    )
 
     prepared = SimpleNamespace(
         source_path=Path("/tmp/imports/Aliens Epic Collection.cbz"),
@@ -288,3 +298,5 @@ async def test_run_issue_import_accepts_worker_thread_progress_callbacks(monkeyp
     assert state is not None
     assert state.state == "completed"
     assert state.file_name == "Aliens Epic Collection.cbz"
+    reconcile.assert_awaited_once()
+    assert reconcile.call_args.args[1] == 11

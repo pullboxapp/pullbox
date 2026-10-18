@@ -66,6 +66,10 @@
   {% endif %}
 
   {% include "partials/issue_metadata_content.html" %}
+  <div x-show="replacementAction" x-cloak class="alert-banner alert-banner-warning flex flex-wrap items-center gap-3" role="status">
+    <span>Choose a complete replacement. The current file stays in place until replacement succeeds.</span>
+    <a href="/intervention?tab=recovery" hx-boost="false" class="btn-ghost btn-sm">Back to recovery</a>
+  </div>
   {% include "partials/issue_metadata_links.html" %}
   {% include "partials/issue_detail_library_file.html" %}
 
