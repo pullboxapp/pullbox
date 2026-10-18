@@ -76,6 +76,7 @@ class ValidationResult:
     issue_type_match: bool = False
     size_warning: str | None = None
     year_match_basis: str | None = None
+    rejection_code: str | None = None
 
 
 # Confidence sort order for descending sort
@@ -496,6 +497,7 @@ class ReleaseValidator:
                 series_similarity=float(decision.match_diagnostics.get("series_similarity", 0.0)),
                 match_type=str(decision.match_diagnostics.get("match_type", "none")),
                 issue_type_match=decision.match_method != "type_mismatch",
+                rejection_code=decision.match_method,
             )
 
         year_matched = decision.match_diagnostics.get("year_match")
@@ -580,6 +582,7 @@ class ReleaseValidator:
         series_similarity: float = 0.0,
         match_type: str = "none",
         issue_type_match: bool = False,
+        rejection_code: str | None = None,
     ) -> ValidationResult:
         """Create a rejection ValidationResult."""
         if parsed is None:
@@ -604,4 +607,5 @@ class ReleaseValidator:
             series_similarity=series_similarity,
             match_type=match_type,
             issue_type_match=issue_type_match,
+            rejection_code=rejection_code,
         )

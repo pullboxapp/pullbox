@@ -30,7 +30,10 @@ from pullbox.models.library import LibraryFile
 from pullbox.models.series import Series
 from pullbox.models.story_arc import IssueStoryArc, StoryArc
 from pullbox.schemas.whats_new import WhatsNewIssueSelection
-from pullbox.services.airdcpp_route_tokens import get_airdcpp_route_token_store
+from pullbox.services.airdcpp_route_tokens import (
+    can_override_dc_rejection,
+    get_airdcpp_route_token_store,
+)
 from pullbox.services.airdcpp_search_types import AirDcppSearchProgress
 from pullbox.services.reader_state_service import load_reader_state
 from pullbox.services.reading_query_service import (
@@ -618,6 +621,13 @@ async def htmx_issue_dc_search_results(
         return Response(status_code=404)
 
     template = _templates().get_template("partials/issue_dc_search_results.html")
+    has_library_file = (
+        await session.scalar(
+            select(LibraryFile.id).where(LibraryFile.issue_id == issue_id).limit(1)
+        )
+        is not None
+    )
+    await session.commit()
 
     async def stream() -> AsyncIterator[str]:
         progress_queue: asyncio.Queue[AirDcppSearchProgress] = asyncio.Queue(maxsize=64)
@@ -671,6 +681,20 @@ async def htmx_issue_dc_search_results(
                 }
                 for candidate in outcome.matched
             ]
+            dc_rejected_rows = [
+                {
+                    "candidate": candidate,
+                    "route_token": route_store.issue(
+                        candidate,
+                        issue_id=target.issue_id,
+                        user_id=user.id,
+                        search_log_id=None,
+                    )
+                    if can_override_dc_rejection(candidate)
+                    else None,
+                }
+                for candidate in outcome.rejected
+            ]
             html = template.render(
                 _ctx(
                     request,
@@ -679,9 +703,11 @@ async def htmx_issue_dc_search_results(
                         "id": target.issue_id,
                         "series_id": target.series_id,
                         "issue_number": target.issue_number,
+                        "has_library_file": has_library_file,
                     },
                     outcome=outcome,
                     dc_rows=dc_rows,
+                    dc_rejected_rows=dc_rejected_rows,
                     release_selection=discovery,
                 )
             )

@@ -41,6 +41,7 @@
                 x-data='window.issueSearchResultActions({
                   issueId: {{ issue.id }},
                   seriesId: {{ issue.series_id }},
+                  hasLibraryFile: {{ issue.has_library_file|default(false)|tojson }},
                   csrfToken: {{ csrf_token|tojson }},
                   releaseSelection: {{ release_selection|default(none)|tojson }}
                 })'
@@ -48,7 +49,7 @@
                 <button
                   data-dc-route-token="{{ row.route_token }}"
                   @click="grabRelease($el)"
-                  :disabled="grabbing || grabBusy"
+                  :disabled="grabbing || grabbed || grabBusy"
                   :class="grabbing ? 'opacity-50 cursor-wait' : 'cursor-pointer'"
                   class="chip-btn chip-btn-sm chip-btn-info"
                 >
@@ -56,16 +57,17 @@
                     <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
                     <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
                   </svg>
-                  Grab
+                  <span x-text="grabbed ? 'Queued' : 'Grab'">Grab</span>
                 </button>
               </td>
             </tr>
           {% endfor %}
-          {% for candidate in outcome.rejected %}
-            <tr data-testid="issue-search-dc-rejected-row" class="rejected-row issue-search-rejected-row">
+          {% for row in dc_rejected_rows %}
+            {% set candidate = row.candidate %}
+            <tr data-testid="issue-search-dc-rejected-row" class="rejected-row">
               <td><span class="pill pill-muted">Rejected</span></td>
               <td>
-                <span class="issue-search-release-title issue-search-release-title-muted">{{ candidate.release.title }}</span>
+                <span class="issue-search-release-title">{{ candidate.release.title }}</span>
                 <div class="issue-search-release-match">{{ candidate.validation.rejection_reason or 'Not a semantic match' }}</div>
               </td>
               <td class="downloads-mono-cell">{{ candidate.release.indexer_name }}</td>
@@ -73,7 +75,32 @@
               <td>{{ candidate.metrics.free_slots }} / {{ candidate.metrics.total_slots }}</td>
               <td class="downloads-mono-cell">{{ candidate.release.size_bytes|filesize }}</td>
               <td class="downloads-mono-cell">TTH …{{ candidate.route.tth[-6:] }}</td>
-              <td class="is-right"><span class="pill pill-muted">No action</span></td>
+              <td class="is-right"
+                  x-data='window.issueSearchResultActions({
+                    issueId: {{ issue.id }},
+                    seriesId: {{ issue.series_id }},
+                    hasLibraryFile: {{ issue.has_library_file|default(false)|tojson }},
+                    csrfToken: {{ csrf_token|tojson }},
+                    releaseSelection: {{ release_selection|default(none)|tojson }}
+                  })'>
+                {% if row.route_token %}
+                  <button class="chip-btn chip-btn-sm chip-btn-warning"
+                          data-dc-route-token="{{ row.route_token }}"
+                          data-dc-override="true"
+                          data-title="{{ candidate.release.title }}"
+                          data-rejection-reason="{{ candidate.validation.rejection_reason }}"
+                          @click="grabRejectedRelease($el)"
+                          :disabled="grabbing || grabbed || grabBusy">
+                    <svg x-show="grabbing" x-cloak class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+                      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+                      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                    </svg>
+                    <span x-text="grabbed ? 'Queued' : 'Grab anyway'">Grab anyway</span>
+                  </button>
+                {% else %}
+                  <span class="pill pill-muted">Cannot override</span>
+                {% endif %}
+              </td>
             </tr>
           {% endfor %}
         </tbody>

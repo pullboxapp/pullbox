@@ -5,12 +5,32 @@ from __future__ import annotations
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import PurePath
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from pullbox.services.airdcpp_search_types import DcValidatedCandidate
+
+
+def can_override_dc_rejection(candidate: DcValidatedCandidate) -> bool:
+    """Only explicit semantic disagreements are reviewable; unknown failures stay closed."""
+    validation = candidate.validation
+    return (
+        not validation.is_match
+        and not validation.parsed.is_pack
+        and PurePath(candidate.release.title).suffix.casefold() in {".cbz", ".cbr", ".pdf"}
+        and validation.rejection_code
+        in {
+            "series_mismatch",
+            "issue_mismatch",
+            "type_mismatch",
+            "issue_title_mismatch",
+            "numbered_issue_collection_mismatch",
+            "ambiguous_issue_collection_type",
+        }
+    )
 
 
 @dataclass(frozen=True, slots=True)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -9,7 +10,7 @@ import pytest
 from pullbox.core.acquisition import AcquisitionProtocol
 from pullbox.models.issue import IssueType
 from pullbox.providers.base import ReleaseResult
-from pullbox.services.airdcpp_route_tokens import AirDcppRouteTokenStore
+from pullbox.services.airdcpp_route_tokens import AirDcppRouteTokenStore, can_override_dc_rejection
 from pullbox.services.airdcpp_search_types import DcMetrics, DcRoute, DcValidatedCandidate
 from pullbox.services.release_validator import ReleaseValidator
 
@@ -86,3 +87,46 @@ def test_route_token_expires_and_store_evicts_to_its_bound() -> None:
 
     current += timedelta(seconds=31)
     assert store.entry_count == 0
+
+
+@pytest.mark.parametrize(
+    "title,wanted_type,allowed",
+    [
+        ("Different Series 001 (2026).cbz", IssueType.ISSUE, True),
+        ("Example Comic 002 (2026).cbz", IssueType.ISSUE, True),
+        ("Example Comic 011.cbz", IssueType.TPB, True),
+        ("Example Comic 001-006 (2026).cbz", IssueType.ISSUE, False),
+        ("Example Comic 001 (B Story).cbz", IssueType.ISSUE, False),
+        ("Example Comic 001 covers only.cbz", IssueType.ISSUE, False),
+        ("Example Comic 001 (Audiobook).cbz", IssueType.ISSUE, False),
+        ("Different Series 001.exe", IssueType.ISSUE, False),
+    ],
+)
+def test_dc_override_classifies_real_validator_rejections(title, wanted_type, allowed):
+    candidate = _candidate()
+    release = replace(candidate.release, title=title)
+    matched, rejected = ReleaseValidator().validate_all_results(
+        [release],
+        wanted_series="Example Comic",
+        wanted_issue=1,
+        wanted_year=2026,
+        wanted_issue_type=wanted_type,
+        wanted_series_issue_count=1,
+    )
+    candidate = replace(candidate, release=release, validation=(matched + rejected)[0])
+    assert can_override_dc_rejection(candidate) is allowed
+
+
+def test_dc_override_unknown_reason_and_identity_rejections_fail_closed():
+    candidate = _candidate()
+    for code in (None, "future_reason", "comicvine_issue_id_mismatch", "partial_issue"):
+        rejected = replace(
+            candidate,
+            validation=replace(
+                candidate.validation,
+                is_match=False,
+                rejection_code=code,
+                rejection_reason="Series mismatch: misleading human-readable text",
+            ),
+        )
+        assert not can_override_dc_rejection(rejected)

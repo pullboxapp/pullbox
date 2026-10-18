@@ -41,6 +41,7 @@ from pullbox.models.direct_acquisition import (
 )
 from pullbox.models.download import DownloadClientType, DownloadHistory, DownloadState
 from pullbox.models.issue import Issue, IssueStatus
+from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot
 from pullbox.models.series import Series, SeriesStatus, SeriesType
 from pullbox.models.user import APIKey, User
 from pullbox.providers.airdcpp.supervisor import AirDcppSupervisorState
@@ -290,10 +291,10 @@ async def _create_issue(
         return issue.id
 
 
-def _dc_candidate(config_id: int) -> DcValidatedCandidate:
+def _dc_candidate(config_id: int, title: str = "Batman 001 (2016).cbz") -> DcValidatedCandidate:
     tth = "CUO74LMZUQMQCBR5UKTIFJPO32LVUH5VZBOL54Y"
     release = ReleaseResult(
-        title="Batman 001 (2016).cbz",
+        title=title,
         indexer_name="Dedicated Air",
         download_url=f"airdcpp://client/{config_id}/tth/{tth}",
         size_bytes=100_000_000,
@@ -306,12 +307,13 @@ def _dc_candidate(config_id: int) -> DcValidatedCandidate:
         published_at=None,
         protocol=AcquisitionProtocol.DC,
     )
-    validation = ReleaseValidator().validate_all_results(
+    matched, rejected = ReleaseValidator().validate_all_results(
         [release],
         wanted_series="Batman",
         wanted_issue=1,
         wanted_year=2016,
-    )[0][0]
+    )
+    validation = (matched + rejected)[0]
     return DcValidatedCandidate(
         release=release,
         validation=validation,
@@ -329,9 +331,11 @@ def _dc_candidate(config_id: int) -> DcValidatedCandidate:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("owned", [False, True])
 async def test_manual_direct_connect_grab_persists_exact_client_queue_intent(
     client: AsyncClient,
     _db_factory: async_sessionmaker[AsyncSession],
+    owned: bool,
 ) -> None:
     issue_id = await _create_issue(_db_factory)
     async with _db_factory() as session:
@@ -346,6 +350,21 @@ async def test_manual_direct_connect_grab_persists_exact_client_queue_intent(
         await session.flush()
         session.add(AirDcppClientSettings(client_config_id=config.id))
         user_id = (await session.execute(select(User.id))).scalar_one()
+        if owned:
+            root = LibraryRoot(name="Library", path="/comics")
+            session.add(root)
+            await session.flush()
+            session.add(
+                LibraryFile(
+                    issue_id=issue_id,
+                    library_root_id=root.id,
+                    file_path="/comics/existing.cbz",
+                    file_name="existing.cbz",
+                    file_size=100,
+                    file_format=FileFormat.CBZ,
+                    file_modified_at=datetime.now(UTC),
+                )
+            )
         await session.commit()
         config_id = config.id
 
@@ -373,9 +392,17 @@ async def test_manual_direct_connect_grab_persists_exact_client_queue_intent(
             return_value=SimpleNamespace(airdcpp_enabled=True),
         ),
     ):
+        if owned:
+            unconfirmed = await client.post(
+                f"/api/v1/issues/{issue_id}/dc-grab",
+                json={"dc_route_token": token},
+            )
+            assert unconfirmed.status_code == 409
+            assert "Download replacement" in unconfirmed.text
+            api.download_search_result.assert_not_awaited()
         response = await client.post(
             f"/api/v1/issues/{issue_id}/dc-grab",
-            json={"dc_route_token": token},
+            json={"dc_route_token": token, "replace_existing_file": owned},
         )
 
     assert response.status_code == 201
@@ -385,9 +412,140 @@ async def test_manual_direct_connect_grab_persists_exact_client_queue_intent(
         history = (await session.execute(select(DownloadHistory))).scalar_one()
         assert history.download_client_config_id == config_id
         assert history.state is DownloadState.SENT
+        assert history.replace_existing_file is owned
 
 
 # ── Tests ──────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "title,override,status",
+    [
+        ("Superman 001 (2016).cbz", False, 409),
+        ("Superman 001 (2016).cbz", True, 201),
+        ("Batman 001-005 (2016).cbz", True, 409),
+        ("Batman 001 (B Story) (2016).cbz", True, 409),
+        ("Batman 001 preview (2016).cbz", True, 409),
+        ("Batman 001 audiobook (2016).cbz", True, 409),
+    ],
+)
+async def test_dc_rejected_grab_requires_explicit_eligible_override(
+    client, _db_factory, title, override, status
+):
+    issue_id = await _create_issue(_db_factory)
+    async with _db_factory() as session:
+        config = DownloadClientConfig(
+            name="Dedicated Air",
+            client_type=DownloadClientType.AIRDCPP,
+            url="http://air.example.test:5600",
+            enabled=True,
+            priority=20,
+        )
+        session.add(config)
+        await session.flush()
+        session.add(AirDcppClientSettings(client_config_id=config.id))
+        user_id = (await session.execute(select(User.id))).scalar_one()
+        await session.commit()
+        config_id = config.id
+    candidate = _dc_candidate(config_id, title)
+    assert not candidate.validation.is_match
+    store = get_airdcpp_route_token_store()
+    token = store.issue(candidate, issue_id=issue_id, user_id=user_id, search_log_id=None)
+    api = AsyncMock()
+    api.download_search_result.return_value = SimpleNamespace(id=91, merged=False)
+    registry = SimpleNamespace(
+        get=lambda _: SimpleNamespace(
+            state=AirDcppSupervisorState.READY,
+            api_client=api,
+        )
+    )
+    with (
+        patch("pullbox.api.v1.issues.get_airdcpp_supervisor_registry", return_value=registry),
+        patch(
+            "pullbox.api.v1.issues.get_settings", return_value=SimpleNamespace(airdcpp_enabled=True)
+        ),
+    ):
+        response = await client.post(
+            f"/api/v1/issues/{issue_id}/dc-grab",
+            json={
+                "dc_route_token": token,
+                "override_rejection": override,
+            },
+        )
+        assert response.status_code == status, response.text
+        if status == 201:
+            replay = await client.post(
+                f"/api/v1/issues/{issue_id}/dc-grab",
+                json={
+                    "dc_route_token": token,
+                    "override_rejection": True,
+                },
+            )
+            assert replay.status_code == 201
+            assert replay.json()["download_id"] == response.json()["download_id"]
+            second_token = store.issue(
+                candidate, issue_id=issue_id, user_id=user_id, search_log_id=None
+            )
+            duplicate = await client.post(
+                f"/api/v1/issues/{issue_id}/dc-grab",
+                json={
+                    "dc_route_token": second_token,
+                    "override_rejection": True,
+                },
+            )
+            assert duplicate.status_code == 409
+            api.download_search_result.assert_awaited_once()
+        else:
+            api.download_search_result.assert_not_awaited()
+            async with _db_factory() as session:
+                assert (await session.scalars(select(DownloadHistory))).all() == []
+
+
+@pytest.mark.asyncio
+async def test_dc_stream_offers_override_only_for_semantic_rejections(client, _db_factory):
+    issue_id = await _create_issue(_db_factory)
+    coordinator = AsyncMock()
+    coordinator.search.return_value = DcSearchOutcome(
+        matched=(),
+        rejected=(
+            _dc_candidate(7, "Superman 001 (2016).cbz"),
+            _dc_candidate(7, "Batman 001-005 (2016).cbz"),
+        ),
+        client_summaries=(),
+        raw_count=2,
+        deduplicated_count=2,
+        dropped_count=0,
+        elapsed_ms=5,
+        partial=False,
+    )
+    with (
+        patch(
+            "pullbox.ui.series_detail_routes.get_airdcpp_supervisor_registry", return_value=object()
+        ),
+        patch(
+            "pullbox.ui.series_detail_routes.get_airdcpp_search_coordinator",
+            return_value=coordinator,
+        ),
+        patch(
+            "pullbox.ui.series_detail_routes.load_airdcpp_search_clients",
+            new_callable=AsyncMock,
+            return_value=(SimpleNamespace(config_id=7),),
+        ),
+        patch(
+            "pullbox.ui.series_detail_routes.get_settings",
+            return_value=SimpleNamespace(airdcpp_enabled=True),
+        ),
+    ):
+        stream = await client.get(f"/htmx/issues/{issue_id}/dc-search-results")
+    assert stream.status_code == 200
+    final = json.loads([f for f in stream.text.split("\n\n") if f.startswith("data: ")][-1][6:])
+    html = final["html"]
+    assert html.count("data-dc-route-token=") == 1
+    assert 'data-dc-override="true"' in html
+    assert '@click="grabRejectedRelease($el)"' in html
+    assert "Grab anyway" in html
+    assert "Cannot override" in html
 
 
 @pytest.mark.asyncio

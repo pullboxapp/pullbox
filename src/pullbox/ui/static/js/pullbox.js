@@ -14166,6 +14166,7 @@ function issueSearchResultActions(config) {
 
   return {
     grabbing: false,
+    grabbed: false,
     blocking: false,
     blocked: false,
 
@@ -14181,7 +14182,7 @@ function issueSearchResultActions(config) {
 
     grabRelease: async function (button) {
       var self = this;
-      if (self.grabbing || self.blocked) {
+      if (self.grabbing || self.grabbed || self.blocked) {
         return;
       }
 
@@ -14218,6 +14219,8 @@ function issueSearchResultActions(config) {
       } else if (dcRouteToken) {
         endpoint = "/api/v1/issues/" + cfg.issueId + "/dc-grab";
         payload = { dc_route_token: dcRouteToken };
+        if (button.dataset.dcOverride === "true") payload.override_rejection = true;
+        if (cfg.hasLibraryFile) payload.replace_existing_file = true;
       }
       if (cfg.releaseSelection) {
         endpoint = "/api/v1/whats-new/grab";
@@ -14237,6 +14240,7 @@ function issueSearchResultActions(config) {
       })
         .then(function (response) {
           if (response.ok) {
+            if (dcRouteToken) self.grabbed = true;
             self.dispatchToast(
               directAttemptId || dcRouteToken
                 ? "Direct download queued"
@@ -14277,23 +14281,28 @@ function issueSearchResultActions(config) {
 
     grabRejectedRelease: function (button) {
       var self = this;
-      if (self.grabbing || self.blocked) {
+      if (self.grabbing || self.grabbed || self.blocked) {
         return;
       }
 
       var reason = button.dataset.rejectionReason || "Pullbox rejected this result.";
       var isDirect = Boolean(parseInt(button.dataset.directAttempt, 10) || 0);
+      var isDc = Boolean(button.dataset.dcRouteToken);
+      self.grabbing = true;
       pbConfirm({
         title: "Grab Rejected Result",
         message:
           "Pullbox rejected this result: " +
           reason +
-          (isDirect
+          (isDc
+            ? " If you continue, Pullbox will queue this file in AirDC++. File safety and metadata checks still apply before import."
+            : isDirect
             ? " If you continue, Pullbox will plan and queue this direct result anyway."
             : " If you continue, Pullbox will send it to your download client anyway."),
         confirmText: "Grab anyway",
         destructive: false,
       }).then(function (ok) {
+        self.grabbing = false;
         if (!ok) {
           return;
         }
