@@ -101,7 +101,7 @@
                       <input type="hidden" name="protocol" value="{{ protocol_filter }}">
                       <input type="hidden" name="search" value="{{ search_query }}">
                       <input type="hidden" name="page" value="{{ page }}">
-                      <button type="submit" class="{{ 'btn-danger' if action == 'cancel' else 'btn-secondary' }} btn-sm"
+                      <button type="submit" class="{{ 'btn-danger' if action == 'cancel' else 'btn-ghost' }} btn-sm whitespace-nowrap"
                         data-testid="intervention-airdcpp-{{ action }}-{{ pm.id }}">{{ label }}</button>
                     </form>
                     {% endif %}

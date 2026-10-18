@@ -124,6 +124,11 @@ async def test_airdcpp_recovery_has_recheck_retry_cancel_not_direct_route_refres
     response = await client.get("/intervention?tab=recovery&protocol=dc")
     assert response.status_code == 200
     assert f"/htmx/intervention/{pid}/airdcpp/recheck" in response.text
+    button = re.search(
+        rf'<button[^>]*data-testid="intervention-airdcpp-recheck-{pid}"[^>]*>', response.text
+    )
+    assert button is not None
+    assert "btn-ghost btn-sm whitespace-nowrap" in button.group(0)
     assert (f"/htmx/intervention/{pid}/airdcpp/retry" in response.text) == (
         failure_code == "queue_lookup_failed"
     )
