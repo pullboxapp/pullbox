@@ -10,6 +10,7 @@ from pullbox.core.issue_numbers import format_issue_number, normalize_issue_numb
 from pullbox.core.issue_title import collection_title_number, collection_title_subtitle
 from pullbox.core.name_matcher import NameMatcher, NameMatchResult
 from pullbox.core.naming import extract_base_series_title
+from pullbox.core.partial_issue import is_story_extract
 from pullbox.core.release_parser import issues_match, normalize_issue_number
 from pullbox.core.release_year_matching import ReleaseYearContext, match_release_year
 from pullbox.core.source_metadata import MetadataSignal
@@ -162,6 +163,13 @@ class SemanticMatchEngine:
         year_context: ReleaseYearContext | None = None,
     ) -> IssueMatchDecision:
         """Return a workflow-aware semantic match decision for one issue target."""
+        if is_story_extract(metadata.original_title):
+            return IssueMatchDecision(
+                is_match=False,
+                confidence=MatchConfidence.LOW,
+                match_method="partial_issue",
+                rejection_reason="This is a story-only extract, not a complete issue.",
+            )
         series_name = metadata.series_name or ""
         match_result = _matcher.match(
             series_name,

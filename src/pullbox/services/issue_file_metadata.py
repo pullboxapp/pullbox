@@ -77,6 +77,27 @@ if TYPE_CHECKING:
 
 def file_metadata_error(exc: BaseException) -> str:
     code = getattr(exc, "code", "")
+    if code == "partial_issue":
+        return (
+            "The embedded issue number identifies a story-only extract, not a complete issue. "
+            "The file was left unchanged. Open the issue page and search for a complete copy "
+            "or use Import File with a complete copy and review the Replace File confirmation. "
+            "Changing the metadata cannot restore missing stories."
+        )
+    if code == "output_disagreement":
+        label = {
+            "Summary": "summary",
+            "description": "summary",
+            "Number": "issue number",
+            "issue_number_text": "issue number",
+            "title": "title",
+            "credits": "credits",
+        }.get(getattr(exc, "field", ""), "metadata")
+        return (
+            f"Pullbox could not validate the {label} in its generated XML pair. "
+            "The comic was left unchanged; no new download is needed. "
+            "Please report this validation error before retrying."
+        )
     if code == "snapshot_disagrees":
         return (
             "Pullbox's final verification did not match the approved metadata preview. "

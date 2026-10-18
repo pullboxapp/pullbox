@@ -491,5 +491,9 @@ def _validated_pair(ci: ET.Element, mi: ET.Element) -> RenderedArchiveMetadata:
         or check.identity_conflicts
         or any(item.code != "unmapped_content" for item in check.diagnostics)
     ):
-        raise ArchiveMetadataRenderError("output_disagreement")
+        locator = next(
+            (item.locator for item in check.diagnostics if item.code != "unmapped_content"),
+            check.differences[0].field if check.differences else "",
+        )
+        raise ArchiveMetadataRenderError("output_disagreement", locator)
     return result

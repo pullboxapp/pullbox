@@ -16,6 +16,7 @@ from pullbox.core.exceptions import ValidationError
 from pullbox.core.issue_numbers import normalize_issue_number_text
 from pullbox.core.log_sanitizer import sanitize_log_string
 from pullbox.core.name_matcher import NameMatcher
+from pullbox.core.partial_issue import is_story_extract
 from pullbox.core.type_semantics import TypeFamily, issue_type_family
 from pullbox.models.direct_acquisition import (
     DirectAcquisitionAttempt,
@@ -187,6 +188,13 @@ async def plan_direct_acquisition(
     clock = now or (lambda: datetime.now(UTC))
     try:
         provider = _validate_planning_source(attempt, at=clock())
+        title = (attempt.candidate_snapshot or {}).get("display_title")
+        if isinstance(title, str) and is_story_extract(title):
+            raise DirectAcquisitionPlanningError(
+                "partial_issue",
+                "This result is a story-only extract, not a complete issue. "
+                "Choose a complete copy. No download was started.",
+            )
         response = await _resolve_provider_candidate(
             session,
             attempt,
@@ -220,6 +228,14 @@ async def plan_direct_acquisition(
             known_coverage = frozenset().union(
                 *(route.option.coverage for route in resolved_routes)
             )
+            if not plan.requested <= known_coverage and any(
+                is_story_extract(artifact.coverage.description) for artifact in response.artifacts
+            ):
+                raise DirectAcquisitionPlanningError(
+                    "partial_issue",
+                    "The available file is a story-only extract, not a complete issue. "
+                    "Choose a complete copy. No download was started.",
+                )
             if (
                 any(route.route.eligible for route in resolved_routes)
                 and not plan.requested <= known_coverage
@@ -730,6 +746,8 @@ def _build_route_options(
     for artifact in artifacts:
         _validate_stable_identity("provider artifact", artifact.artifact_id)
         if artifact.route is not DirectArtifactRoute.DIRECT_ARTIFACT:
+            continue
+        if is_story_extract(artifact.coverage.description):
             continue
         coverage = _artifact_coverage(
             artifact,

@@ -71,6 +71,32 @@ async def test_managed_issue_can_preview_pair_without_writing(
         assert (path.read_bytes(), path.stat()) == before
 
 
+async def test_story_extract_preview_reports_replacement_without_writing(
+    authenticated_client, sec_db, tmp_path
+):
+    async with prepared(sec_db, tmp_path) as (path, _, plan):
+        issue_id = plan.target.binding.metadata.issues[0].local_id
+        with ZipFile(path, "w") as archive:
+            archive.writestr("page.jpg", b"story pages")
+            archive.writestr(
+                "ComicInfo.xml", "<ComicInfo><Number>158 (B Story)</Number></ComicInfo>"
+            )
+        async with sec_db.begin() as session:
+            file = await session.get(LibraryFile, plan.target.binding.library_file_id)
+            file.file_size = path.stat().st_size
+            file.file_modified_at = datetime.fromtimestamp(path.stat().st_mtime, UTC)
+        before = path.read_bytes()
+        response = await authenticated_client.post(
+            f"/api/v1/issues/{issue_id}/file-metadata/preview",
+            headers=csrf(authenticated_client),
+        )
+        assert response.status_code == 409
+        assert "story-only extract" in response.json()["detail"]
+        assert "Import File" in response.json()["detail"]
+        assert "Replace File" in response.json()["detail"]
+        assert path.read_bytes() == before
+
+
 async def test_referenced_issue_cannot_preview_a_write(authenticated_client, sec_db, tmp_path):
     async with prepared(sec_db, tmp_path) as (path, _, plan):
         async with sec_db.begin() as session:

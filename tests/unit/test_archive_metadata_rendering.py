@@ -102,6 +102,42 @@ def test_paired_core_output_uses_one_snapshot_and_validates_offline():
     assert "[cv_vol_id:42]" in ci.findtext("Notes")
 
 
+def test_long_synopsis_round_trips_in_both_documents_without_truncation():
+    synopsis = "S" * 11531
+    series, issue = snapshots(description=synopsis)
+    rendered = render_archive_metadata(series, issue, files())
+    reconciled = reconcile_archive_metadata(
+        files(rendered.comicinfo.decode(), rendered.metroninfo.decode())
+    )
+    assert not reconciled.requires_review
+    assert reconciled.comicinfo.issue.description == synopsis
+    assert reconciled.metroninfo.issue.description == synopsis
+    assert (
+        render_archive_metadata(
+            series, issue, files(rendered.comicinfo.decode(), rendered.metroninfo.decode())
+        )
+        == rendered
+    )
+
+
+def test_generated_xml_validation_identifies_failed_summary_field():
+    from pullbox.services.archive_metadata_rendering import _validated_pair
+    from pullbox.services.issue_file_metadata import file_metadata_error
+
+    rendered = render_archive_metadata(*snapshots(), files())
+    ci = ET.fromstring(rendered.comicinfo)
+    mi = ET.fromstring(rendered.metroninfo)
+    ET.SubElement(mi, "Summary").text = "S" * 200001
+    with pytest.raises(ArchiveMetadataRenderError) as caught:
+        _validated_pair(ci, mi)
+    assert caught.value.code == "output_disagreement"
+    assert caught.value.field == "Summary"
+    message = file_metadata_error(caught.value)
+    assert "summary" in message
+    assert "generated" in message
+    assert "unchanged" in message
+
+
 def test_comma_containing_creator_names_round_trip_without_invented_people():
     series, issue = snapshots(
         credits=(

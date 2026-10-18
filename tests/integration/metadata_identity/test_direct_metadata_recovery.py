@@ -16,6 +16,7 @@ from pullbox.models.direct_acquisition import DirectAcquisitionAttempt, DirectAc
 from pullbox.models.download import DownloadHistory, DownloadState
 from pullbox.models.issue import IssueStatus
 from pullbox.models.pending_match import PendingMatch
+from pullbox.services.archive_metadata_binding import ArchiveMetadataBindingError
 from pullbox.services.archive_metadata_rendering import ArchiveMetadataRenderError
 from pullbox.services.direct_metadata_recovery import (
     prepare_direct_metadata_recovery,
@@ -29,6 +30,37 @@ from tests.integration.metadata_identity.test_direct_paired_metadata import (
     paired_download_setting,  # noqa: F401
 )
 from tests.unit.test_nonzip_metadata_writing import nonzip_archive
+
+
+@pytest.mark.usefixtures("paired_download_setting")
+async def test_story_only_retained_copy_cannot_be_completed_as_full_issue(
+    identity_probe_db, tmp_path
+):
+    _, factory, _ = identity_probe_db
+    attempt_id, artifact_id, _issue_id, source = await direct_artifact(
+        factory, tmp_path, conflict=True
+    )
+    with ZipFile(source, "w") as archive:
+        archive.writestr("page.jpg", b"story pages")
+        archive.writestr("ComicInfo.xml", "<ComicInfo><Number>50-X (B Story)</Number></ComicInfo>")
+    original = source.read_bytes()
+    assert (
+        await execute(factory, tmp_path, attempt_id, artifact_id)
+    ).state is DirectAcquisitionState.INTERVENTION
+    async with factory() as session:
+        pending = await session.scalar(select(PendingMatch))
+        file = await session.scalar(select(LibraryFile))
+        copied_bytes = Path(file.file_path).read_bytes()
+        with pytest.raises(ArchiveMetadataBindingError) as caught:
+            await prepare_direct_metadata_recovery(session, pending.id)
+        assert caught.value.code == "partial_issue"
+        assert (await session.get(PendingMatch, pending.id)).status == "pending"
+        assert (
+            await session.get(DirectAcquisitionAttempt, attempt_id)
+        ).state is DirectAcquisitionState.INTERVENTION
+        assert (await session.scalar(select(DownloadHistory))).state is DownloadState.FAILED
+        assert Path(file.file_path).read_bytes() == copied_bytes
+    assert source.read_bytes() == original
 
 
 @pytest.mark.usefixtures("paired_download_setting")

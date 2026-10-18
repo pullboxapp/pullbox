@@ -342,6 +342,8 @@ def assemble_bound_archive_metadata(
         return assemble_archive_metadata_state(
             binding.metadata, archive, now=now, issue_candidates=issue_candidates
         )
+    except ArchiveMetadataBindingError:
+        raise
     except ValueError:
         raise ArchiveMetadataBindingError("metadata_requires_review") from None
 
@@ -354,6 +356,8 @@ def assemble_archive_metadata_state(
     issue_candidates: Sequence[ProviderIssueRead] = (),
 ) -> tuple[MetadataSnapshot, MetadataSnapshot]:
     """Pure assembly shared by the bound writer and its one-pass conversion worker."""
+    if archive is not None and any(item.code == "partial_issue" for item in archive.diagnostics):
+        raise ArchiveMetadataBindingError("partial_issue")
     series, issue = metadata.series, metadata.issues[0]
     return (
         assemble_metadata(

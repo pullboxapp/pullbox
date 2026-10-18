@@ -28,6 +28,7 @@ from pullbox.core.metadata_identity import (
 )
 from pullbox.core.metadata_xml import MetadataXmlError, parse_metadata_xml
 from pullbox.core.metroninfo import MetronInfoData, parse_metroninfo
+from pullbox.core.partial_issue import is_story_extract
 from pullbox.schemas.metadata_credits import MetadataCredit
 from pullbox.schemas.metadata_snapshot import MetadataValues
 
@@ -150,6 +151,9 @@ def _values(
     values: dict[str, object] = {}
     for name, (value, locator) in fields.items():
         if value is None:
+            continue
+        if name == "issue_number_text" and isinstance(value, str) and is_story_extract(value):
+            diagnostics.append(ArchiveMetadataDiagnostic(document, "partial_issue", locator))
             continue
         try:
             if name == "issue_number_text" and isinstance(value, str):

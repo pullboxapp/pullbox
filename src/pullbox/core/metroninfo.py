@@ -197,7 +197,8 @@ class _Reader:
         if node is None:
             return None
         value = (node.text or "").strip()
-        if len(node) or len(value) > _MAX_FIELD_LENGTH:
+        limit = 200000 if locator == "Summary" else _MAX_FIELD_LENGTH
+        if len(node) or len(value) > limit:
             self.diagnostic(MetronInfoDiagnosticCode.INVALID_FIELD, locator)
             return None
         self.text_nodes.add(node)

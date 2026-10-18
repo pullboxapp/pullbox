@@ -434,6 +434,66 @@ async def test_planning_selects_best_eligible_route_and_persists_no_urls(
 
 
 @pytest.mark.asyncio
+async def test_story_only_candidate_is_rejected_before_resolving_routes(session):
+    attempt = await session.get(DirectAcquisitionAttempt, 1)
+    attempt.candidate_snapshot = {
+        "display_title": "Marvel Comics Presents 158 B Story (1994) (digital) (Marika-Empire)"
+    }
+    await session.commit()
+    client = _ResolveClient(_response())
+    with pytest.raises(DirectAcquisitionPlanningError) as caught:
+        await plan_direct_acquisition(
+            session,
+            acquisition_id=1,
+            provider_client_factory=lambda **_kwargs: client,
+            provider_secret_loader=lambda _config: _provider_material(),
+            now=lambda: NOW,
+        )
+    assert caught.value.code == "partial_issue"
+    assert "complete issue" in str(caught.value)
+    assert client.requests == []
+    assert attempt.plan_snapshot == {}
+
+
+@pytest.mark.asyncio
+async def test_story_only_artifact_cannot_claim_complete_issue_coverage(session):
+    response = _response()
+    response.artifacts[0].coverage.description = "Planner Series 001 [B Story]"
+    client = _ResolveClient(response)
+    with pytest.raises(DirectAcquisitionPlanningError) as caught:
+        await plan_direct_acquisition(
+            session,
+            acquisition_id=1,
+            provider_client_factory=lambda **_kwargs: client,
+            provider_secret_loader=lambda _config: _provider_material(),
+            now=lambda: NOW,
+        )
+    assert caught.value.code == "partial_issue"
+    attempt = await session.get(DirectAcquisitionAttempt, 1)
+    assert attempt.plan_snapshot == {}
+
+
+@pytest.mark.asyncio
+async def test_story_extract_does_not_hide_complete_alternative(session):
+    response = _response()
+    partial = response.artifacts[0].model_copy(deep=True)
+    partial.artifact_id = "story-only"
+    partial.coverage.description = "Planner Series 001 [B Story]"
+    response.artifacts.insert(0, partial)
+    client = _ResolveClient(response)
+    result = await plan_direct_acquisition(
+        session,
+        acquisition_id=1,
+        provider_client_factory=lambda **_kwargs: client,
+        provider_secret_loader=lambda _config: _provider_material(),
+        now=lambda: NOW,
+    )
+    assert result.plan.complete
+    assert result.attempt.state is DirectAcquisitionState.PLANNED
+    assert "story-only" not in repr(result.attempt.plan_snapshot)
+
+
+@pytest.mark.asyncio
 async def test_planning_uses_estimated_size_for_ranking_not_transfer_identity(
     session: AsyncSession,
 ) -> None:
