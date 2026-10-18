@@ -385,7 +385,7 @@ async def _file_sync_response(
     return _templates().TemplateResponse(
         request,
         "partials/story_arc_file_sync.html",
-        _ctx(request, user, file_sync=status, file_sync_message=message),
+        _ctx(request, user, file_sync=status, file_sync_message=message, file_sync_oob=True),
     )
 
 

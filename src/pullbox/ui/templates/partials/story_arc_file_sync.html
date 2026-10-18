@@ -35,3 +35,7 @@
     <p role="status" class="text-sm text-pb-text-sec">{{ file_sync_message }}</p>
   {% endif %}
 </section>
+{% if file_sync_oob %}
+<span id="story-arc-review-badge" hx-swap-oob="outerHTML" class="pill {{ 'pill-warning' if file_sync.review_count else 'pill-success' }}">{{ file_sync.review_count }} review</span>
+<strong id="story-arc-review-footer" hx-swap-oob="outerHTML" class="page-dock-status-value">{{ file_sync.review_count }}</strong>
+{% endif %}

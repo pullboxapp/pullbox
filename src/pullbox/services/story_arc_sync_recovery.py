@@ -10,8 +10,15 @@ from sqlalchemy import func, select, true, update
 
 from pullbox.core.exceptions import NotFoundError, ValidationError
 from pullbox.models.library import LibraryFile
-from pullbox.models.story_arc import IssueStoryArc, StoryArc, StoryArcResolutionState
+from pullbox.models.story_arc import (
+    IssueStoryArc,
+    StoryArc,
+    StoryArcPlacement,
+    StoryArcPlacementState,
+    StoryArcResolutionState,
+)
 from pullbox.models.story_arc_sync import StoryArcSyncWork, StoryArcSyncWorkState
+from pullbox.services.story_arc_membership_policy import order_review_filter
 from pullbox.services.story_arc_placement_integration import (
     StoryArcPlacementPolicyInput,
     StoryArcPlacementSyncService,
@@ -63,6 +70,7 @@ class StoryArcFileSyncStatus:
     pending: int
     failed: int
     destination_failures: int
+    review_count: int
 
     @property
     def percent(self) -> int:
@@ -110,6 +118,57 @@ async def load_story_arc_file_sync_status(
         ),
         failed=counts.get(StoryArcSyncWorkState.FAILED, 0),
         destination_failures=destination_failures,
+        review_count=await _load_review_count(session, story_arc_id),
+    )
+
+
+async def _load_review_count(session: AsyncSession, story_arc_id: int) -> int:
+    membership_reviews = (
+        select(func.count(IssueStoryArc.id))
+        .where(
+            IssueStoryArc.story_arc_id == story_arc_id,
+            IssueStoryArc.resolution_state.in_(
+                (
+                    StoryArcResolutionState.PENDING,
+                    StoryArcResolutionState.MISSING,
+                    StoryArcResolutionState.CONFLICT,
+                    StoryArcResolutionState.AMBIGUOUS,
+                )
+            )
+            | (
+                (IssueStoryArc.resolution_state == StoryArcResolutionState.RESOLVED)
+                & order_review_filter()
+            ),
+        )
+        .scalar_subquery()
+    )
+    placement_reviews = (
+        select(func.count(StoryArcPlacement.id))
+        .join(IssueStoryArc, IssueStoryArc.id == StoryArcPlacement.issue_story_arc_id)
+        .where(
+            IssueStoryArc.story_arc_id == story_arc_id,
+            StoryArcPlacement.state.in_(
+                (
+                    StoryArcPlacementState.MISSING,
+                    StoryArcPlacementState.DRIFTED,
+                    StoryArcPlacementState.FAILED,
+                )
+            ),
+        )
+        .scalar_subquery()
+    )
+    sync_reviews = (
+        select(func.count(func.distinct(StoryArcSyncWork.issue_story_arc_id)))
+        .where(
+            StoryArcSyncWork.id.in_(
+                current_story_arc_sync_work_ids(story_arc_id, include_imports=True)
+            ),
+            StoryArcSyncWork.state == StoryArcSyncWorkState.FAILED,
+        )
+        .scalar_subquery()
+    )
+    return int(
+        await session.scalar(select(membership_reviews + placement_reviews + sync_reviews)) or 0
     )
 
 
