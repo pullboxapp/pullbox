@@ -43,11 +43,32 @@ def activity_page(authed_page, seeded_server):
     page.wait_for_function("activityRequests.length === 1")
     page.clock.install()
     page.clock.pause_at(page.evaluate("Date.now() + 1000"))
-    page.evaluate("activityStream.onopen()")
-    assert page.evaluate(
-        "Alpine.$data(document.querySelector('[x-data=\"appShell()\"]')).activityStreamOpen"
-    )
     yield page
+
+
+def test_activity_never_reserves_a_permanent_browser_connection(activity_page):
+    page = activity_page
+    assert page.evaluate("!window.activityStream")
+    resolve(page, 0, payload())
+    page.clock.run_for(3001)
+    assert page.evaluate("activityRequests.length") == 2
+
+
+def test_hidden_tab_releases_request_and_refreshes_on_return(activity_page):
+    page = activity_page
+    page.evaluate("""() => {
+        Object.defineProperty(document, 'hidden', {configurable: true, get: () => true});
+        document.dispatchEvent(new Event('visibilitychange'));
+    }""")
+    page.clock.run_for(1)
+    assert page.evaluate("activityRequests[0].aborted")
+    page.clock.run_for(60000)
+    assert page.evaluate("activityRequests.length") == 1
+    page.evaluate("""() => {
+        Object.defineProperty(document, 'hidden', {configurable: true, get: () => false});
+        document.dispatchEvent(new Event('visibilitychange'));
+    }""")
+    page.wait_for_function("activityRequests.length === 2")
 
 
 def payload(*, state="running", count=1, total=None, ids=None, expiry=None):
@@ -79,24 +100,22 @@ def resolve(page, index, data):
     )
 
 
-def test_busy_stream_cannot_postpone_refresh_forever(activity_page):
+def test_poll_does_not_overlap_an_inflight_refresh(activity_page):
     page = activity_page
     resolve(page, 0, payload())
-    for _ in range(6):
-        page.evaluate("activityStream.listeners.progress()")
-        page.clock.run_for(100)
+    page.clock.run_for(3001)
+    page.clock.run_for(10000)
     assert page.evaluate("activityRequests.length") == 2
 
 
 def test_inflight_invalidation_is_replayed(activity_page):
     page = activity_page
-    page.evaluate("activityStream.listeners.progress()")
-    page.clock.run_for(500)
+    page.evaluate("Alpine.$data(document.body).refreshActivity()")
     page.evaluate("activityRequests[0].resolve({operations: [], active_count: 0})")
     page.wait_for_function("activityRequests.length === 2", timeout=2000)
 
 
-def test_completion_expires_with_healthy_stream(activity_page):
+def test_completion_expires_before_next_regular_poll(activity_page):
     page = activity_page
     resolve(page, 0, payload(state="completed", count=0, total=1, expiry=1000))
     page.clock.run_for(1001)
@@ -129,11 +148,10 @@ def test_open_refreshes_and_pagination_exposes_all_jobs(activity_page, theme):
     page.screenshot(path=f"/private/tmp/pullbox-bug3-activity-{theme}.png")
 
 
-def test_failed_fetch_retries_without_blanking_even_with_open_stream(activity_page):
+def test_failed_fetch_retries_without_blanking(activity_page):
     page = activity_page
     resolve(page, 0, payload())
-    page.evaluate("activityStream.listeners.progress()")
-    page.clock.run_for(500)
+    page.clock.run_for(3001)
     page.evaluate("activityRequests[1].reject(new Error('offline'))")
     page.clock.run_for(3001)
     assert page.evaluate("activityRequests.length") == 3
@@ -145,32 +163,27 @@ def test_failed_fetch_retries_without_blanking_even_with_open_stream(activity_pa
 def test_slow_fetch_times_out_and_destroy_cancels_refreshes(activity_page):
     page = activity_page
     resolve(page, 0, payload())
-    page.evaluate("activityStream.listeners.progress()")
-    page.clock.run_for(500)
+    page.clock.run_for(3001)
     page.clock.run_for(15001)
     assert page.evaluate("activityRequests[1].aborted")
     page.clock.run_for(3001)
     assert page.evaluate("activityRequests.length") == 3
     page.evaluate("Alpine.$data(document.body).destroy()")
     assert page.evaluate("activityRequests[2].aborted")
-    page.evaluate("activityStream.listeners.progress()")
     page.clock.run_for(20000)
     assert page.evaluate("activityRequests.length") == 3
 
 
-def test_stream_reconnect_refreshes_and_stops_fallback_poll(activity_page):
+def test_pagehide_stops_polling_and_bfcache_return_refreshes(activity_page):
     page = activity_page
     resolve(page, 0, payload())
-    page.evaluate("activityStream.onerror()")
-    assert page.evaluate("activityStream.closed")
-    page.clock.run_for(3001)
-    resolve(page, 1, payload(count=2, ids=[1, 2]))
-    page.evaluate("activityStream.onopen(); activityStream.listeners.ready()")
-    page.clock.run_for(501)
-    assert page.evaluate("activityRequests.length") == 3
-    resolve(page, 2, payload(count=3, ids=[1, 2, 3]))
+    page.evaluate("window.dispatchEvent(new PageTransitionEvent('pagehide'))")
     page.clock.run_for(10000)
-    assert page.evaluate("activityRequests.length") == 3
+    assert page.evaluate("activityRequests.length") == 1
+    page.evaluate("window.dispatchEvent(new PageTransitionEvent('pageshow', {persisted: true}))")
+    page.wait_for_function("activityRequests.length === 2")
+    resolve(page, 1, payload(count=2, ids=[1, 2]))
+    assert page.evaluate("Alpine.$data(document.body).activityBadgeCount()") == 2
 
 
 def test_shrinking_page_clamps_without_blank_flash_or_losing_focus(activity_page):
@@ -187,8 +200,7 @@ def test_shrinking_page_clamps_without_blank_flash_or_losing_focus(activity_page
     page.evaluate(
         "window.savedRow = document.querySelector('[data-testid=header-activity-operation]')"
     )
-    page.evaluate("activityStream.listeners.progress()")
-    page.clock.run_for(501)
+    page.clock.run_for(3001)
     page.evaluate("activityRequests[3].resolve({operations: [], total_count: 1, active_count: 1})")
     page.clock.run_for(1)
     assert page.evaluate("activityRequests.length") == 5
@@ -209,8 +221,7 @@ def test_paging_does_not_flash_disabled_during_background_refresh(activity_page)
     page.get_by_role("button", name="Background activity", exact=True).click()
     resolve(page, 1, payload(count=27, ids=list(range(1, 21))))
     page.clock.run_for(200)
-    page.evaluate("activityStream.listeners.progress()")
-    page.clock.run_for(501)
+    page.clock.run_for(3001)
     next_button = page.get_by_role("button", name="Next activity page")
     expect(next_button).to_be_enabled()
     next_button.click()

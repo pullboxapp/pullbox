@@ -25,52 +25,45 @@
       var stylesheetRetryCount = 0;
       var stylesheetRetryLimit = 2;
       var stylesheetLoadTimeoutMs = 4000;
-      var stylesheetReloadKey = 'pullbox-stylesheet-reload-attempted';
+      var stylesheetTimeout = null;
+      var stylesheetRetryTimer = null;
+      var stylesheetRecoveryPanel = null;
 
       function armStylesheetTimeout(link) {
-        window.setTimeout(function() {
+        window.clearTimeout(stylesheetTimeout);
+        stylesheetTimeout = window.setTimeout(function() {
           if (!appStylesReady && link && link.isConnected) {
-            retryStylesheet(link);
+            // A queued or slow request is not a failed stylesheet. Keep it alive.
+            if (!verifyStylesheet(link)) showStylesheetRecovery(true);
           }
         }, stylesheetLoadTimeoutMs);
       }
 
-      function clearStylesheetReloadGuard() {
-        try {
-          sessionStorage.removeItem(stylesheetReloadKey);
-        } catch (_error) {}
-      }
-
-      function reloadForStylesheetRecovery() {
-        try {
-          if (sessionStorage.getItem(stylesheetReloadKey) !== 'true') {
-            sessionStorage.setItem(stylesheetReloadKey, 'true');
-            window.location.reload();
-            return true;
-          }
-        } catch (_error) {}
-        return false;
-      }
-
-      function showStylesheetRecovery() {
+      function showStylesheetRecovery(waiting) {
+        if (appStylesReady) return;
         if (!document.body) {
-          window.addEventListener('DOMContentLoaded', showStylesheetRecovery, { once: true });
+          window.addEventListener('DOMContentLoaded', function() {
+            showStylesheetRecovery(waiting);
+          }, { once: true });
           return;
         }
 
-        document.body.removeAttribute('data-shell-pending');
-        document.body.replaceChildren();
-        document.body.style.cssText = 'min-height:100vh;margin:0;display:grid;place-items:center;background:#101824;color:#f7f1e8;font-family:sans-serif;padding:24px;';
-
+        if (stylesheetRecoveryPanel) stylesheetRecoveryPanel.remove();
+        var overlay = document.createElement('div');
+        overlay.id = 'pullbox-stylesheet-recovery';
+        overlay.setAttribute('role', waiting ? 'status' : 'alert');
+        overlay.style.cssText = 'position:fixed;inset:0;z-index:99999;visibility:visible;display:grid;place-items:center;background:#101824;color:#f7f1e8;font-family:sans-serif;padding:24px;overflow:auto;';
         var panel = document.createElement('main');
-        panel.style.cssText = 'width:min(100%,480px);border:1px solid #cbd5e133;border-radius:16px;background:#172231;padding:28px;box-shadow:0 18px 40px #070b1238;';
+        panel.style.cssText = 'box-sizing:border-box;width:min(100%,480px);border:1px solid #cbd5e133;border-radius:16px;background:#172231;padding:28px;box-shadow:0 18px 40px #070b1238;';
 
         var heading = document.createElement('h1');
-        heading.textContent = 'Pullbox could not load its interface';
+        heading.textContent = waiting ? 'Pullbox is still loading' : 'Pullbox could not load its interface';
         heading.style.cssText = 'margin:0;font-size:22px;line-height:1.25;';
 
         var message = document.createElement('p');
-        message.textContent = 'The application is running, but its stylesheet did not load. Check the connection and try again.';
+        message.textContent = waiting
+          ? 'The interface is taking longer than expected to load. This page will appear automatically when it is ready.'
+          : 'The stylesheet could not be loaded. Check the connection and retry. Your page has been preserved.';
         message.style.cssText = 'margin:12px 0 20px;color:#cbd5e1;font-size:15px;line-height:1.6;';
 
         var retryButton = document.createElement('button');
@@ -78,24 +71,28 @@
         retryButton.textContent = 'Retry loading Pullbox';
         retryButton.style.cssText = 'cursor:pointer;border:0;border-radius:8px;background:#8fb9ee;color:#101824;padding:11px 16px;font:700 14px sans-serif;';
         retryButton.addEventListener('click', function() {
-          clearStylesheetReloadGuard();
-          window.location.reload();
+          stylesheetRetryCount = 0;
+          retryStylesheet(document.getElementById('pullbox-app-stylesheet'));
         });
 
         panel.append(heading, message, retryButton);
-        document.body.append(panel);
+        overlay.append(panel);
+        document.body.append(overlay);
+        stylesheetRecoveryPanel = overlay;
       }
 
       function retryStylesheet(link) {
-        if (!link || appStylesReady) {
+        if (!link || !link.isConnected || appStylesReady || stylesheetRetryTimer) {
           return;
         }
+        window.clearTimeout(stylesheetTimeout);
 
         if (stylesheetRetryCount < stylesheetRetryLimit) {
           stylesheetRetryCount += 1;
           var retryNumber = stylesheetRetryCount;
-          window.setTimeout(function() {
-            if (!link.isConnected) {
+          stylesheetRetryTimer = window.setTimeout(function() {
+            stylesheetRetryTimer = null;
+            if (!link.isConnected || appStylesReady) {
               return;
             }
 
@@ -106,7 +103,7 @@
             retryLink.removeAttribute('onload');
             retryLink.removeAttribute('onerror');
             retryLink.addEventListener('load', function() {
-              verifyStylesheet(retryLink);
+              window.pullboxStylesheetLoaded(retryLink);
             }, { once: true });
             retryLink.addEventListener('error', function() {
               retryStylesheet(retryLink);
@@ -117,29 +114,30 @@
           return;
         }
 
-        if (!reloadForStylesheetRecovery()) {
-          showStylesheetRecovery();
-        }
+        showStylesheetRecovery(false);
       }
 
       function verifyStylesheet(link) {
-        requestAnimationFrame(function() {
-          var appSurface = window.getComputedStyle(document.documentElement)
-            .getPropertyValue('--pb-surface-app')
-            .trim();
-          if (!appSurface) {
-            retryStylesheet(link);
-            return;
-          }
+        if (appStylesReady) return true;
+        if (!link || !link.isConnected) return false;
+        // Background tabs may pause animation frames even when CSS is loaded.
+        var appSurface = window.getComputedStyle(document.documentElement)
+          .getPropertyValue('--pb-surface-app')
+          .trim();
+        if (!appSurface) return false;
 
-          appStylesReady = true;
-          clearStylesheetReloadGuard();
-          document.documentElement.setAttribute('data-pullbox-stylesheet-ready', 'true');
-          revealShell();
-        });
+        appStylesReady = true;
+        window.clearTimeout(stylesheetTimeout);
+        window.clearTimeout(stylesheetRetryTimer);
+        document.documentElement.setAttribute('data-pullbox-stylesheet-ready', 'true');
+        document.dispatchEvent(new Event('pullbox:styles-ready'));
+        revealShell();
+        return true;
       }
 
-      window.pullboxStylesheetLoaded = verifyStylesheet;
+      window.pullboxStylesheetLoaded = function(link) {
+        if (!verifyStylesheet(link)) retryStylesheet(link);
+      };
       window.pullboxStylesheetFailed = retryStylesheet;
       window.pullboxArmStylesheetTimeout = armStylesheetTimeout;
 
@@ -197,6 +195,10 @@
           afterHydration(function() {
             if (document.body) {
               document.body.removeAttribute('data-shell-pending');
+            }
+            if (stylesheetRecoveryPanel) {
+              stylesheetRecoveryPanel.remove();
+              stylesheetRecoveryPanel = null;
             }
             armBootTransitionRelease();
           });

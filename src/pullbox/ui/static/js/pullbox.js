@@ -13454,16 +13454,17 @@ function appShell() {
     activityOffset: 0,
     activityPageOffset: 0,
     activityPageSize: 20,
-    activitySource: null,
     activityPollTimer: null,
-    activityRefreshTimer: null,
     activityExpiryTimer: null,
     activityRequestController: null,
     activityRequestTimer: null,
     activityRefreshQueued: false,
     activityDestroyed: false,
-    activityStreamOpen: false,
     activityRefreshing: false,
+    activityPageHidden: false,
+    activityVisibilityHandler: null,
+    activityPageHideHandler: null,
+    activityPageShowHandler: null,
 
     get collapsed() {
       return !this.sidebarOpen && !this.sidebarMobileOpen;
@@ -13503,20 +13504,30 @@ function appShell() {
 
     destroy: function () {
       this.activityDestroyed = true;
-      if (this.activityRequestController) {
-        this.activityRequestController.abort();
-      }
-      window.clearTimeout(this.activityRequestTimer);
-      window.clearTimeout(this.activityExpiryTimer);
+      this.pauseActivity();
+      document.removeEventListener("visibilitychange", this.activityVisibilityHandler);
+      document.removeEventListener("pullbox:styles-ready", this.activityVisibilityHandler);
+      window.removeEventListener("pagehide", this.activityPageHideHandler);
+      window.removeEventListener("pageshow", this.activityPageShowHandler);
       if (this.resizeHandler) {
         window.removeEventListener("resize", this.resizeHandler);
       }
       if (window.__pullboxUpdateUsageStatsPreference) {
         delete window.__pullboxUpdateUsageStatsPreference;
       }
-      this.disconnectActivityStream();
+    },
+
+    canRefreshActivity: function () {
+      return !this.activityDestroyed && !this.activityPageHidden && !document.hidden &&
+        document.documentElement.getAttribute("data-pullbox-stylesheet-ready") === "true";
+    },
+
+    pauseActivity: function () {
       this.clearActivityTimer();
-      this.clearActivityRefreshTimer();
+      window.clearTimeout(this.activityExpiryTimer);
+      window.clearTimeout(this.activityRequestTimer);
+      this.activityRefreshQueued = false;
+      if (this.activityRequestController) this.activityRequestController.abort();
     },
 
     clearActivityTimer: function () {
@@ -13528,7 +13539,7 @@ function appShell() {
 
     scheduleActivityPoll: function (delayMs) {
       var self = this;
-      if (self.activityDestroyed) return;
+      if (!self.canRefreshActivity()) return;
       self.clearActivityTimer();
       self.activityPollTimer = window.setTimeout(function () {
         self.activityPollTimer = null;
@@ -13536,26 +13547,27 @@ function appShell() {
       }, delayMs || 3000);
     },
 
-    clearActivityRefreshTimer: function () {
-      if (this.activityRefreshTimer) {
-        window.clearTimeout(this.activityRefreshTimer);
-        this.activityRefreshTimer = null;
-      }
-    },
-
-    scheduleActivityRefresh: function (delayMs) {
-      var self = this;
-      // Coalesce bursts without postponing the first pending refresh indefinitely.
-      if (self.activityDestroyed || self.activityRefreshTimer) return;
-      self.activityRefreshTimer = window.setTimeout(function () {
-        self.activityRefreshTimer = null;
-        self.refreshActivity();
-      }, delayMs || 500);
-    },
-
     bootstrapActivity: function () {
-      this.connectActivityStream();
-      this.refreshActivity();
+      var self = this;
+      // Short requests leave HTTP/1.1 connections available to other tabs.
+      self.activityVisibilityHandler = function () {
+        if (self.canRefreshActivity()) self.refreshActivity();
+        else self.pauseActivity();
+      };
+      self.activityPageHideHandler = function () {
+        self.activityPageHidden = true;
+        self.pauseActivity();
+      };
+      self.activityPageShowHandler = function (event) {
+        if (!self.activityPageHidden && !event.persisted) return;
+        self.activityPageHidden = false;
+        self.activityVisibilityHandler();
+      };
+      document.addEventListener("visibilitychange", self.activityVisibilityHandler);
+      document.addEventListener("pullbox:styles-ready", self.activityVisibilityHandler);
+      window.addEventListener("pagehide", self.activityPageHideHandler);
+      window.addEventListener("pageshow", self.activityPageShowHandler);
+      self.refreshActivity();
     },
 
     toggleActivity: function () {
@@ -13591,18 +13603,16 @@ function appShell() {
 
     refreshActivity: function () {
       var self = this;
-      if (self.activityDestroyed) return;
+      if (!self.canRefreshActivity()) return;
       if (self.activityRefreshing) {
         self.activityRefreshQueued = true;
         return;
       }
-      self.clearActivityRefreshTimer();
       self.clearActivityTimer();
       self.activityRefreshing = true;
       self.activityRefreshQueued = false;
       var offset = self.activityOffset;
       var startedAt = Date.now();
-      var requestFailed = false;
       var controller = new AbortController();
       self.activityRequestController = controller;
       self.activityRequestTimer = window.setTimeout(function () {
@@ -13619,7 +13629,7 @@ function appShell() {
           return response.json();
         })
         .then(function (payload) {
-          if (self.activityDestroyed) return;
+          if (!self.canRefreshActivity()) return;
           var operations = payload && Array.isArray(payload.operations) ? payload.operations : [];
           var total = Math.max(0, Number(payload && payload.total_count) || operations.length);
           var lastOffset = Math.max(0, Math.ceil(total / self.activityPageSize) - 1) * self.activityPageSize;
@@ -13648,70 +13658,18 @@ function appShell() {
         })
         .catch(function () {
           // Activity is supplemental; a transient failure must not interrupt the page.
-          requestFailed = true;
         })
         .finally(function () {
           window.clearTimeout(self.activityRequestTimer);
           self.activityRequestController = null;
           self.activityRefreshing = false;
-          if (self.activityDestroyed) return;
+          if (!self.canRefreshActivity()) return;
           if (self.activityRefreshQueued) {
             self.refreshActivity();
             return;
           }
-          if (!self.activityStreamOpen) {
-            self.scheduleActivityPoll(3000);
-          } else if (requestFailed) {
-            self.scheduleActivityPoll(3000);
-          }
-          if (!self.activitySource) {
-            self.connectActivityStream();
-          }
+          self.scheduleActivityPoll(3000);
         });
-    },
-
-    connectActivityStream: function () {
-      var self = this;
-      if (self.activityDestroyed || self.activitySource) {
-        return;
-      }
-      var source = new EventSource("/api/v1/activity/stream");
-      self.activitySource = source;
-      var refreshFromEvent = function () {
-        if (self.activitySource === source) {
-          self.scheduleActivityRefresh(500);
-        }
-      };
-      source.onopen = function () {
-        if (self.activitySource !== source) {
-          return;
-        }
-        self.activityStreamOpen = true;
-        self.clearActivityTimer();
-      };
-      source.addEventListener("ready", refreshFromEvent);
-      source.addEventListener("progress", refreshFromEvent);
-      source.onmessage = refreshFromEvent;
-      source.onerror = function () {
-        if (self.activitySource !== source) {
-          return;
-        }
-        self.disconnectActivityStream();
-        self.scheduleActivityPoll(3000);
-      };
-    },
-
-    disconnectActivityStream: function () {
-      if (!this.activitySource) {
-        return;
-      }
-      try {
-        this.activitySource.close();
-      } catch (_) {
-        // Closing a stale activity stream is best-effort.
-      }
-      this.activitySource = null;
-      this.activityStreamOpen = false;
     },
 
     acknowledgeActivity: function (operationId) {
