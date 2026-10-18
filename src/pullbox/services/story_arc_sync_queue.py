@@ -1380,18 +1380,9 @@ async def enqueue_import_story_arc_sync_work(
     return results[0]
 
 
-async def discover_story_arc_sync_work(
-    session: AsyncSession,
-    *,
-    limit: int = DEFAULT_STORY_ARC_DISCOVERY_LIMIT,
-) -> int:
-    """Boundedly recover eligible canonical files with no current work generation."""
-    if isinstance(limit, bool) or not 1 <= limit <= DEFAULT_STORY_ARC_DISCOVERY_LIMIT:
-        raise ValueError(
-            f"Story-arc discrepancy limit must be from 1 to {DEFAULT_STORY_ARC_DISCOVERY_LIMIT}"
-        )
-
-    current_work = exists().where(
+def current_story_arc_sync_conditions() -> Any:
+    """Match current membership, policy and source evidence without reading files."""
+    return and_(
         StoryArcSyncWork.issue_story_arc_id == IssueStoryArc.id,
         StoryArcSyncWork.library_file_id == LibraryFile.id,
         StoryArcSyncWork.story_arc_revision == StoryArc.revision,
@@ -1456,6 +1447,19 @@ async def discover_story_arc_sync_work(
             ),
         ),
     )
+
+
+async def discover_story_arc_sync_work(
+    session: AsyncSession,
+    *,
+    limit: int = DEFAULT_STORY_ARC_DISCOVERY_LIMIT,
+) -> int:
+    """Boundedly recover eligible canonical files with no current work generation."""
+    if isinstance(limit, bool) or not 1 <= limit <= DEFAULT_STORY_ARC_DISCOVERY_LIMIT:
+        raise ValueError(
+            f"Story-arc discrepancy limit must be from 1 to {DEFAULT_STORY_ARC_DISCOVERY_LIMIT}"
+        )
+    current_work = exists().where(current_story_arc_sync_conditions())
     rows = list(
         (
             await session.execute(

@@ -20,6 +20,7 @@ from pullbox.api.deps import (  # noqa: TC001 - FastAPI resolves route annotatio
     DbSession,
 )
 from pullbox.config import get_settings
+from pullbox.core.exceptions import NotFoundError, ValidationError
 from pullbox.core.metadata_identity import MetadataSource  # noqa: TC001
 from pullbox.core.story_arc_naming import (
     DEFAULT_STORY_ARC_FILE_TEMPLATE,
@@ -56,6 +57,11 @@ from pullbox.services.story_arc_service import (
     StoryArcService,
     StoryArcServiceError,
     StoryArcValidationError,
+)
+from pullbox.services.story_arc_sync_queue import request_story_arc_sync_now
+from pullbox.services.story_arc_sync_recovery import (
+    load_story_arc_file_sync_status,
+    retry_story_arc_files,
 )
 from pullbox.ui import story_arc_catalog_routes, story_arc_source_routes
 from pullbox.ui.metadata_arc_search import arc_search_context
@@ -359,8 +365,71 @@ async def _render_story_arc_detail(
         reorder_preview=reorder_preview,
         reorder_message=reorder_message,
         show_placement_diagnostics=placement_proposal is not None,
+        file_sync=await load_story_arc_file_sync_status(session, story_arc_id),
     )
     return _templates().TemplateResponse(request, "pages/story_arc_detail.html", context)
+
+
+async def _file_sync_response(
+    request: Request,
+    user: AuthenticatedUser,
+    session: DbSession,
+    story_arc_id: int,
+    *,
+    message: str = "",
+) -> Response:
+    try:
+        status = await load_story_arc_file_sync_status(session, story_arc_id)
+    except NotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Story arc not found") from exc
+    return _templates().TemplateResponse(
+        request,
+        "partials/story_arc_file_sync.html",
+        _ctx(request, user, file_sync=status, file_sync_message=message),
+    )
+
+
+@router.get("/story-arcs/{story_arc_id}/file-sync", include_in_schema=False)
+async def story_arc_file_sync_status(
+    story_arc_id: int,
+    request: Request,
+    user: AuthenticatedUser,
+    session: DbSession,
+) -> Response:
+    """Refresh only the small arc-file status surface, without filesystem inspection."""
+    return await _file_sync_response(request, user, session, story_arc_id)
+
+
+@router.post("/story-arcs/{story_arc_id}/file-sync/retry", include_in_schema=False)
+async def story_arc_file_sync_retry(
+    story_arc_id: int,
+    request: Request,
+    user: AuthenticatedUser,
+    session: DbSession,
+    expected_revision: Annotated[int, Form(ge=1)],
+) -> Response:
+    """Recheck saved destination access and queue current failures in the background."""
+    try:
+        count = await retry_story_arc_files(
+            session,
+            story_arc_id,
+            expected_revision=expected_revision,
+        )
+        await session.commit()
+    except NotFoundError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=404, detail="Story arc not found") from exc
+    except (ValidationError, StoryArcPlacementIntegrationError) as exc:
+        await session.rollback()
+        return await _file_sync_response(request, user, session, story_arc_id, message=str(exc))
+    request_story_arc_sync_now()
+    return await _file_sync_response(
+        request,
+        user,
+        session,
+        story_arc_id,
+        message=f"{count} files queued for recheck. Original library files stay unchanged.",
+    )
 
 
 async def _nested_memberships(

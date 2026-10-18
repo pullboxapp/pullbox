@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -30,6 +31,7 @@ from pullbox.services.story_arc_placement_integration import (
     StoryArcPlacementSyncService,
 )
 from pullbox.services.story_arc_sync_queue import process_story_arc_sync_work
+from pullbox.services.story_arc_sync_recovery import retry_story_arc_files
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -46,6 +48,7 @@ async def db_factory(tmp_path: Path) -> AsyncGenerator[async_sessionmaker[AsyncS
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("retry_destination_failure", [False, True])
 @pytest.mark.parametrize(
     "file_template,expected_name",
     [
@@ -59,6 +62,8 @@ async def test_later_acquisition_registers_once_and_populates_active_arc(
     tmp_path: Path,
     file_template: str,
     expected_name: str,
+    retry_destination_failure: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     comics = tmp_path / "comics"
     comics.mkdir()
@@ -133,6 +138,24 @@ async def test_later_acquisition_registers_once_and_populates_active_arc(
         await session.commit()
         canonical_path = canonical.file_path
 
+    original = Path(canonical_path).read_bytes()
+    original_stat = Path(canonical_path).stat()
+    if retry_destination_failure:
+        access = os.access
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                os,
+                "access",
+                lambda path, flags: False if Path(path) == arcs else access(path, flags),
+            )
+            failed = await process_story_arc_sync_work(session_factory=db_factory, discover=False)
+        assert failed.failed == 1
+        assert list(arcs.iterdir()) == []
+        async with db_factory() as session:
+            arc = await session.get(StoryArc, arc_id)
+            assert await retry_story_arc_files(session, arc_id, expected_revision=arc.revision) == 1
+            await session.commit()
+
     result = await process_story_arc_sync_work(
         session_factory=db_factory,
         batch_size=10,
@@ -158,6 +181,9 @@ async def test_later_acquisition_registers_once_and_populates_active_arc(
     assert result.completed == 1
     assert result.failed == 0
     assert repeated.claimed == 0
+    assert Path(canonical_path).read_bytes() == original
+    assert Path(canonical_path).stat().st_mtime_ns == original_stat.st_mtime_ns
+    assert Path(canonical_path).stat().st_ino == original_stat.st_ino
     assert library_file_count == 1
     assert placement is not None
     assert placement.state is StoryArcPlacementState.CURRENT

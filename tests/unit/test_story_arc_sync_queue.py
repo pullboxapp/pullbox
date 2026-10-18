@@ -40,6 +40,10 @@ from pullbox.services.story_arc_sync_queue import (
     discover_story_arc_sync_work,
     enqueue_story_arc_sync_work,
 )
+from pullbox.services.story_arc_sync_recovery import (
+    load_story_arc_file_sync_status,
+    retry_story_arc_files,
+)
 from tests.sqlite_schema import create_test_schema
 
 if TYPE_CHECKING:
@@ -183,6 +187,129 @@ async def _record_action(
     session.add(action)
     await session.flush()
     return action
+
+
+async def test_user_retry_reopens_current_failure_once_without_touching_source(
+    db_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    issue_id, file_id = await _seed_canonical_file(db_factory, tmp_path)
+    member_id = await _add_membership(db_factory, tmp_path, issue_id=issue_id, name="House of M")
+    async with db_factory() as session:
+        source = await session.get(LibraryFile, file_id)
+        await enqueue_story_arc_sync_work(session, source)
+        work = await session.scalar(select(StoryArcSyncWork))
+        work.state = StoryArcSyncWorkState.FAILED
+        work.last_error_code = "root_unavailable"
+        work.last_error_category = "safety"
+        work.attempt_count = 1
+        member = await session.get(IssueStoryArc, member_id)
+        arc_id = member.story_arc_id
+        await session.commit()
+        assert await retry_story_arc_files(session, arc_id, expected_revision=2) == 1
+        await session.commit()
+        await session.refresh(work)
+        assert work.state == StoryArcSyncWorkState.QUEUED
+        assert work.attempt_count == 0
+        assert await retry_story_arc_files(session, arc_id, expected_revision=2) == 0
+        await session.commit()
+    assert (tmp_path / "library" / "Batman 001.cbz").read_bytes() == b"canonical"
+    assert list((tmp_path / "library" / "StoryArcs-House of M").iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "changed", ["revision", "source", "completed", "cancelled", "import", "archived", "disabled"]
+)
+async def test_user_retry_preserves_ineligible_work(
+    db_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    changed: str,
+) -> None:
+    issue_id, file_id = await _seed_canonical_file(db_factory, tmp_path)
+    member_id = await _add_membership(db_factory, tmp_path, issue_id=issue_id, name="House of M")
+    async with db_factory() as session:
+        source = await session.get(LibraryFile, file_id)
+        await enqueue_story_arc_sync_work(session, source)
+        work = await session.scalar(select(StoryArcSyncWork))
+        work.state = StoryArcSyncWorkState.FAILED
+        member = await session.get(IssueStoryArc, member_id)
+        arc = await session.get(StoryArc, member.story_arc_id)
+        if changed == "revision":
+            arc.revision += 1
+        elif changed == "source":
+            source.file_size += 1
+        elif changed == "completed":
+            work.state = StoryArcSyncWorkState.COMPLETED
+        elif changed == "cancelled":
+            work.state = StoryArcSyncWorkState.CANCELLED
+        elif changed == "import":
+            job = ImportJob(source_path="/tmp/mylar.db", source_type=ImportSourceType.MYLAR3)
+            session.add(job)
+            await session.flush()
+            work.origin_import_job_id = job.id
+        elif changed == "archived":
+            arc.lifecycle = StoryArcLifecycle.ARCHIVED
+        else:
+            arc.sync_enabled = False
+        initial_state = work.state
+        await session.commit()
+        if changed in {"archived", "disabled"}:
+            with pytest.raises(ValidationError):
+                await retry_story_arc_files(session, arc.id, expected_revision=arc.revision)
+        else:
+            assert await retry_story_arc_files(session, arc.id, expected_revision=arc.revision) == 0
+        await session.refresh(work)
+        assert work.state == initial_state
+
+
+async def test_retry_status_counts_only_current_work_and_rechecks_permission(
+    db_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+    from pathlib import Path
+
+    from pullbox.services.story_arc_placement_integration import StoryArcPlacementIntegrationError
+
+    issue_id, file_id = await _seed_canonical_file(db_factory, tmp_path)
+    member_id = await _add_membership(db_factory, tmp_path, issue_id=issue_id, name="House of M")
+    async with db_factory() as session:
+        source = await session.get(LibraryFile, file_id)
+        await enqueue_story_arc_sync_work(session, source)
+        old_work = await session.scalar(select(StoryArcSyncWork))
+        old_work.state = StoryArcSyncWorkState.FAILED
+        member = await session.get(IssueStoryArc, member_id)
+        arc = await session.get(StoryArc, member.story_arc_id)
+        arc.revision += 1
+        await enqueue_story_arc_sync_work(session, source)
+        current = await session.scalar(
+            select(StoryArcSyncWork).order_by(StoryArcSyncWork.id.desc())
+        )
+        current.state = StoryArcSyncWorkState.FAILED
+        current.last_error_code = "root_unavailable"
+        await session.commit()
+        status = await load_story_arc_file_sync_status(session, arc.id)
+        assert (status.total, status.failed, status.destination_failures) == (1, 1, 1)
+        with pytest.raises(ValidationError, match="changed"):
+            await retry_story_arc_files(session, arc.id, expected_revision=arc.revision - 1)
+        destination = tmp_path / "library" / "StoryArcs-House of M"
+        access = os.access
+        monkeypatch.setattr(
+            os,
+            "access",
+            lambda path, flags: False if Path(path) == destination else access(path, flags),
+        )
+        with pytest.raises(StoryArcPlacementIntegrationError, match="permissions"):
+            await retry_story_arc_files(session, arc.id, expected_revision=arc.revision)
+        await session.refresh(current)
+        assert current.state == StoryArcSyncWorkState.FAILED
+        monkeypatch.setattr(os, "access", access)
+        assert await retry_story_arc_files(session, arc.id, expected_revision=arc.revision) == 1
+        await session.commit()
+        status = await load_story_arc_file_sync_status(session, arc.id)
+        assert (status.total, status.pending, status.failed) == (1, 1, 0)
+        assert old_work.state == StoryArcSyncWorkState.FAILED
 
 
 async def _seed_import_enqueue_context(
