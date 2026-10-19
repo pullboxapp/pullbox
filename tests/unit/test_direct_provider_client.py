@@ -364,6 +364,36 @@ async def test_client_preserves_bounded_source_quota_retry_hint() -> None:
     assert TOKEN not in str(exc_info.value)
 
 
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ("resolver_source_blocked", "could not clear the source's browser challenge"),
+        ("resolver_source_backoff", "temporarily paused for this source"),
+        ("resolver_timed_out", "deadline"),
+        ("resolver_future_failure", "Provider browser resolver attempt failed."),
+    ],
+)
+async def test_client_explains_known_resolver_failures_without_upstream_text(
+    code: str, expected: str
+) -> None:
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(503, json={"error": {"code": code, "message": TOKEN}})
+    )
+    async with httpx.AsyncClient(transport=transport) as http_client:
+        client = DirectProviderClient(
+            endpoint="https://provider.example",
+            bearer_token=TOKEN,
+            resolver=_resolve_public,
+            http_client=http_client,
+        )
+        with pytest.raises(DirectProviderClientError) as exc_info:
+            await client.manifest()
+    assert exc_info.value.code == code
+    assert exc_info.value.retryable
+    assert expected in str(exc_info.value)
+    assert TOKEN not in str(exc_info.value)
+
+
 async def test_client_preserves_cooperative_cancellation() -> None:
     async def handler(_request: httpx.Request) -> httpx.Response:
         await asyncio.sleep(60)

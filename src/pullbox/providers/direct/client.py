@@ -345,6 +345,20 @@ def _safe_provider_error(content: bytes) -> tuple[str, str, bool, int | None] | 
             "Provider source access requires browser challenge handling.",
             True,
         ),
+        "resolver_source_blocked": (
+            "The resolver could not clear the source's browser challenge. "
+            "Other resolvers may still work.",
+            True,
+        ),
+        "resolver_source_backoff": (
+            "This resolver is temporarily paused for this source after repeated failures. "
+            "Pullbox can try the next configured resolver; this one will be retried later.",
+            True,
+        ),
+        "resolver_timed_out": (
+            "The resolver attempt exceeded its deadline. Other resolvers may still work.",
+            True,
+        ),
     }
     raw_retry_after = decoded["error"].get("retry_after_seconds")
     retry_after_seconds = (
