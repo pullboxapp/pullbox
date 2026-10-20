@@ -13,6 +13,7 @@
     </div>
     <div class="flex flex-wrap items-center gap-2">
       {% include "partials/series_metadata_editor.html" %}
+      {% include "partials/series_metadata_propagation.html" %}
       {% include "partials/series_sidecar.html" %}
       <button type="button" class="btn-ghost btn-sm" @click="openLink()" :disabled="loading">Link provider</button>
     </div>

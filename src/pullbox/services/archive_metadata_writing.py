@@ -57,6 +57,7 @@ def write_cbz_metadata(
     pdf_quality: PdfQuality = "medium",
     metadata_state: SeriesRefreshState | None = None,
     shared_choices: SharedXmlChoices | None = None,
+    propagation_fields: frozenset[str] | None = None,
 ) -> bool:
     """Write a verified pair in one CBZ construction, off the event loop.
 
@@ -139,6 +140,7 @@ def write_cbz_metadata(
                 previous_issue=previous_issue,
                 replace_managed=replace_managed,
                 shared_choices=shared_choices,
+                propagation_fields=propagation_fields,
             )
             outputs = {"ComicInfo.xml": pair.comicinfo, "MetronInfo.xml": pair.metroninfo}
             members = [entry for entry in entries if not _metadata_member(entry)]

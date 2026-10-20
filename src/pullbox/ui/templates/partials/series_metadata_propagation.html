@@ -1,0 +1,67 @@
+<div x-data="seriesMetadataPropagation({{ series.id }})" data-testid="series-metadata-propagation">
+  <button type="button" class="btn-ghost btn-sm" @click="show()">Update comic metadata</button>
+  <template x-teleport="body">
+    <div class="modal-shell" x-show="open" x-cloak @keydown.escape.window.capture="escape($event)" @keydown.tab.window="trapFocus($event)">
+      <div class="modal-backdrop" @click="close()"></div>
+      <section class="modal-panel max-w-2xl max-h-[calc(100dvh-5rem)] min-h-0" role="dialog" aria-modal="true" aria-labelledby="series-propagation-title" tabindex="-1" x-ref="dialog" data-testid="series-propagation-dialog">
+        <header class="modal-header shrink-0"><h2 class="modal-title" id="series-propagation-title">Update series comic metadata</h2></header>
+        <div class="modal-body min-h-0 space-y-4 p-5" :aria-busy="busy" tabindex="0" role="region" aria-label="Comic metadata review">
+          <p class="text-sm text-pb-text-sec">Copy selected library series values into ComicInfo.xml and MetronInfo.xml in managed CBZ files. Preview first, then choose which files to update.</p>
+          <p class="text-sm text-pb-text-sec">Issue titles, summaries, dates, reading progress, pages, filenames, series.json and story arc copies stay unchanged. Empty selected values are cleared only where the preview permits it.</p>
+          <p class="text-sm text-pb-error" role="alert" x-show="error" x-text="error" x-cloak></p>
+          <p class="text-sm text-pb-error" role="alert" x-show="report && report.job && report.job.error && !(report.targets || []).length" x-text="report && report.job ? report.job.error : ''" x-cloak></p>
+          <fieldset class="space-y-2" :disabled="busy || active()">
+            <legend class="field-label">Series fields to copy</legend>
+            <template x-for="option in options" :key="option.key">
+              <label class="flex items-center gap-2 text-sm text-pb-text"><input type="checkbox" class="checkbox-pb" :value="option.key" x-model="fields" @change="invalidate()"><span x-text="option.label"></span></label>
+            </template>
+          </fieldset>
+          <p class="text-sm text-pb-text-sec" x-show="busy" role="status">Preparing your request...</p>
+          <div x-show="report && report.job" class="space-y-3">
+            <p class="text-sm text-pb-text" role="status" x-text="active() ? (report.mode === 'preview' ? 'Checking comic files...' : 'Updating approved files...') : summary()"></p>
+            <div class="app-progress">
+              <div class="app-progress-track"><div class="app-progress-fill app-progress-fill--interactive" :class="{'is-indeterminate': report && report.job && report.job.percent === null}" :style="report && report.job && report.job.percent !== null ? 'width: ' + report.job.percent + '%' : ''" role="progressbar" aria-label="Comic metadata progress" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="report && report.job ? report.job.percent : null"></div></div>
+              <span class="app-progress-value" x-text="report && report.job && report.job.percent !== null ? Math.round(report.job.percent) + '%' : ''"></span>
+            </div>
+            <p class="text-sm text-pb-text-sec" x-show="active()">You can close this window. Work continues in Background activity and Utilities. Cancelling stops unfinished files; completed files stay updated.</p>
+            <a class="btn-ghost btn-sm" href="/utilities?tab=queue" x-show="report && report.job && report.job.state === 'PAUSED'">Resume in Utilities</a>
+            <p class="text-sm text-pb-warning" x-show="report && !active() && report.mode === 'preview' && !approved">Field selection changed. Preview again before updating files.</p>
+            <div class="flex flex-wrap gap-2" x-show="ready() && (report.ready_ids || []).length">
+              <button type="button" class="btn-ghost btn-sm" @click="selected = report.ready_ids.slice()">Select all ready files</button>
+              <button type="button" class="btn-ghost btn-sm" @click="selected = []">Deselect all</button>
+            </div>
+            <div class="space-y-2" data-testid="series-propagation-results">
+              <template x-for="target in (report ? report.targets || [] : [])" :key="target.issue_id">
+                <article class="rounded-lg border border-pb-border p-3 space-y-2 min-w-0">
+                  <div class="flex flex-wrap items-center gap-2">
+                    <input type="checkbox" class="checkbox-pb" x-show="ready() && target.outcome === 'ready'" :aria-label="'Update ' + target.label" :checked="selected.includes(target.issue_id)" @change="toggle(target.issue_id)" :disabled="busy">
+                    <span class="text-sm font-semibold text-pb-text" x-text="target.label"></span>
+                    <span class="text-xs text-pb-text-sec" x-text="label(target.outcome)"></span>
+                    <a class="btn-ghost btn-sm ml-auto" :href="'/issues/' + target.issue_id" x-show="target.outcome === 'attention'">Review issue</a>
+                  </div>
+                  <p class="text-xs text-pb-text-sec break-all" x-text="target.file_name"></p>
+                  <p class="text-sm text-pb-warning break-words" x-show="target.reason" x-text="target.reason"></p>
+                  <details x-show="(target.changes || []).length"><summary class="text-sm text-pb-text cursor-pointer">Preview changes</summary>
+                    <template x-for="change in target.changes || []" :key="change.document + change.field">
+                      <div class="text-sm space-y-1 py-2 break-words"><p class="text-pb-text-sec" x-text="change.document + ' - ' + change.field"></p><p class="text-pb-text" x-text="'Before: ' + (change.before || 'Not set')"></p><p class="text-pb-text" x-text="'After: ' + (change.after || 'Cleared')"></p></div>
+                    </template>
+                  </details>
+                </article>
+              </template>
+            </div>
+            <nav class="flex items-center justify-between gap-2" aria-label="Comic metadata results pages" x-show="report && report.pages > 1">
+              <button type="button" class="btn-ghost btn-sm" :disabled="busy || page <= 1" @click="turnPage(-1)">Previous</button><span class="text-sm text-pb-text-sec" x-text="report ? page + ' of ' + report.pages : ''"></span><button type="button" class="btn-ghost btn-sm" :disabled="busy || !report || page >= report.pages" @click="turnPage(1)">Next</button>
+            </nav>
+          </div>
+        </div>
+        <footer class="modal-footer shrink-0 flex-wrap">
+          <button type="button" class="btn-ghost" @click="close()">Close</button>
+          <button type="button" class="btn-ghost" @click="cancel()" x-show="active()" :disabled="busy || (report && report.job && report.job.state === 'CANCELLING')">Cancel unfinished files</button>
+          <button type="button" class="btn-ghost" @click="preview()" x-show="!active()" :disabled="busy || !fields.length">Preview comic files</button>
+          <button type="button" class="btn-primary" @click="retry()" x-show="report && report.retryable && !active()" :disabled="busy">Retry unfinished files</button>
+          <button type="button" class="btn-primary" @click="write()" x-show="ready()" :disabled="busy || !selected.length" x-text="'Update ' + selected.length + ' selected file' + (selected.length === 1 ? '' : 's')"></button>
+        </footer>
+      </section>
+    </div>
+  </template>
+</div>

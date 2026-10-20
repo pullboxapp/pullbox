@@ -70,6 +70,7 @@ def render_archive_metadata(
     previous_issue: MetadataSnapshot | None = None,
     replace_managed: bool = False,
     shared_choices: SharedXmlChoices | None = None,
+    propagation_fields: frozenset[str] | None = None,
 ) -> RenderedArchiveMetadata:
     """Render both documents from bound snapshots; this is not write permission.
 
@@ -77,6 +78,10 @@ def render_archive_metadata(
     metadata into these snapshots, and authorize the eventual file operation.
     Previous managed baselines authorize refresh only while XML is unchanged.
     """
+    if propagation_fields is not None:
+        from pullbox.services.series_metadata_propagation_rendering import render_series_propagation
+
+        return render_series_propagation(series, issue, files, propagation_fields)
     from pullbox.services.archive_series_metadata import archive_render_series
 
     series = archive_render_series(series)

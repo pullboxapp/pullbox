@@ -12,7 +12,7 @@ from threading import Event
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -61,6 +61,24 @@ class ArchivePublicationPlan(BaseModel):
     issue: MetadataSnapshot
     import_owner: ImportArchiveOwner | None = None
     metadata_job_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
+    propagation_fields: frozenset[str] | None = None
+
+    @model_validator(mode="after")
+    def validate_projection(self) -> "ArchivePublicationPlan":
+        if self.propagation_fields is not None:
+            from pullbox.services.series_metadata_propagation_preview import canonical_snapshot
+            from pullbox.services.series_metadata_propagation_rendering import FIELDS
+
+            bound = self.target.binding.metadata
+            if (
+                not self.propagation_fields
+                or not self.propagation_fields <= FIELDS.keys()
+                or self.import_owner is not None
+                or self.series != canonical_snapshot(bound.series, MetadataEntityKind.SERIES)
+                or self.issue != canonical_snapshot(bound.issues[0], MetadataEntityKind.ISSUE)
+            ):
+                raise ValueError("Invalid selected-field propagation plan")
+        return self
 
 
 @dataclass(frozen=True)
@@ -148,9 +166,13 @@ async def prepare_archive_publication(
     staged: StagedArchiveMetadata,
     series: MetadataSnapshot,
     issue: MetadataSnapshot,
+    *,
+    propagation_fields: frozenset[str] | None = None,
 ) -> ArchivePublicationPlan:
     """Hash verified evidence outside DB sessions; change only the private stage mode."""
-    return await _file_work(lambda stop: _prepare(target, staged, series, issue, stop))
+    return await _file_work(
+        lambda stop: _prepare(target, staged, series, issue, stop, propagation_fields)
+    )
 
 
 def _prepare(
@@ -159,6 +181,7 @@ def _prepare(
     series: MetadataSnapshot,
     issue: MetadataSnapshot,
     stop: Event,
+    propagation_fields: frozenset[str] | None = None,
 ) -> ArchivePublicationPlan:
     _check_cancelled(stop)
     bound = target.binding.metadata
@@ -181,9 +204,18 @@ def _prepare(
     staged.check_unchanged()
     files = read_archive_metadata(staged.path, "cbz", max_solid_scan_bytes=_MAX_PLAN_BYTES)
     try:
-        pair = render_archive_metadata(series, issue, files)
+        pair = render_archive_metadata(series, issue, files, propagation_fields=propagation_fields)
         if pair.comicinfo != files.comicinfo.payload or pair.metroninfo != files.metroninfo.payload:
             raise ArchivePublicationError("snapshot_disagrees")
+        if propagation_fields is not None:
+            original = read_archive_metadata(
+                target.path, "cbz", max_solid_scan_bytes=_MAX_PLAN_BYTES
+            )
+            expected = render_archive_metadata(
+                series, issue, original, propagation_fields=propagation_fields
+            )
+            if expected != pair:
+                raise ArchivePublicationError("snapshot_disagrees")
     except ArchiveMetadataRenderError:
         raise ArchivePublicationError("snapshot_disagrees") from None
     _check_cancelled(stop)
@@ -202,6 +234,7 @@ def _prepare(
         output_digest=_digest(staged.path, output, stop),
         series=series,
         issue=issue,
+        propagation_fields=propagation_fields,
     )
     _encode(plan)
     return plan

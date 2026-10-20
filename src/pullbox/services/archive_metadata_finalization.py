@@ -133,7 +133,10 @@ async def finalize_archive_publication(
         await require_import_archive_owner(session, plan)
         await revalidate_archive_metadata_target(session, plan.target)
         modified_at = await _file_work(lambda stop: _check_output(receipt, inspection))
-        await apply_bound_archive_metadata(session, plan.target.binding, plan.series, plan.issue)
+        if plan.propagation_fields is None:
+            await apply_bound_archive_metadata(
+                session, plan.target.binding, plan.series, plan.issue
+            )
         file = await session.get(LibraryFile, plan.target.binding.library_file_id)
         assert file is not None
         assert inspection.fingerprint is not None

@@ -31,6 +31,14 @@ class FileMetadataExecutor(JobExecutor):
     execution_mode = ExecutionMode.ASYNC
 
     def validate_config(self, job_config: dict[str, Any]) -> list[str]:
+        if "series_propagation" in job_config:
+            from pullbox.services.series_metadata_propagation import read_plan
+
+            try:
+                read_plan(job_config)
+            except (ValueError, TypeError, KeyError):
+                return ["Preview the series comic metadata before writing."]
+            return []
         if "series_editor" in job_config:
             try:
                 read_editor_plan(job_config)
@@ -85,6 +93,13 @@ class FileMetadataExecutor(JobExecutor):
     async def generate_items(
         self, job_config: dict[str, Any], job_context: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
+        if "series_propagation" in job_config:
+            from pullbox.services.series_metadata_propagation import read_plan
+
+            return [
+                {"operation": "series_propagation", "target_index": index}
+                for index, _ in enumerate(read_plan(job_config).targets)
+            ]
         if "series_editor" in job_config:
             plan = read_editor_plan(job_config)
             return [
@@ -182,6 +197,14 @@ class FileMetadataExecutor(JobExecutor):
                     if stage == "verifying"
                     else 90
                 )
+                if "series_propagation" in job_config:
+                    total_items = max(job.total_items or 1, 1)
+                    finished = (
+                        (job.completed_items or 0)
+                        + (job.failed_items or 0)
+                        + (job.skipped_items or 0)
+                    )
+                    percent = min(99, (finished + percent / 100) / total_items * 100)
                 await publish_operation_progress(
                     session,
                     replace(
@@ -209,6 +232,15 @@ class FileMetadataExecutor(JobExecutor):
                 DirectMetadataRecoveryError,
                 run_direct_metadata_recovery,
             )
+
+            if "series_propagation" in job_config:
+                from pullbox.utilities.executors.series_metadata_propagation import (
+                    process_projection,
+                )
+
+                return await process_projection(
+                    item_data, job_config, context, check_control, progress, job_id
+                )
 
             recovery_id = job_config.get("recovery_pending_id")
             writer = (

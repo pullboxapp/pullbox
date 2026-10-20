@@ -85,6 +85,16 @@ def file_metadata_error(exc: BaseException) -> str:
     if isinstance(exc, IssueMetadataEditError):
         return str(exc)
     code = getattr(exc, "code", "")
+    if code == "propagation_pair_required":
+        return (
+            "This file needs a reconciled XML pair first. Open its issue page, "
+            "use Write file metadata to review both documents, then preview this series again."
+        )
+    if code == "propagation_issue_override":
+        return (
+            "An issue-level manual correction protects a selected field. Review it in "
+            "Edit metadata on the issue page; this file was left unchanged."
+        )
     if code == "editor_conversion_required":
         return (
             "This editor updates managed CBZ files without conversion. Convert this file to CBZ "
@@ -227,6 +237,7 @@ async def prepare_file_metadata(
     choices: FileMetadataChoices | None = None,
     approved_resource_limit: int | None = None,
     editor: IssueMetadataEditorReview | None = None,
+    propagation_fields: frozenset[str] | None = None,
 ) -> PreparedFileMetadata:
     """Release the clean read transaction before archive I/O; never fetch providers."""
     if session.new or session.dirty or session.deleted:
@@ -241,7 +252,9 @@ async def prepare_file_metadata(
     binding = await read_archive_metadata_binding(
         session, ids[0], expected_issue_id=issue_id, allow_conversion_source=True
     )
-    if editor is not None and not binding.file_path.casefold().endswith((".cbz", ".zip")):
+    if (
+        editor is not None or propagation_fields is not None
+    ) and not binding.file_path.casefold().endswith((".cbz", ".zip")):
         raise ArchiveMetadataBindingError("editor_conversion_required")
     await _require_no_import_owner(session, ids[0])
     from pullbox.core.file_safety import get_archive_size_limit_bytes
@@ -271,7 +284,16 @@ async def prepare_file_metadata(
                 max_solid_scan_bytes=MAX_METADATA_BYTES if kind in {"cbz", "zip"} else limit,
             )
         )
-        prepared = await asyncio.to_thread(_prepare, target, files, choices or {}, editor)
+        if propagation_fields is not None:
+            from pullbox.services.series_metadata_propagation_preview import prepare_projection
+
+            if choices or editor is not None:
+                raise ArchiveMetadataRenderError("invalid_choice")
+            prepared = await asyncio.to_thread(
+                prepare_projection, target, files, propagation_fields
+            )
+        else:
+            prepared = await asyncio.to_thread(_prepare, target, files, choices or {}, editor)
         prepared = replace(prepared, approved_resource_limit=approved_resource_limit)
     except (ArchiveError, BadZipFile) as exc:
         raise ArchiveMetadataBindingError("archive_unreadable") from exc
@@ -475,6 +497,7 @@ async def write_file_metadata(
     job_id: str | None = None,
     choices: FileMetadataChoices | None = None,
     editor: IssueMetadataEditorReview | None = None,
+    propagation_fields: frozenset[str] | None = None,
 ) -> str:
     """Approval is checked again before staging and under the publication lock."""
     from uuid import uuid5
@@ -490,7 +513,7 @@ async def write_file_metadata(
         file = await reader.scalar(select(LibraryFile).where(LibraryFile.issue_id == issue_id))
         native = file is not None and file.file_path.casefold().endswith((".cbr", ".cb7", ".pdf"))
     if native or native_conversion is not None:
-        if editor is not None:
+        if editor is not None or propagation_fields is not None:
             raise ArchiveMetadataBindingError("editor_conversion_required")
         return await write_native_file_metadata(
             factory,
@@ -509,7 +532,9 @@ async def write_file_metadata(
         raise ArchivePublicationError("approval_changed")
     await check_control()
     async with factory() as session:
-        prepared = await prepare_file_metadata(session, issue_id, choices=choices, editor=editor)
+        prepared = await prepare_file_metadata(
+            session, issue_id, choices=choices, editor=editor, propagation_fields=propagation_fields
+        )
     if not prepared.preview.ready:
         raise ArchivePublicationError("unresolved_conflicts")
     if prepared.preview.review_key != review_key:
@@ -531,8 +556,11 @@ async def write_file_metadata(
             cancellation_check=check_control,
             progress_callback=progress,
             shared_choices=prepared.shared_choices,
+            propagation_fields=propagation_fields,
         ) as staged:
-            plan = await prepare_archive_publication(target, staged, series, issue)
+            plan = await prepare_archive_publication(
+                target, staged, series, issue, propagation_fields=propagation_fields
+            )
             if job_id is not None:
                 plan = plan.model_copy(update={"metadata_job_id": job_id})
             await check_control()

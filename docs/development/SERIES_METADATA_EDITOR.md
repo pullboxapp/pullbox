@@ -57,8 +57,9 @@ folder ownership or unexpected sidecar contents require a new preview.
 
 Safe unknown JSON content is retained. Invalid or identity-conflicting sidecars
 are not overwritten. Library-only editing is not permission to repair or replace
-those files. ComicInfo.xml and MetronInfo.xml remain unchanged in this milestone;
-explicit shared-field propagation is the next separate workflow.
+those files. ComicInfo.xml and MetronInfo.xml remain unchanged by this editor.
+Explicit shared-field propagation is a separate action documented in
+[Series Metadata Propagation](SERIES_METADATA_PROPAGATION.md).
 
 Explicitly edited descriptive fields also update their recognized legacy JSON
 aliases, including `summary`/`description`. Unselected aliases and unrelated custom
