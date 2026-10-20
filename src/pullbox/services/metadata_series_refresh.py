@@ -514,7 +514,12 @@ async def _apply(
     ):
         await MetadataService.infer_series_status(session, series)
         snapshot = _with_derived(snapshot, "status", series.status.value, now)
-        snapshot = _with_derived(snapshot, "year_end", series.year_end, now)
+        year_end_origin = origins.get("year_end")
+        if year_end_origin is not None and year_end_origin.user_override:
+            # Status inference also mutates year_end; its override is independent.
+            series.year_end = snapshot.values.year_end
+        else:
+            snapshot = _with_derived(snapshot, "year_end", series.year_end, now)
     series.metadata_last_refreshed = now
     series.issue_catalog_state = IssueCatalogState.COMPLETE
     series.issue_catalog_last_synced_at = now

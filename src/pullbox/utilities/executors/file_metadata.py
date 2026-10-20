@@ -20,6 +20,7 @@ from pullbox.services.operation_progress import (
     OperationProgressMeasure,
     publish_operation_progress,
 )
+from pullbox.services.series_metadata_editor import read_editor_plan, run_series_editor_target
 from pullbox.services.utility_operation_progress import build_utility_operation_update
 from pullbox.utilities.base_executor import ExecutionMode, ItemResult, JobExecutor, ProcessedItem
 from pullbox.utilities.import_guards import ensure_no_active_import_file_mutation
@@ -30,6 +31,12 @@ class FileMetadataExecutor(JobExecutor):
     execution_mode = ExecutionMode.ASYNC
 
     def validate_config(self, job_config: dict[str, Any]) -> list[str]:
+        if "series_editor" in job_config:
+            try:
+                read_editor_plan(job_config)
+            except (ValueError, TypeError):
+                return ["Review the saved series metadata plan before retrying."]
+            return []
         metadata_config = {
             key: value for key, value in job_config.items() if key != "recovery_pending_id"
         }
@@ -67,6 +74,8 @@ class FileMetadataExecutor(JobExecutor):
         errors = self.validate_config(job_config)
         if errors:
             raise ValueError(errors[0])
+        if "series_editor" in job_config:
+            return {"factory": async_sessionmaker(session.bind, expire_on_commit=False)}
         await ensure_no_active_import_file_mutation(session)
         return {
             "factory": async_sessionmaker(session.bind, expire_on_commit=False),
@@ -76,6 +85,17 @@ class FileMetadataExecutor(JobExecutor):
     async def generate_items(
         self, job_config: dict[str, Any], job_context: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
+        if "series_editor" in job_config:
+            plan = read_editor_plan(job_config)
+            return [
+                {
+                    "operation": "series_sidecar",
+                    "target_index": index,
+                    "file_path": str(target.location.directory),
+                }
+                for index, target in enumerate(plan.targets)
+                if target.read.action in {"create", "update"}
+            ] or [{"operation": "series_metadata_saved"}]
         return [{"operation": "file_metadata"}]
 
     def process_item(
@@ -94,6 +114,44 @@ class FileMetadataExecutor(JobExecutor):
     ) -> ProcessedItem:
         context = job_context or {}
         factory = context["factory"]
+        if "series_editor" in job_config:
+            plan = read_editor_plan(job_config)
+            if item_data["operation"] == "series_metadata_saved":
+                return ProcessedItem(
+                    item_data["id"], ItemResult.COMPLETED, after_state={"library_saved": True}
+                )
+            try:
+                async with factory() as session:
+                    item = await session.get(UtilityJobItem, item_data["id"])
+                    job = await session.get(UtilityJob, item.job_id) if item else None
+                    if job is None or job.state != JobState.RUNNING:
+                        raise JobCancelledError(
+                            "Sidecar writing stopped; library metadata is saved."
+                        )
+                    series_outcome = await run_series_editor_target(
+                        session, plan, item_data["target_index"]
+                    )
+                return ProcessedItem(
+                    item_data["id"],
+                    ItemResult.COMPLETED
+                    if series_outcome["outcome"] == "saved"
+                    else ItemResult.FAILED,
+                    after_state={"library_saved": True, **series_outcome},
+                    error_message=str(series_outcome["reason"])
+                    if series_outcome["outcome"] == "failed"
+                    else None,
+                )
+            except (JobCancelledError, asyncio.CancelledError):
+                return ProcessedItem(item_data["id"], ItemResult.CANCELLED)
+            except (ValueError, OSError) as exc:
+                return ProcessedItem(
+                    item_data["id"],
+                    ItemResult.FAILED,
+                    after_state={"library_saved": True, "outcome": "failed"},
+                    error_message="Library saved; sidecar is unavailable. Preview again."
+                    if isinstance(exc, OSError)
+                    else str(exc),
+                )
         async with factory() as session:
             item = await session.get(UtilityJobItem, item_data["id"])
             if item is None:

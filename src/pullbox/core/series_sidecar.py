@@ -80,6 +80,7 @@ def render_series_sidecar(
     existing: bytes | None,
     *,
     updated_at: datetime,
+    edited_fields: frozenset[str] = frozenset(),
 ) -> bytes:
     """Keep safe user keys; never turn sidecar IDs into verified library identities."""
     if snapshot.entity_kind is not MetadataEntityKind.SERIES:
@@ -131,6 +132,18 @@ def render_series_sidecar(
         "booktype": {"booktype", "series_type", "type"},
         "comicid": {"comicid", "comicvine_id", "comicvineid", "cv_vol_id", "cvid"},
     }
+    # Only explicit edits claim these previously preserved legacy metadata keys.
+    editable_aliases = {
+        "description": {"description", "summary"},
+        "sort_title": {"sort_title"},
+        "year_end": {"year_end"},
+        "volume": {"volume"},
+        "language": {"language"},
+        "archive_format": {"archive_format"},
+    }
+    for field in edited_fields & editable_aliases.keys():
+        fields[field] = getattr(values, field)
+        aliases_by_field[field] = editable_aliases[field]
     # Update every recognized layer, including cleared values and case variants.
     for layer in layers:
         for name, value in fields.items():

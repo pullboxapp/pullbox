@@ -101,7 +101,11 @@ async def fetch_metadata_snapshot(
         if missing or (
             replace_managed
             and origin is not None
-            and (origin.source is not None or origin.derivation is not None)
+            and (
+                origin.source is not None
+                or origin.derivation is not None
+                or origin.provider_managed
+            )
         ):
             needed.add(field)
     capability = {
