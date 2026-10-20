@@ -108,6 +108,7 @@ class FieldOrigin(BaseModel):
     source_updated_at: AwareDatetime | None = None
     observed_at: AwareDatetime
     user_override: bool = False
+    provider_managed: bool = Field(default=False, exclude_if=lambda value: not value)
     derivation: Literal["classification", "lifecycle", "catalog", "normalization"] | None = None
     embedded_documents: tuple[EmbeddedDocument, ...] = ()
     passive_release: PassiveReleaseOrigin | None = None
@@ -140,6 +141,16 @@ class MetadataSnapshot(BaseModel):
                 or origin.field in fields
                 or origin.domain is not field_domain(self.entity_kind, origin.field)
                 or (origin.user_override and origin.source is not None)
+                or (
+                    origin.provider_managed
+                    and (
+                        origin.user_override
+                        or origin.source is not None
+                        or origin.embedded_documents
+                        or origin.passive_release is not None
+                        or origin.derivation is not None
+                    )
+                )
                 or (
                     origin.embedded_documents
                     and (

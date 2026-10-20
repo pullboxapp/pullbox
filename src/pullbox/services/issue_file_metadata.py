@@ -71,12 +71,25 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     from pullbox.core.metadata_identity import ExternalIdentityRef
+    from pullbox.schemas.issue_metadata_editor import (
+        IssueMetadataEditorField,
+        IssueMetadataEditorReview,
+    )
     from pullbox.schemas.metadata_snapshot import MetadataSnapshot
     from pullbox.utilities.executors.archive_subprocess import ControlCheck, ProgressCallback
 
 
 def file_metadata_error(exc: BaseException) -> str:
+    from pullbox.services.issue_metadata_editor import IssueMetadataEditError
+
+    if isinstance(exc, IssueMetadataEditError):
+        return str(exc)
     code = getattr(exc, "code", "")
+    if code == "editor_conversion_required":
+        return (
+            "This editor updates managed CBZ files without conversion. Convert this file to CBZ "
+            "using the existing conversion workflow, then open Edit metadata again."
+        )
     if code == "partial_issue":
         return (
             "The embedded issue number identifies a story-only extract, not a complete issue. "
@@ -213,6 +226,7 @@ async def prepare_file_metadata(
     *,
     choices: FileMetadataChoices | None = None,
     approved_resource_limit: int | None = None,
+    editor: IssueMetadataEditorReview | None = None,
 ) -> PreparedFileMetadata:
     """Release the clean read transaction before archive I/O; never fetch providers."""
     if session.new or session.dirty or session.deleted:
@@ -227,6 +241,8 @@ async def prepare_file_metadata(
     binding = await read_archive_metadata_binding(
         session, ids[0], expected_issue_id=issue_id, allow_conversion_source=True
     )
+    if editor is not None and not binding.file_path.casefold().endswith((".cbz", ".zip")):
+        raise ArchiveMetadataBindingError("editor_conversion_required")
     await _require_no_import_owner(session, ids[0])
     from pullbox.core.file_safety import get_archive_size_limit_bytes
 
@@ -255,7 +271,7 @@ async def prepare_file_metadata(
                 max_solid_scan_bytes=MAX_METADATA_BYTES if kind in {"cbz", "zip"} else limit,
             )
         )
-        prepared = await asyncio.to_thread(_prepare, target, files, choices or {})
+        prepared = await asyncio.to_thread(_prepare, target, files, choices or {}, editor)
         prepared = replace(prepared, approved_resource_limit=approved_resource_limit)
     except (ArchiveError, BadZipFile) as exc:
         raise ArchiveMetadataBindingError("archive_unreadable") from exc
@@ -289,19 +305,42 @@ def _fields(payload: bytes | None) -> dict[str, str]:
 
 
 def _prepare(
-    target: ArchiveMetadataTarget, files: ArchiveMetadataFiles, choices: FileMetadataChoices
+    target: ArchiveMetadataTarget,
+    files: ArchiveMetadataFiles,
+    choices: FileMetadataChoices,
+    editor: IssueMetadataEditorReview | None = None,
 ) -> PreparedFileMetadata:
     binding = target.binding
     converts = target.path.suffix.casefold() in {".cbr", ".cb7", ".pdf"}
     archive = reconcile_archive_metadata(files)
     series, issue = assemble_bound_archive_metadata(binding, archive, now=datetime.now(UTC))
     primary = archive_primary_identity(binding, archive)
-    series, issue, conflicts = review_metadata_fields(binding, archive, series, issue, choices)
+    editor_fields: list[IssueMetadataEditorField] = []
+    if editor is not None:
+        from pullbox.services.issue_metadata_editor import prepare_issue_editor
+
+        if choices:
+            raise ArchiveMetadataRenderError("invalid_choice")
+        series, issue, editor_fields = prepare_issue_editor(
+            binding, archive, series, issue, files, editor
+        )
+        _, _, conflicts = review_metadata_fields(binding, archive, series, issue, {})
+        conflicts = [
+            conflict
+            for conflict in conflicts
+            if not (
+                conflict.key.startswith("issue.") and conflict.key.split(".")[1] in editor.edits
+            )
+        ]
+    else:
+        series, issue, conflicts = review_metadata_fields(binding, archive, series, issue, choices)
     shared_choices = shared_xml_choices(choices)
     conflicts.extend(review_preserved_fields(files, shared_choices))
     ready = all(item.selected is not None for item in conflicts)
     evidence = TypeAdapter(ArchiveMetadataTarget).dump_json(target)
     evidence += json.dumps(choices, sort_keys=True, separators=(",", ":")).encode()
+    if editor is not None:
+        evidence += json.dumps(editor.model_dump(), sort_keys=True, separators=(",", ":")).encode()
     try:
         rendered = render_archive_metadata(
             series,
@@ -340,6 +379,8 @@ def _prepare(
                 ready=False,
                 conflicts=conflicts,
                 converts_to_cbz=converts,
+                editor_fields=editor_fields,
+                editor_changed=bool(editor and editor.edits),
             ),
             shared_choices=shared_choices,
         )
@@ -373,7 +414,11 @@ def _prepare(
     if not converts:
         with ZipFile(target.path) as archive_file:
             canonical_names = {"ComicInfo.xml", "MetronInfo.xml"} <= set(archive_file.namelist())
-    unchanged = canonical_names and all(old == new for _, old, new in pairs)
+    unchanged = (
+        canonical_names
+        and all(old == new for _, old, new in pairs)
+        and not (editor and editor.edits)
+    )
     return PreparedFileMetadata(
         target,
         series,
@@ -387,6 +432,8 @@ def _prepare(
             unchanged=unchanged,
             converts_to_cbz=converts,
             conflicts=conflicts,
+            editor_fields=editor_fields,
+            editor_changed=bool(editor and editor.edits),
         ),
         shared_choices=shared_choices,
     )
@@ -427,6 +474,7 @@ async def write_file_metadata(
     progress: ProgressCallback,
     job_id: str | None = None,
     choices: FileMetadataChoices | None = None,
+    editor: IssueMetadataEditorReview | None = None,
 ) -> str:
     """Approval is checked again before staging and under the publication lock."""
     from uuid import uuid5
@@ -442,6 +490,8 @@ async def write_file_metadata(
         file = await reader.scalar(select(LibraryFile).where(LibraryFile.issue_id == issue_id))
         native = file is not None and file.file_path.casefold().endswith((".cbr", ".cb7", ".pdf"))
     if native or native_conversion is not None:
+        if editor is not None:
+            raise ArchiveMetadataBindingError("editor_conversion_required")
         return await write_native_file_metadata(
             factory,
             issue_id,
@@ -459,7 +509,7 @@ async def write_file_metadata(
         raise ArchivePublicationError("approval_changed")
     await check_control()
     async with factory() as session:
-        prepared = await prepare_file_metadata(session, issue_id, choices=choices)
+        prepared = await prepare_file_metadata(session, issue_id, choices=choices, editor=editor)
     if not prepared.preview.ready:
         raise ArchivePublicationError("unresolved_conflicts")
     if prepared.preview.review_key != review_key:

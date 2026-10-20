@@ -25,6 +25,7 @@
   options=[],
   size="md",
   trigger_id="",
+  trigger_id_expression="",
   root_testid="",
   input_testid="",
   trigger_testid="",
@@ -134,8 +135,7 @@
 
   <button
     type="button"
-    {% if trigger_id %}id="{{ trigger_id }}"{% endif %}
-    {% if not trigger_id %}id="{{ name }}-dropdown-trigger"{% endif %}
+    {% if trigger_id_expression %}:id="{{ trigger_id_expression }}"{% elif trigger_id %}id="{{ trigger_id }}"{% else %}id="{{ name }}-dropdown-trigger"{% endif %}
     x-ref="trigger"
     x-on:click="toggle()"
     x-on:keydown.enter.prevent="toggle()"

@@ -2,7 +2,7 @@
 function issueFileMetadata(issueId) {
   var endpoint = issueId ? "/api/v1/issues/" + issueId + "/file-metadata" : "";
   return {
-    recovery: !issueId, resolved: false,
+    recovery: !issueId, resolved: false, editor: false, allFields: false, editorDrafts: {},
     open: false, busy: false, error: "", preview: null, job: null, choices: {}, choicesDirty: false,
     timer: null, disposed: false, trigger: null, generation: 0, jobGeneration: 0,
     init: function () { if (endpoint) this.loadJob(); },
@@ -48,11 +48,13 @@ function issueFileMetadata(issueId) {
       this.busy = false;
       if (this.open && !this.active() && !this.resolved && !(this.job && this.job.state === "PAUSED")) await this.loadPreview();
     },
-    show: async function () {
+    show: async function (editor = false) {
+      if (this.busy) return;
+      this.editor = editor;
       this.trigger = document.activeElement;
       this.open = true;
       this.$nextTick(() => this.$refs.dialog.focus({ preventScroll: true }));
-      if (!this.job || ["FAILED", "CANCELLED"].includes(this.job.state)) await this.loadPreview();
+      if ((editor && !this.active() && !(this.job && this.job.state === "PAUSED")) || !this.job || ["FAILED", "CANCELLED"].includes(this.job.state)) await this.loadPreview();
     },
     close: function () {
       this.open = false;
@@ -65,7 +67,33 @@ function issueFileMetadata(issueId) {
       this.choicesDirty = true;
     },
     canWrite: function () {
-      return !!this.preview && this.preview.ready !== false && !this.choicesDirty;
+      return !!this.preview && this.preview.ready !== false && !this.choicesDirty && (!this.editor || this.preview.editor_changed);
+    },
+    editorFields: function () {
+      return (this.preview ? this.preview.editor_fields || [] : []).filter(field =>
+        this.allFields || field.differs || (this.editorDrafts[field.key] && this.editorDrafts[field.key].selected));
+    },
+    editorOptions: function (field) {
+      var options = (field.options || []).map(option => ({ value: option.source, label: option.source === "library" ? "Keep library value" : option.source }));
+      options.push({ value: "custom", label: "Enter correction" }, { value: "clear", label: "Clear value" });
+      if (field.overridden) options.push({ value: "reset", label: "Remove manual override" });
+      return options;
+    },
+    selectEditorFields: function (selected) {
+      (this.preview.editor_fields || []).filter(field => field.editable).forEach(field => { this.editorDrafts[field.key].selected = selected; });
+      this.choicesDirty = true;
+    },
+    editorEdits: function () {
+      var edits = {};
+      Object.keys(this.editorDrafts).forEach(key => {
+        var draft = this.editorDrafts[key];
+        if (!draft.selected) return;
+        edits[key.slice(6)] = draft.source === "custom" ? { source: draft.source, value: draft.value } : { source: draft.source };
+      });
+      return edits;
+    },
+    reviewEndpoint: function () {
+      return this.editor ? endpoint.replace("/file-metadata", "/metadata-editor") : endpoint;
     },
     replacementUrl: function (action) {
       return this.preview && Number.isSafeInteger(this.preview.issue_id)
@@ -101,10 +129,17 @@ function issueFileMetadata(issueId) {
       this.busy = true; this.error = "";
       this.choicesDirty = true;
       var choices = reset ? {} : Object.assign({}, this.choices);
+      var edits = reset ? {} : this.editorEdits();
       try {
-        var data = await this.request(endpoint + "/preview", Object.keys(choices).length ? { choices: choices } : {});
+        var data = await this.request(this.reviewEndpoint() + "/preview", this.editor ? { edits: edits } : Object.keys(choices).length ? { choices: choices } : {});
         if (this.disposed || generation !== this.generation) return;
         this.preview = data; this.job = null;
+        if (this.editor && reset) {
+          this.allFields = false; this.editorDrafts = {};
+          (data.editor_fields || []).filter(field => field.editable).forEach(field => {
+            this.editorDrafts[field.key] = { selected: false, source: "library", value: field.current || "" };
+          });
+        }
         this.choices = {};
         (data.conflicts || []).forEach(conflict => { if (conflict.selected) this.choices[conflict.key] = conflict.selected; });
         this.choicesDirty = false;
@@ -116,8 +151,9 @@ function issueFileMetadata(issueId) {
       this.busy = true; this.error = "";
       try {
         var approval = { review_key: this.preview.review_key };
-        if (Object.keys(this.choices).length) approval.choices = Object.assign({}, this.choices);
-        var result = await this.request(endpoint + "/write", approval);
+        if (this.editor) approval.edits = this.editorEdits();
+        else if (Object.keys(this.choices).length) approval.choices = Object.assign({}, this.choices);
+        var result = await this.request(this.reviewEndpoint() + "/write", approval);
         if (this.disposed) return;
         this.jobGeneration += 1;
         this.job = { id: result.job_id, state: result.state, percent: 0, message: "Queued", error: null };
@@ -134,7 +170,7 @@ function issueFileMetadata(issueId) {
     },
     trapFocus: function (event) {
       if (!this.open) return;
-      var elements = Array.from(this.$refs.dialog.querySelectorAll('button:not([disabled]), input:not([disabled]), a[href], [tabindex="0"]')).filter(el => el.getClientRects().length > 0);
+      var elements = Array.from(this.$refs.dialog.querySelectorAll('button:not([disabled]), input:not([disabled]), textarea:not([disabled]), a[href], [tabindex="0"]')).filter(el => el.getClientRects().length > 0);
       var first = elements[0], last = elements[elements.length - 1];
       if (!first) { event.preventDefault(); return; }
       if (event.shiftKey && (document.activeElement === first || document.activeElement === this.$refs.dialog)) { event.preventDefault(); last.focus(); }

@@ -504,6 +504,14 @@ persist across refreshes until a new archive comparison updates them. The caller
 still owns independent file/target matching and atomic application to entity rows;
 baseline persistence alone neither establishes that match nor permits file writes.
 
+An explicit issue-editor override reset may retain `provider_managed=true` on a
+field origin. It cannot simultaneously claim an override, source, derivation,
+embedded document or passive release. It authorizes normal configured-provider
+refresh to replace that unchanged value; subsequent manual edits remain protected.
+The current value stays in place until refresh supplies a usable replacement.
+Older snapshots without the flag retain their existing behavior. See
+[the issue editor contract](ISSUE_METADATA_EDITOR.md) for field and rollback scope.
+
 ### Archive Publication Intent
 
 `archive_metadata_publications` stores versioned, bounded evidence before a paired

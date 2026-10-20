@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from pullbox.core.exceptions import JobCancelledError
 from pullbox.core.file_safety import get_archive_size_limit_bytes
 from pullbox.schemas.issue_file_metadata import FileMetadataReview
+from pullbox.schemas.issue_metadata_editor import IssueMetadataEditorReview
 from pullbox.services.issue_file_metadata import file_metadata_error, write_file_metadata
 from pullbox.services.operation_progress import (
     OperationItemProgress,
@@ -39,7 +40,12 @@ class FileMetadataExecutor(JobExecutor):
             return ["Choose a pending metadata recovery."]
         if (
             set(metadata_config)
-            not in ({"issue_id", "review_key"}, {"issue_id", "review_key", "choices"})
+            not in (
+                {"issue_id", "review_key"},
+                {"issue_id", "review_key", "choices"},
+                {"issue_id", "review_key", "editor"},
+            )
+            or ("editor" in job_config and "recovery_pending_id" in job_config)
             or type(job_config.get("issue_id")) is not int
             or job_config["issue_id"] <= 0
             or not isinstance(job_config.get("review_key"), str)
@@ -48,6 +54,11 @@ class FileMetadataExecutor(JobExecutor):
             return ["Choose an issue and approve its current file metadata preview."]
         try:
             FileMetadataReview(choices=job_config.get("choices", {}))
+            if (
+                "editor" in job_config
+                and not IssueMetadataEditorReview.model_validate(job_config["editor"]).edits
+            ):
+                return ["Select at least one issue field to update."]
         except ValidationError:
             return ["Review the metadata choices before writing."]
         return []
@@ -145,17 +156,30 @@ class FileMetadataExecutor(JobExecutor):
             writer = (
                 run_direct_metadata_recovery if recovery_id is not None else write_file_metadata
             )
-            outcome = await writer(
-                factory,
-                recovery_id if recovery_id is not None else job_config["issue_id"],
-                job_config["review_key"],
-                UUID(item_data["id"]),
-                limit=context["limit"],
-                check_control=check_control,
-                progress=progress,
-                job_id=job_id,
-                choices=FileMetadataReview(choices=job_config.get("choices", {})).choices,
-            )
+            if "editor" in job_config:
+                outcome = await write_file_metadata(
+                    factory,
+                    job_config["issue_id"],
+                    job_config["review_key"],
+                    UUID(item_data["id"]),
+                    limit=context["limit"],
+                    check_control=check_control,
+                    progress=progress,
+                    job_id=job_id,
+                    editor=IssueMetadataEditorReview.model_validate(job_config["editor"]),
+                )
+            else:
+                outcome = await writer(
+                    factory,
+                    recovery_id if recovery_id is not None else job_config["issue_id"],
+                    job_config["review_key"],
+                    UUID(item_data["id"]),
+                    limit=context["limit"],
+                    check_control=check_control,
+                    progress=progress,
+                    job_id=job_id,
+                    choices=FileMetadataReview(choices=job_config.get("choices", {})).choices,
+                )
             return ProcessedItem(
                 item_data["id"],
                 ItemResult.COMPLETED,

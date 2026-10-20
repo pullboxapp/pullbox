@@ -13,6 +13,10 @@ from pullbox.schemas.issue_file_metadata import (
     FileMetadataPreview,
     FileMetadataReview,
 )
+from pullbox.schemas.issue_metadata_editor import (
+    IssueMetadataEditorApproval,
+    IssueMetadataEditorReview,
+)
 from pullbox.schemas.issue_metadata_links import (
     IssueCandidatesQuery,
     IssueLinkPreview,
@@ -181,6 +185,53 @@ async def file_job(
     if job is None:
         return {"job": None}
     return await file_job_status(session, job)
+
+
+@router.post("/{issue_id}/metadata-editor/preview", response_model=FileMetadataPreview)
+async def editor_preview(
+    issue_id: LocalId,
+    body: IssueMetadataEditorReview,
+    session: DbSession,
+    _user: InteractiveOperatorUser,
+) -> FileMetadataPreview:
+    try:
+        return (await prepare_file_metadata(session, issue_id, editor=body)).preview
+    except (ValueError, OSError) as exc:
+        raise HTTPException(409, file_metadata_error(exc)) from exc
+
+
+@router.post("/{issue_id}/metadata-editor/write", status_code=202)
+async def editor_write(
+    issue_id: LocalId,
+    body: IssueMetadataEditorApproval,
+    session: DbSession,
+    user: InteractiveOperatorUser,
+) -> dict[str, str]:
+    review = IssueMetadataEditorReview(edits=body.edits)
+    try:
+        prepared = await prepare_file_metadata(session, issue_id, editor=review)
+        if not prepared.preview.ready:
+            raise ArchivePublicationError("unresolved_conflicts")
+        if not body.edits or prepared.preview.review_key != body.review_key:
+            raise ArchivePublicationError("approval_changed")
+        await ensure_no_active_import_file_mutation(session)
+        manager = _get_manager()
+        job = await manager.create_job(
+            session,
+            JobType.FILE_METADATA,
+            f"Edit issue metadata: {prepared.preview.file_name}",
+            {
+                "issue_id": issue_id,
+                "review_key": body.review_key,
+                "editor": review.model_dump(mode="json"),
+            },
+            created_by=user.username,
+        )
+        await session.commit()
+        _schedule_dispatch(manager)
+        return {"job_id": job.id, "state": job.state}
+    except (ValueError, OSError) as exc:
+        raise HTTPException(409, file_metadata_error(exc)) from exc
 
 
 async def file_job_status(session: DbSession, job: UtilityJob) -> dict[str, object]:

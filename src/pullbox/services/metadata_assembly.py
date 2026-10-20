@@ -208,7 +208,11 @@ def assemble_metadata(
                     diagnostics.add(f"archive:{kind.value}:{field}:current_disagreement")
             unchanged_managed = (
                 prior is not None
-                and (prior.source is not None or prior.derivation is not None)
+                and (
+                    prior.source is not None
+                    or prior.derivation is not None
+                    or prior.provider_managed
+                )
                 and existing == local_value
             )
             if chosen.embedded_documents or (has_local_value and not unchanged_managed):
@@ -224,7 +228,8 @@ def assemble_metadata(
                     replace_managed
                     and prior is not None
                     and (
-                        prior.derivation is not None
+                        prior.provider_managed
+                        or prior.derivation is not None
                         or prior.passive_release is not None
                         or (
                             prior.source is not None

@@ -4,6 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from pullbox.schemas.issue_metadata_editor import IssueMetadataEditorField
+
 type FileMetadataSource = Literal["library", "ComicInfo.xml", "MetronInfo.xml"]
 type SharedXmlField = Literal[
     "xml.AgeRating",
@@ -74,6 +76,8 @@ class FileMetadataPreview(BaseModel):
     ready: bool = True
     conflicts: list[FileMetadataConflict] = Field(default_factory=list)
     converts_to_cbz: bool = False
+    editor_fields: list[IssueMetadataEditorField] = Field(default_factory=list)
+    editor_changed: bool = False
 
 
 class FileMetadataApproval(FileMetadataReview):
