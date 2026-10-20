@@ -6,7 +6,6 @@ from collections import Counter
 from typing import Any
 from uuid import uuid4
 
-from pydantic import TypeAdapter
 from sqlalchemy import JSON, Text, case, cast, select, type_coerce
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,9 +16,9 @@ from pullbox.schemas.series_metadata_propagation import (
     PropagationTarget,
 )
 from pullbox.services.metadata_series_refresh_state import (
-    RefreshEntityState,
     read_series_refresh_state,
 )
+from pullbox.services.series_metadata_propagation_preview import stable_propagation_evidence
 from pullbox.utilities.models import JobType, UtilityJob, UtilityJobItem
 
 KEY = "series_propagation"
@@ -38,7 +37,7 @@ def read_plan(config: dict[str, Any]) -> PropagationPlan:
 
 async def series_key(session: AsyncSession, series_id: int) -> str:
     state = await read_series_refresh_state(session, series_id, include_issues=False)
-    return hashlib.sha256(TypeAdapter(RefreshEntityState).dump_json(state.series)).hexdigest()
+    return hashlib.sha256(stable_propagation_evidence(state.series)).hexdigest()
 
 
 async def preview_plan(

@@ -16,6 +16,19 @@ from pullbox.services.metadata_series_refresh_state import RefreshEntityState
 from pullbox.services.series_metadata_propagation_rendering import render_series_propagation
 
 
+def stable_propagation_evidence(value: RefreshEntityState | ArchiveMetadataTarget) -> bytes:
+    data = TypeAdapter(type(value)).dump_python(value, mode="json")
+    if isinstance(value, ArchiveMetadataTarget):
+        metadata = data["binding"]["metadata"]
+        entities = [metadata["series"], *metadata["issues"]]
+    else:
+        entities = [data]
+    # Sets have no semantic order; Python changes their iteration order on restart.
+    for entity in entities:
+        entity["overrides"] = sorted(entity["overrides"])
+    return json.dumps(data, sort_keys=True, separators=(",", ":")).encode()
+
+
 def canonical_snapshot(state: RefreshEntityState, kind: MetadataEntityKind) -> MetadataSnapshot:
     return MetadataSnapshot(
         entity_kind=kind,
@@ -51,7 +64,7 @@ def prepare_projection(
             for key in sorted(old.keys() | new.keys())
             if old.get(key) != new.get(key)
         )
-    evidence = TypeAdapter(ArchiveMetadataTarget).dump_json(target)
+    evidence = stable_propagation_evidence(target)
     evidence += json.dumps(sorted(fields)).encode()
     key = hashlib.sha256(evidence + pair.comicinfo + pair.metroninfo).hexdigest()
     return PreparedFileMetadata(
