@@ -1,6 +1,8 @@
 {% from "components/comicvine_result_cover.html" import comicvine_result_cover %}
 {% from "components/comicvine_result_card.html" import comicvine_result_card, comicvine_in_library_badge %}
+{% from "components/comicvine_search_loading.html" import comicvine_search_loading %}
 <div data-testid="story-arc-catalog-results" class="space-y-3">
+  {{ comicvine_search_loading("story-arc-preview-loading", "story-arc-preview-loading", label="Loading story arc members") }}
   {% for message in source_notices|default([]) %}
     <p role="status" class="text-sm text-pb-text-sec">{{ message }}</p>
   {% endfor %}
@@ -44,7 +46,9 @@
             {% if result.existing_id %}
               {{ comicvine_in_library_badge() }}
             {% else %}
-              <a href="{{ result.preview_url|default('/story-arcs/catalog/' ~ result.metadata.provider_id) }}" class="btn-primary btn-sm add-series-result-add" aria-label="Preview members of {{ result.metadata.title }}">Preview members</a>
+              <a href="{{ result.preview_url|default('/story-arcs/catalog/' ~ result.metadata.provider_id) }}" class="btn-primary btn-sm add-series-result-add" aria-label="Preview members of {{ result.metadata.title }}"
+                 data-story-arc-preview hx-indicator="#story-arc-preview-loading"
+                 hx-sync="closest [data-testid='story-arc-catalog-results']:drop">Preview members</a>
             {% endif %}
           {% endif %}
         {% endcall %}

@@ -97,6 +97,7 @@
                 <th>Issue</th>
                 <th class="w-[156px]">Status</th>
                 <th>Client</th>
+                <th class="w-[92px]">Size</th>
                 <th class="w-[180px]">Progress</th>
                 <th class="w-[92px]">Speed</th>
                 <th class="w-[72px]">ETA</th>
@@ -130,6 +131,13 @@
                     </span>
                   </td>
                   <td class="downloads-mono-cell">{{ row.client_label }}</td>
+                  <td class="downloads-mono-cell" data-testid="downloads-queue-item-size">
+                    {% if row.size_bytes is not none %}
+                      {{ row.size_bytes|filesize }}
+                    {% else %}
+                      Unknown
+                    {% endif %}
+                  </td>
                   <td>
                     <div class="downloads-progress-cell">
                       <span class="downloads-progress-track">

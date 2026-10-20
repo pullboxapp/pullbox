@@ -75,6 +75,7 @@ class DownloadQueueRowView:
     progress_label: str
     progress_tone: str
     progress_indeterminate: bool
+    size_bytes: int | None
     speed_bytes: int | None
     eta_text: str | None
     is_active: bool
@@ -384,6 +385,14 @@ def build_download_queue_row_view(
     speed_bytes = snapshot_value(progress, "speed_bytes")
     eta_seconds = snapshot_value(progress, "eta_seconds")
     bytes_transferred = snapshot_value(progress, "bytes_transferred")
+    size_bytes = next(
+        (
+            size
+            for size in (snapshot_value(progress, "size_bytes"), download.file_size)
+            if isinstance(size, int) and not isinstance(size, bool) and size > 0
+        ),
+        None,
+    )
     progress_indeterminate = bool(snapshot_value(progress, "is_indeterminate"))
     source_slow = bool(snapshot_value(progress, "source_slow"))
 
@@ -474,6 +483,7 @@ def build_download_queue_row_view(
         progress_label=progress_label,
         progress_tone=progress_tone,
         progress_indeterminate=progress_indeterminate,
+        size_bytes=size_bytes,
         speed_bytes=speed_bytes if isinstance(speed_bytes, int) else None,
         eta_text=eta_text,
         is_active=is_active,

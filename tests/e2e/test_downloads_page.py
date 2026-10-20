@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
 from playwright.sync_api import expect
 
+from tests.e2e.accessibility import assert_no_axe_violations
 from tests.e2e.conftest import run_htmx_ajax_and_wait, wait_for_htmx
 from tests.e2e.pages.downloads import DownloadsPage
 
@@ -79,6 +84,43 @@ def _run_downloads_history_poll_tick(page) -> None:  # type: ignore[no-untyped-d
 
 class TestDownloadsPage:
     """Behavior-first E2E checks for the downloads shell."""
+
+    @pytest.mark.parametrize("theme", ["light", "dark", "tron"])
+    def test_active_download_size_is_visible_and_refreshes(
+        self, authed_page, seeded_server: str, monkeypatch, theme: str
+    ) -> None:  # type: ignore[no-untyped-def]
+        page = authed_page
+        page.add_init_script(f"localStorage.setItem('pullbox-theme', '{theme}')")
+        progress = AsyncMock(return_value={})
+        monkeypatch.setattr("pullbox.ui.routes._load_download_progress_map", progress)
+        page.set_viewport_size({"width": 1440, "height": 900})
+        downloads = DownloadsPage(page, seeded_server)
+        downloads.goto()
+        expect(page.locator("html")).to_have_attribute("data-theme", theme)
+        table = page.get_by_test_id("downloads-queue-active-table")
+        expect(table.get_by_role("columnheader", name="Size", exact=True)).to_be_visible()
+        expect(table.get_by_test_id("downloads-queue-item-size")).to_have_text("100.0 MB")
+
+        async def live_progress(_session, queue_items, **_kwargs):  # type: ignore[no-untyped-def]
+            return {
+                item.id: SimpleNamespace(progress=0.5, size_bytes=209_715_200)
+                for item in queue_items
+            }
+
+        progress.side_effect = live_progress
+        page.evaluate("htmx.trigger(document.body, 'downloads:refresh')")
+        expect(table.get_by_test_id("downloads-queue-item-size")).to_have_text("200.0 MB")
+        assert_no_axe_violations(page, name=f"download-size-{theme}", include=["#content"])
+        output = Path("test-results/download-size")
+        output.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(output / f"{theme}.png"), full_page=True)
+        page.set_viewport_size({"width": 390, "height": 844})
+        assert page.locator("#content").evaluate(
+            "element => element.scrollWidth <= element.clientWidth"
+        )
+        table.get_by_test_id("downloads-queue-item-size").scroll_into_view_if_needed()
+        expect(table.get_by_test_id("downloads-queue-item-size")).to_be_visible()
+        page.screenshot(path=str(output / f"{theme}-mobile.png"), full_page=True)
 
     def test_downloads_renders_stable_shell(
         self,

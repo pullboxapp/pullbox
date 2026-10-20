@@ -426,6 +426,8 @@ class TestDownloadsRouteContracts:
         assert response.status_code == 200
         assert 'style="width: 67.0%"' in response.text
         assert "67%" in response.text
+        assert 'data-testid="downloads-queue-item-size"' in response.text
+        assert "100.0 MB" in response.text
         assert response.headers["cache-control"].startswith("no-store")
 
     async def test_download_queue_partial_animates_unknown_total_direct_transfer(
@@ -1289,6 +1291,34 @@ class TestDownloadsRouteContracts:
 
 class TestDownloadQueueRowViewHelpers:
     """Direct helper coverage for stable queue lifecycle mapping."""
+
+    @pytest.mark.parametrize(
+        ("live_size", "saved_size", "expected"),
+        [
+            (104_857_600, 52_428_800, 104_857_600),
+            (None, 52_428_800, 52_428_800),
+            (0, 52_428_800, 52_428_800),
+            (-1, 52_428_800, 52_428_800),
+            (None, None, None),
+            (0, 0, None),
+            (True, None, None),
+        ],
+    )
+    def test_queue_size_prefers_positive_live_total(
+        self, live_size: int | None, saved_size: int | None, expected: int | None
+    ) -> None:
+        download = DownloadHistory(
+            title="Issue.cbz",
+            state=DownloadState.DOWNLOADING,
+            download_client=DownloadClientType.DIRECT,
+            download_url="pullbox-direct://attempt/7",
+            file_size=saved_size,
+        )
+        row = ui_routes._build_download_queue_row_view(
+            download, SimpleNamespace(progress=0.25, size_bytes=live_size), None
+        )
+
+        assert getattr(row, "size_bytes", "missing") == expected
 
     def test_paused_queue_row_uses_warning_phase_and_preserves_progress(self) -> None:
         download = DownloadHistory(

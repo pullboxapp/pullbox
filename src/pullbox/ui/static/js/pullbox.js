@@ -22534,9 +22534,15 @@ document.addEventListener("htmx:afterRequest", function (e) {
     return;
   }
 
-  if (e.detail.failed) {
+  if (e.detail.failed || (e.detail.xhr && e.detail.xhr.status === 0)) {
     _setContentSwapPhase(null);
     _importEventSourceRegistry.resumeSuspended();
+    if (
+      e.detail.xhr && e.detail.xhr.status === 0 &&
+      e.detail.elt && e.detail.elt.matches("[data-story-arc-preview]")
+    ) {
+      showToast({ message: "Could not load story arc members. Try Preview members again.", level: "error" });
+    }
     return;
   }
 

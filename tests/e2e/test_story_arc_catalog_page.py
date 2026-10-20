@@ -175,6 +175,68 @@ def test_catalog_results_use_add_series_card_layout(
     page.screenshot(path=str(output / "mobile.png"), full_page=True)
 
 
+@pytest.mark.parametrize("theme", ["light", "dark", "tron"])
+def test_member_preview_shows_loading_until_navigation_and_restores_on_back(
+    authed_page: Page, seeded_server: str, catalog_provider: CatalogProvider, theme: str
+) -> None:
+    page = authed_page
+    page.add_init_script(f"localStorage.setItem('pullbox-theme', '{theme}')")
+    page.goto(f"{seeded_server}/story-arcs/add?q=event")
+    expect(page.locator("html")).to_have_attribute("data-theme", theme)
+    held_routes: list[Route] = []
+    page.route("**/story-arcs/catalog/**", lambda route: held_routes.append(route))
+    preview = page.get_by_role("link", name="Preview members of Numbering Event")
+    preview.click()
+
+    indicator = page.get_by_test_id("story-arc-preview-loading")
+    expect(indicator).to_be_visible()
+    expect(indicator).to_have_attribute("aria-live", "polite")
+    expect(indicator.get_by_text("Loading story arc members", exact=True)).to_be_visible()
+    expect(indicator.locator("svg").first).to_have_css("width", "20px")
+    expect(indicator).to_have_css("opacity", "1")
+    assert_no_axe_violations(page, name=f"arc-preview-loading-{theme}", include=["#content"])
+    output = Path("test-results/story-arc-preview-loading")
+    output.mkdir(parents=True, exist_ok=True)
+    page.screenshot(path=str(output / f"{theme}.png"), full_page=True)
+    preview.dispatch_event("click")
+    assert len(held_routes) == 1, "Repeated preview clicks must not fetch the catalog twice"
+
+    held_routes.pop().continue_()
+    page.unroute("**/story-arcs/catalog/**")
+    expect(page.get_by_test_id("story-arc-catalog-preview")).to_be_visible()
+    expect(indicator).to_have_count(0)
+    page.go_back()
+    expect(page.get_by_test_id("story-arc-catalog-results")).to_be_visible()
+    expect(page.get_by_test_id("story-arc-preview-loading")).not_to_be_visible()
+
+
+def test_member_preview_loading_clears_after_network_failure_and_allows_retry(
+    authed_page: Page, seeded_server: str, catalog_provider: CatalogProvider
+) -> None:
+    page = authed_page
+    page.goto(f"{seeded_server}/story-arcs/add?q=event")
+    held_routes: list[Route] = []
+    page.route("**/story-arcs/catalog/**", lambda route: held_routes.append(route))
+    preview = page.get_by_role("link", name="Preview members of Numbering Event")
+    preview.click()
+    indicator = page.get_by_test_id("story-arc-preview-loading")
+    expect(indicator).to_be_visible()
+    assert len(held_routes) == 1
+    held_routes.pop().abort("failed")
+    expect(indicator).not_to_be_visible()
+    expect(preview).to_be_visible()
+    expect(
+        page.get_by_text("Could not load story arc members. Try Preview members again.", exact=True)
+    ).to_be_visible()
+    expect(page.locator("#content")).not_to_have_attribute("data-page-swap-phase", "leaving")
+    preview.click()
+    expect(indicator).to_be_visible()
+    assert len(held_routes) == 1
+    held_routes.pop().continue_()
+    page.unroute("**/story-arcs/catalog/**")
+    expect(page.get_by_test_id("story-arc-catalog-preview")).to_be_visible()
+
+
 def test_keyboard_catalog_add_and_refresh_preserve_reviewed_order(
     authed_page: Page,
     seeded_server: str,
