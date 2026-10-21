@@ -50,6 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 
 - Updated Pillow to the patched 13.0 line for image decoding and conversion.
+- Updated the development stylesheet compiler's source-map parser and file
+  watcher to remove vulnerable parser dependencies.
 
 Automatic import metadata writing, GCD API v2, and LOCG enrichment are not enabled
 by default in this development preview. The experimental Anna verification flow
