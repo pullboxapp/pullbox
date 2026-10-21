@@ -115,6 +115,47 @@ async def test_rollback_reads_completed_actions_in_bounded_stable_pages(
 
 
 @pytest.mark.asyncio
+async def test_preserved_edits_are_not_reported_as_needing_manual_repair(db_session):
+    from pullbox.services.import_file_edit_history import PRESERVED_EDIT_MESSAGE
+
+    job = ImportJob(
+        source_path="/imports",
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.ROLLING_BACK,
+    )
+    db_session.add(job)
+    await db_session.flush()
+    db_session.add(
+        ImportJobAction(
+            import_job_id=job.id,
+            sequence_no=1,
+            phase="import",
+            action_type="library_file_registered",
+            payload={},
+            status=ImportJobActionStatus.ROLLBACK_FAILED,
+            error_message=PRESERVED_EDIT_MESSAGE,
+        )
+    )
+    await db_session.commit()
+    assert await rollback_import_job(
+        db_session,
+        job.id,
+        rollback_action=AsyncMock(),
+        restore_review_state=AsyncMock(),
+        recompute_series_counters=AsyncMock(),
+        recompute_file_counters=AsyncMock(),
+        log_event=AsyncMock(),
+        emit_progress=AsyncMock(),
+        estimate_remaining_seconds=lambda *_: None,
+        job_stats=lambda _: {},
+    )
+    assert job.progress_snapshot["rollback_preserved_action_count"] == 1
+    assert job.progress_snapshot["rollback_manual_recovery_count"] == 0
+    assert "partially applied" in job.error_message
+    assert "no repair" in job.error_message
+
+
+@pytest.mark.asyncio
 async def test_rollback_checkpoints_pages_and_coalesces_durable_progress(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,

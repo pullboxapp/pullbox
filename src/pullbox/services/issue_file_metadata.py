@@ -172,10 +172,11 @@ def file_metadata_error(exc: BaseException) -> str:
         )
     if code in {"root_not_managed", "readonly_source"}:
         return "This library location is read-only. Choose a writable managed library copy."
-    if code == "import_rollback_protected":
+    if code == "import_operation_active":
         return (
-            "This file is protected by import rollback history. "
-            "Its original bytes were left unchanged."
+            "An unfinished import or rollback still controls this file. "
+            "Finish or cancel that operation, then retry. "
+            "Completed import history does not block edits."
         )
     if code in {
         "identity_requires_review",

@@ -20,6 +20,7 @@ from pullbox.models.import_job import (
 )
 from pullbox.schemas.import_job import ImportProgressEvent
 from pullbox.services.import_comicinfo_enrichment import comicinfo_enrichment_gate
+from pullbox.services.import_file_edit_history import PRESERVED_EDIT_MESSAGE
 from pullbox.services.import_job_actions import (
     StoryArcManagedPlacementRollbackDeferredError,
 )
@@ -340,12 +341,19 @@ async def _rollback_import_job_while_enrichment_fenced(
             current_action is not None
             and current_action.status == ImportJobActionStatus.ROLLBACK_FAILED
         ):
+            preserved = current_action.error_message == PRESERVED_EDIT_MESSAGE
             await log_event(
                 session,
                 job_id,
-                "ERROR",
-                "import_rollback_action_failed",
-                message=(f"Rollback action failed: {action.action_type} #{action.sequence_no}."),
+                "INFO" if preserved else "ERROR",
+                "import_rollback_action_preserved"
+                if preserved
+                else "import_rollback_action_failed",
+                message=(
+                    current_action.error_message
+                    if preserved
+                    else f"Rollback action failed: {action.action_type} #{action.sequence_no}."
+                ),
                 action_index=idx + 1,
                 action_count=total,
                 action_type=action.action_type,
@@ -442,13 +450,27 @@ async def _rollback_import_job_while_enrichment_fenced(
     rolled_back_count = action_status_counts.get(ImportJobActionStatus.ROLLED_BACK, 0)
     manual_recovery_count = action_status_counts.get(ImportJobActionStatus.ROLLBACK_FAILED, 0)
     if manual_recovery_count > 0:
+        preserved_count = int(
+            await session.scalar(
+                sa_select(func.count(ImportJobAction.id)).where(
+                    ImportJobAction.import_job_id == job_id,
+                    ImportJobAction.status == ImportJobActionStatus.ROLLBACK_FAILED,
+                    ImportJobAction.error_message == PRESERVED_EDIT_MESSAGE,
+                )
+            )
+            or 0
+        )
+        manual_recovery_count -= preserved_count
         await recompute_series_counters(session, job)
         await recompute_file_counters(session, job)
         message = _incomplete_rollback_message(
             rolled_back_count=rolled_back_count,
             manual_recovery_count=manual_recovery_count,
+            preserved_count=preserved_count,
         )
-        progress = round((rolled_back_count / max(rollback_action_count, 1)) * 100)
+        progress = round(
+            ((rolled_back_count + preserved_count) / max(rollback_action_count, 1)) * 100
+        )
         job.status = ImportJobStatus.FAILED
         job.control_request = ImportControlRequest.NONE
         job.error_message = message
@@ -458,7 +480,7 @@ async def _rollback_import_job_while_enrichment_fenced(
             job,
             status=ImportJobStatus.FAILED,
             mode="rollback",
-            phase="rollback_incomplete",
+            phase="rollback_preserved" if not manual_recovery_count else "rollback_incomplete",
             progress=progress,
             message=message,
         )
@@ -468,6 +490,7 @@ async def _rollback_import_job_while_enrichment_fenced(
                 "rollback_action_count": rollback_action_count,
                 "rollback_actions_rolled_back": rolled_back_count,
                 "rollback_manual_recovery_count": manual_recovery_count,
+                "rollback_preserved_action_count": preserved_count,
             }
         )
         job.progress_snapshot = snapshot
@@ -475,12 +498,15 @@ async def _rollback_import_job_while_enrichment_fenced(
         await log_event(
             session,
             job_id,
-            "ERROR",
-            "import_rollback_incomplete",
+            "WARNING" if not manual_recovery_count else "ERROR",
+            "import_rollback_preserved"
+            if not manual_recovery_count
+            else "import_rollback_incomplete",
             message=message,
             action_count=rollback_action_count,
             rolled_back_count=rolled_back_count,
             manual_recovery_count=manual_recovery_count,
+            preserved_action_count=preserved_count,
         )
         # True means the reverse walk reached a terminal state. The FAILED job
         # and durable snapshot distinguish incomplete rollback from success.
@@ -520,7 +546,19 @@ def _incomplete_rollback_message(
     *,
     rolled_back_count: int,
     manual_recovery_count: int,
+    preserved_count: int = 0,
 ) -> str:
+    if preserved_count:
+        return (
+            f"Rollback partially applied: {rolled_back_count} actions reversed; "
+            f"{preserved_count} preserved to keep files edited after import "
+            "and their library records. "
+            + (
+                f"{manual_recovery_count} other actions need manual recovery."
+                if manual_recovery_count
+                else "The edited files need no repair."
+            )
+        )
     if rolled_back_count <= 0:
         action_word = "action" if manual_recovery_count == 1 else "actions"
         require_word = "requires" if manual_recovery_count == 1 else "require"

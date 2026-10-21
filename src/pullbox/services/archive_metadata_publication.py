@@ -278,8 +278,11 @@ async def load_archive_publication(
 
 async def _lock_binding(session: AsyncSession, plan: ArchivePublicationPlan) -> None:
     from pullbox.services.import_archive_publication import lock_import_archive_owner
+    from pullbox.services.import_file_edit_history import lock_import_file_history
 
     await lock_import_archive_owner(session, plan.import_owner)
+    if plan.import_owner is None:
+        await lock_import_file_history(session, plan.target.binding.library_file_id)
     await lock_archive_metadata_binding(session, plan.target.binding)
 
 
@@ -391,6 +394,10 @@ async def publish_archive_publication(
             raise ArchivePublicationError("publication_not_intended")
         plan = _receipt(row).plan
         await require_import_archive_owner(session, plan)
+        if plan.import_owner is None:
+            from pullbox.services.archive_metadata_binding import require_unowned_metadata_file
+
+            await require_unowned_metadata_file(session, plan.target.binding.library_file_id)
         await revalidate_archive_metadata_target(session, plan.target)
         await _file_work(lambda stop: _publish_files(plan, stop))
         row.state = PublicationState.PUBLISHED

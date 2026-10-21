@@ -529,7 +529,7 @@ async def test_metadata_digest_ignores_equivalent_dictionary_order(identity_prob
 
 @pytest.mark.usefixtures("paired_conversion_setting")
 @pytest.mark.parametrize("point", ["before", "prepared"])
-async def test_paired_conversion_does_not_rebase_retained_import_ownership(
+async def test_paired_conversion_defers_unfinished_import_ownership(
     identity_probe_db, tmp_path, monkeypatch, point
 ):
     _, factory, _ = identity_probe_db
@@ -539,9 +539,9 @@ async def test_paired_conversion_does_not_rebase_retained_import_ownership(
     async def own():
         async with factory.begin() as session:
             job = ImportJob(
-                source_path="retained fixture",
+                source_path="unfinished fixture",
                 source_type=ImportSourceType.FILESYSTEM,
-                status=ImportJobStatus.COMPLETED,
+                status=ImportJobStatus.IMPORTING,
             )
             session.add(job)
             await session.flush()
@@ -589,7 +589,7 @@ async def test_paired_conversion_does_not_rebase_retained_import_ownership(
             library_convert_service, "prepare_conversion", acquired_during_conversion
         )
     async with factory() as session:
-        with pytest.raises(ValidationError, match="rollback journal"):
+        with pytest.raises(ValidationError, match="unfinished import"):
             await library_convert_service.convert_library_file(
                 session,
                 source=source,

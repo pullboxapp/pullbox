@@ -252,7 +252,7 @@ async def test_referenced_file_and_import_protection_remain_fail_closed(
             file.storage_mode = LibraryFileStorageMode.MANAGED
 
         async def protected(*args, **kwargs):
-            raise ArchiveMetadataBindingError("import_rollback_protected")
+            raise ArchiveMetadataBindingError("import_operation_active")
 
         monkeypatch.setattr(service, "_require_no_import_owner", protected)
         await authenticated_client.post(
@@ -260,5 +260,5 @@ async def test_referenced_file_and_import_protection_remain_fail_closed(
         )
         await queue.dispatch_next()
         report = (await authenticated_client.get(endpoint + "/job")).json()
-        assert "import rollback" in report["targets"][0]["reason"]
+        assert "unfinished import" in report["targets"][0]["reason"]
         assert (path.read_bytes(), path.stat()) == original

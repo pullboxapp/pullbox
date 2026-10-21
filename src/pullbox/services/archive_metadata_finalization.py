@@ -30,6 +30,7 @@ from pullbox.services.import_archive_publication import (
     acknowledge_import_archive_publication,
     require_import_archive_owner,
 )
+from pullbox.services.import_file_edit_history import record_post_import_edit
 from pullbox.services.metadata_baselines import MetadataBaselineWrite, save_metadata_baselines
 from pullbox.services.metadata_credits import write_issue_credits
 from pullbox.services.metadata_entity_values import (
@@ -144,6 +145,10 @@ async def finalize_archive_publication(
         file.file_modified_at = modified_at
         file.file_hash = plan.output_digest
         file.has_comicinfo = True
+        if plan.import_owner is None:
+            await record_post_import_edit(
+                session, file.id, kind="metadata", operation_id=receipt.operation_id
+            )
         await acknowledge_import_archive_publication(session, receipt)
         await session.flush()
         await _file_work(lambda stop: _check_output(receipt, inspection))

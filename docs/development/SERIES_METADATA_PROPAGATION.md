@@ -27,7 +27,7 @@ require a new preview; retry does not silently approve new content.
   reconciled XML pair qualify. Missing pairs link to the issue's existing metadata
   review workflow; the batch does not invent unreviewed issue metadata.
 - Reference-only files, read-only roots, native archives requiring conversion,
-  import rollback protection, identity disagreements, unsupported XML and protected
+  unfinished import/rollback work, identity disagreements, unsupported XML and protected
   issue-level corrections remain unchanged and receive per-file explanations.
 - Issue titles, summaries, dates, IDs, credits, reading state and other unselected
   metadata are not refreshed. Series description never becomes issue summary.
@@ -46,13 +46,29 @@ authority or change canonical values. Finalization updates only library-file
 accounting, not shared series/issue metadata or baselines, so sibling approvals
 remain valid. Historical journals without this mode retain their existing behavior.
 
+Completed import history does not prohibit later metadata edits or conversion.
+Successful writes retain an edit marker alongside the original import evidence.
+Import rollback preserves edited files, their library records and dependent series
+state instead of deleting them or moving their parent folder. The rollback result
+reports intentional preservation separately from work needing repair. Previews,
+no-ops and failed writes do not claim a completed edit. An unfinished publication
+preserves its target and parent until recovery establishes its outcome.
+
 Tests cover selected scope, stale approvals, explicit selection, CSRF, protected
 files, page preservation, no-op previews, journal recovery without rewriting,
 SQLite/PostgreSQL parity, theme/mobile modal bounds and visible progress.
 
 ## Planet Atmos Testing
 
-On the October 20 home-server snapshot, issues #5 and #6 qualify. Issues #1 through
-#4 remain protected by import rollback history. Do not detach that history merely
-to make a propagation test pass. A private copy verified selected changes to #5/#6
-and preserved all page/other archive entries, series.json and canonical records.
+On the October 20 home-server snapshot, issues #5 and #6 qualify directly. Removing
+the historical import lock reveals existing prerequisites on #1-#4: #1/#4 need
+the issue metadata workflow to review their old XML values and establish a paired
+document, while #2/#3 contain GCD issue IDs 2837770/2846553 that are not verified
+library links. Their ComicVine/Metron links are already verified; repeating those
+links does not resolve the extra GCD identity. Verify the GCD series/issue mapping
+before attempting their writes, then preview propagation again. Do not detach import history
+or bypass identity validation to make the test pass. Real-file checks use private
+copies, not production writes or rollback. The private-copy #1/#4 review/write and
+propagation check preserved all pages, sidecar state and library records through
+the affected rollback actions. Synthetic SQLite/PostgreSQL coverage exercises all
+shared workflows independently of these real-file prerequisites.

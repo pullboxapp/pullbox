@@ -787,6 +787,11 @@ async def rollback_action(
     if action.action_type != action_type or dict(action.payload or {}) != payload:
         raise ValueError("Import action changed after it was selected for rollback")
 
+    from pullbox.services.import_file_edit_history import preserve_edited_import_action
+
+    if await preserve_edited_import_action(session, action):
+        return
+
     if action_type == _STORY_ARC_MANAGED_PLACEMENT_ACTION:
         await _rollback_import_managed_story_arc_placement(session, action, payload)
     elif action_type == "story_arc_referenced_placement_attached":

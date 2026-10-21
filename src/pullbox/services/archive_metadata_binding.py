@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pullbox.core.exceptions import NotFoundError
@@ -23,7 +23,7 @@ from pullbox.core.metadata_identity import (
 )
 from pullbox.core.metadata_identity_state import IdentityVerificationState
 from pullbox.models import Issue, LibraryFile, LibraryRoot, Series
-from pullbox.models.import_job import ImportedFile, ImportJob, ImportJobStatus
+from pullbox.models.import_job import ImportControlRequest, ImportedFile, ImportJob, ImportJobStatus
 from pullbox.models.library import FileFormat, LibraryFileStorageMode
 from pullbox.models.metadata_source import MetadataSourceConfig
 from pullbox.schemas.metadata_snapshot import MetadataSnapshot
@@ -217,18 +217,28 @@ async def lock_archive_metadata_binding(
 
 
 async def require_unowned_metadata_file(session: AsyncSession, file_id: int) -> None:
-    """An independent write cannot replace retained import rollback evidence."""
+    """Historical ownership is not a write lock; unfinished import work still is."""
     protected = await session.scalar(
         select(ImportedFile.id)
         .join(ImportJob)
         .where(
             ImportedFile.library_file_id == file_id,
-            ImportJob.status != ImportJobStatus.ROLLED_BACK,
+            or_(
+                ImportJob.status.not_in(
+                    (
+                        ImportJobStatus.COMPLETED,
+                        ImportJobStatus.FAILED,
+                        ImportJobStatus.CANCELLED,
+                        ImportJobStatus.ROLLED_BACK,
+                    )
+                ),
+                ImportJob.control_request != ImportControlRequest.NONE,
+            ),
         )
         .limit(1)
     )
     if protected:
-        raise ArchiveMetadataBindingError("import_rollback_protected")
+        raise ArchiveMetadataBindingError("import_operation_active")
 
 
 @dataclass(frozen=True)

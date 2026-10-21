@@ -564,6 +564,21 @@ reassigned registrations. A successor must be finalized for that exact unchanged
 action, and its verified fingerprint/digest must still match the actual archive.
 The original source remains subject to the existing rollback policy.
 
+Independent metadata edits and conversions may proceed after the import reaches
+a terminal state with no outstanding control request. They lock related import
+jobs/files before the library binding, recheck admission before publication and
+record `post_import_edit` in ImportedFile diagnostics with successful file-state
+accounting. Original signatures, placement payloads and import-time successor
+receipts remain unchanged. Successful explicit edits supersede pending/failed
+import enrichment for that file rather than letting older work overwrite them.
+Rollback preserves these files, registrations and dependent series actions,
+including folder renames. Its partial result counts intentional preservation
+separately from manual recovery. Active publications/conversions also preserve
+their parent folder while recovery establishes the outcome. A proven publication
+may finish accounting after rollback is requested; it must not rewrite the file.
+No-op previews/writes do not create preservation markers or disable ordinary
+rollback of untouched imports. No schema migration or history detachment is used.
+
 A stopped owner may receive a `settled` receipt for a proven published successor.
 It updates only registered file accounting and the import's successor reference,
 marking enrichment cancelled without applying canonical snapshots or baselines.

@@ -260,7 +260,7 @@ async def test_cancel_during_archive_preparation_preserves_original(identity_pro
         assert (path.read_bytes(), path.stat()) == original
 
 
-async def test_import_rollback_protection_never_changes_the_file(identity_probe_db, tmp_path):
+async def test_unfinished_import_never_changes_the_file(identity_probe_db, tmp_path):
     _, factory, _ = identity_probe_db
     async with prepared(factory, tmp_path) as (path, _, plan):
         issue_id = plan.target.binding.metadata.issues[0].local_id
@@ -268,7 +268,7 @@ async def test_import_rollback_protection_never_changes_the_file(identity_probe_
             job = ImportJob(
                 source_path=str(tmp_path),
                 source_type=ImportSourceType.FILESYSTEM,
-                status=ImportJobStatus.COMPLETED,
+                status=ImportJobStatus.IMPORTING,
             )
             session.add(job)
             await session.flush()
@@ -286,7 +286,7 @@ async def test_import_rollback_protection_never_changes_the_file(identity_probe_
                 )
             )
         original = path.read_bytes(), path.stat()
-        with pytest.raises(ArchiveMetadataBindingError, match="import_rollback_protected"):
+        with pytest.raises(ArchiveMetadataBindingError, match="import_operation_active"):
             await preview(factory, issue_id)
         assert (path.read_bytes(), path.stat()) == original
 

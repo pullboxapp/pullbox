@@ -89,10 +89,10 @@ async def _sync_converted_file_record(
 
 def _conversion_error_message(exc: Exception) -> str:
     if isinstance(exc, ArchiveMetadataBindingError):
-        if exc.code == "import_rollback_protected":
+        if exc.code == "import_operation_active":
             return (
-                "This file still belongs to an import's rollback journal. "
-                "Paired conversion is not available for it yet; the file has not been changed."
+                "An unfinished import or rollback still controls this file. "
+                "Finish or cancel that operation, then retry conversion."
             )
         return (
             "This comic's metadata match needs review before conversion. "
