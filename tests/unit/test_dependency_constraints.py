@@ -1,4 +1,4 @@
-"""Keep fresh installs on the qualified ORM compatibility line."""
+"""Keep fresh installs on qualified and patched dependency lines."""
 
 import tomllib
 from pathlib import Path
@@ -22,3 +22,17 @@ def test_sqlalchemy_dependency_stays_on_qualified_21_line() -> None:
     assert "2.1.5" in sqlalchemy.specifier
     assert "2.2.0" not in sqlalchemy.specifier
     assert "3.0.0" not in sqlalchemy.specifier
+
+
+def test_pillow_dependency_requires_patched_13_line() -> None:
+    project = tomllib.loads(Path("pyproject.toml").read_text())
+    pillow = next(
+        requirement
+        for dependency in project["project"]["dependencies"]
+        if (requirement := Requirement(dependency)).name == "pillow"
+    )
+
+    assert "12.3.0" not in pillow.specifier
+    assert "13.0.0" in pillow.specifier
+    assert "13.0.1" in pillow.specifier
+    assert "14.0.0" not in pillow.specifier

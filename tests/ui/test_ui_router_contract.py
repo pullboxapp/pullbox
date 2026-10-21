@@ -452,6 +452,18 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
             "source_arc_add",
             "source_arc_add",
         ),
+        (
+            "/story-arcs/{story_arc_id}/file-sync",
+            ("GET",),
+            "story_arc_file_sync_status",
+            "story_arc_file_sync_status",
+        ),
+        (
+            "/story-arcs/{story_arc_id}/file-sync/retry",
+            ("POST",),
+            "story_arc_file_sync_retry",
+            "story_arc_file_sync_retry",
+        ),
         ("/story-arcs", ("GET",), "story_arc_list", "story_arc_list"),
         ("/story-arcs/add", ("GET",), "story_arc_add", "story_arc_add"),
         ("/story-arcs", ("POST",), "story_arc_create", "story_arc_create"),
@@ -684,6 +696,12 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
             ("POST",),
             "htmx_intervention_reject",
             "htmx_intervention_reject",
+        ),
+        (
+            "/htmx/intervention/{pending_id}/airdcpp/{action}",
+            ("POST",),
+            "htmx_intervention_airdcpp_recovery",
+            "htmx_intervention_airdcpp_recovery",
         ),
         (
             "/htmx/intervention/{pending_id}/retry-recovery",

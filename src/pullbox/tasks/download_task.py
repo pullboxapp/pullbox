@@ -64,7 +64,10 @@ from pullbox.tasks.download_post_processing_destination import (
     find_existing_destination_file,
     register_existing_destination_file,
 )
-from pullbox.tasks.download_post_processing_metadata import finish_download_metadata
+from pullbox.tasks.download_post_processing_metadata import (
+    finish_download_metadata,
+    require_unpublished_download,
+)
 from pullbox.tasks.download_post_processing_runtime import PostProcessingRuntime
 from pullbox.tasks.download_post_processing_source_validation import (
     ResolveLocalPath,
@@ -514,6 +517,9 @@ async def _run_post_processing(
             trace.finalize_current_phase()
             runtime.emit_summary(outcome="success")
             return
+
+        if paired_metadata:
+            await require_unpublished_download(session, download)
 
         source_validation = await resolve_and_validate_source(
             session=session,

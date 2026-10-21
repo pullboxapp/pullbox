@@ -18,9 +18,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reconciled metadata, verified provider links, and field provenance. Safe custom
   JSON fields are preserved; shared, reference-only, and read-only folders stay
   unchanged. Split managed folders are reviewed individually.
+- Added reviewed single-issue metadata editing and a separate series editor for
+  saved library metadata and `series.json`. Writes retain verified identities,
+  field provenance, and coordinated ComicInfo.xml/MetronInfo.xml output.
+- Added explicit series-to-comic metadata propagation with selected fields and
+  files, per-file previews, background progress, cancellation, and resumable writes.
+  Saving series metadata alone does not modify comic files.
+- Added recovery and dismissal actions for interrupted AirDC++ work, a reviewed
+  Grab anyway action for eligible rejected results, and a replacement workflow
+  for incomplete story-only downloads.
+
+### Fixed
+
+- Reconciled stale provider catalog counts and safely extended linked issue
+  catalogs without replacing existing matches or owned files. Repeated Metron
+  searches now respect provider cooldowns and distinguish timeouts from empty results.
+- Recovered retained downloads and overlapping series packs without downloading
+  or rewriting already imported comics. Oversized files can receive a bounded
+  approval using the retained download instead of starting again.
+- Corrected shared XML metadata reconciliation and restart-sensitive recovery
+  checks while retaining archive, identity, and changed-file protections.
+- Allowed metadata edits and conversion after completed imports. Later import
+  rollback preserves edited files and dependent library records and reports that
+  preservation instead of deleting the user's subsequent work.
+- Corrected background activity counts and refresh, restored active download
+  sizes, and prevented multiple issue tabs from exhausting activity connections
+  or leaving the interface stuck after a stylesheet load failure.
+- Added visible Story Arc preview loading and actionable folder validation and
+  retry for separate reading-order copies, preserving canonical comics.
+
+### Security
+
+- Updated Pillow to the patched 13.0 line for image decoding and conversion.
 
 Automatic import metadata writing, GCD API v2, and LOCG enrichment are not enabled
-by this development preview. This is not the completed v2.0 general release.
+by default in this development preview. The experimental Anna verification flow
+is not included. This is not the completed v2.0 general release.
 
 ## [1.3.0] - 2026-09-15
 

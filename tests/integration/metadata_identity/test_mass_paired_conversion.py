@@ -5,7 +5,7 @@ import json
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 from zipfile import ZipFile
 
 import pytest
@@ -334,8 +334,9 @@ async def test_mass_restart_recovers_receipt_into_utility_rollback_journal(
 
 @pytest.mark.usefixtures("paired_conversion_setting")
 @pytest.mark.parametrize("source_format", [FileFormat.CBZ, FileFormat.CB7])
-async def test_import_owned_mass_file_is_skipped_without_detaching_ownership(
-    identity_probe_db, tmp_path, source_format
+@pytest.mark.parametrize("import_status", [ImportJobStatus.COMPLETED, ImportJobStatus.IMPORTING])
+async def test_import_owned_mass_file_respects_active_ownership_and_preserves_history(
+    identity_probe_db, tmp_path, source_format, import_status
 ):
     _, factory, _ = identity_probe_db
     executor, config, context, item, source, file_id, _, _ = await prepare_mass(
@@ -347,7 +348,7 @@ async def test_import_owned_mass_file_is_skipped_without_detaching_ownership(
         job = ImportJob(
             source_path="retained import",
             source_type=ImportSourceType.FILESYSTEM,
-            status=ImportJobStatus.COMPLETED,
+            status=import_status,
         )
         session.add(job)
         await session.flush()
@@ -375,10 +376,27 @@ async def test_import_owned_mass_file_is_skipped_without_detaching_ownership(
         owner_id = owner.id
     before = source.read_bytes(), source.stat()
     result = await execute(executor, config, context, item)
-    assert result.result is ItemResult.SKIPPED and "rollback" in result.warning_message
-    assert (source.read_bytes(), source.stat()) == before
+    if import_status is ImportJobStatus.IMPORTING:
+        assert result.result is ItemResult.SKIPPED and "rollback" in result.warning_message
+        assert (source.read_bytes(), source.stat()) == before
+    else:
+        assert result.result is ItemResult.COMPLETED, result.error_message
+        output = Path(result.after_state["path"])
+        assert Path(result.after_state["original_path"]).read_bytes() == before[0]
+        with ZipFile(output) as archive:
+            assert archive.read("page.jpg") == b"page bytes"
+            assert {"ComicInfo.xml", "MetronInfo.xml"} <= set(archive.namelist())
     async with factory() as session:
-        assert (await session.get(ImportedFile, owner_id)).library_file_id == file_id
+        owner = await session.get(ImportedFile, owner_id)
+        assert owner.library_file_id == file_id
+        assert owner.file_path == str(source)
+        assert owner.status is ImportedFileStatus.IMPORTED
+        if import_status is ImportJobStatus.COMPLETED:
+            assert owner.diagnostics["post_import_edit"]["kind"] == "conversion"
+            assert owner.diagnostics["post_import_edit"]["operation_id"] == str(UUID(item["id"]))
+            assert (await session.get(LibraryFile, file_id)).file_path == str(output)
+        else:
+            assert "post_import_edit" not in (owner.diagnostics or {})
 
 
 @pytest.mark.usefixtures("paired_conversion_setting")

@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from pullbox.core.exceptions import ValidationError
 from pullbox.core.file_safety import get_archive_size_limit_bytes
 from pullbox.models import LibraryFile
-from pullbox.models.archive_metadata_publication import PublicationState
+from pullbox.models.archive_metadata_publication import ArchiveMetadataPublication, PublicationState
 from pullbox.models.download import DownloadHistory, DownloadState
 from pullbox.models.library import FileFormat
 from pullbox.models.library_conversion import LibraryConversion
@@ -32,6 +32,26 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from pullbox.tasks.download_post_processing_runtime import PostProcessingRuntime
+
+
+async def require_unpublished_download(session: AsyncSession, download: DownloadHistory) -> None:
+    """A missing path must not turn retained publication history into a new transfer."""
+    operation = uuid5(NAMESPACE_URL, f"pullbox:download-metadata:{download.id}")
+    publication = await session.scalar(
+        select(ArchiveMetadataPublication.id).where(
+            ArchiveMetadataPublication.operation_id == str(operation)
+        )
+    )
+    conversion = await session.scalar(
+        select(LibraryConversion.id).where(
+            LibraryConversion.operation_id == str(uuid5(operation, "conversion"))
+        )
+    )
+    if publication is not None or conversion is not None:
+        raise ValidationError(
+            "This download has retained publication history but lost its library-copy reference. "
+            "Review the issue's file metadata before retrying. Existing files were left unchanged."
+        )
 
 
 async def finish_download_metadata(
