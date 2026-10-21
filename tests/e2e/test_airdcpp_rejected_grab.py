@@ -82,23 +82,24 @@ def test_rejected_dc_confirmation_cancel_retry_and_queue(
     expect(trigger).to_be_enabled()
     assert grabs == []
 
-    for _ in range(2):
+    for attempt in range(2):
         trigger.click()
         confirm.get_by_role("button", name="Grab anyway", exact=True).click()
         if owned:
             replacement = page.get_by_role("dialog", name="Download replacement?", exact=True)
-            if not grabs:
+            if attempt == 0:
                 replacement.get_by_role("button", name="Cancel", exact=True).click()
                 expect(trigger).to_be_enabled()
                 assert grabs == []
                 trigger.click()
                 confirm.get_by_role("button", name="Grab anyway", exact=True).click()
             replacement.get_by_role("button", name="Download replacement", exact=True).click()
-        if len(grabs) < 2:
+        if attempt == 0:
             expect(
                 page.get_by_text("The selected AirDC++ client is not ready.", exact=True)
             ).to_be_visible()
             expect(trigger).to_be_enabled()
+            assert len(grabs) == 1
 
     queued = search.get_by_role("button", name="Queued", exact=True)
     expect(queued).to_be_disabled()
