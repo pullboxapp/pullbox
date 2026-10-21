@@ -10,7 +10,7 @@
           <span class="pill pill-neutral">{{ story_arc.membership_count }} total</span>
           <span class="pill pill-success">{{ story_arc.owned_count }} owned</span>
           <span class="pill pill-info">Read {{ story_arc.read_count }}/{{ story_arc.readable_count }}</span>
-          <span class="pill {{ 'pill-warning' if story_arc.review_count else 'pill-success' }}">{{ story_arc.review_count }} review</span>
+          <span id="story-arc-review-badge" class="pill {{ 'pill-warning' if story_arc.review_count else 'pill-success' }}">{{ story_arc.review_count }} review</span>
         </div>
       </div>
       <p class="text-xs text-pb-text-sec">Issue numbers stay exactly as supplied by their source.</p>

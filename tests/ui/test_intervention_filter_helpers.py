@@ -44,6 +44,26 @@ def test_dc_intervention_protocol_label_is_not_usenet() -> None:
     assert intervention_protocol_label(False, "dc") == "Direct Connect"
 
 
+def test_unconfirmed_airdcpp_requests_are_actionable_recovery() -> None:
+    from pullbox.ui.intervention_filter_helpers import build_intervention_item_meta
+
+    pending = SimpleNamespace(
+        is_torrent=False,
+        status="pending",
+        indexer=None,
+        match_details={
+            "source_kind": "dc",
+            "provider_name": "AirDC++",
+            "failure_class": "queue_confirmation",
+            "failure_code": "queue_lookup_failed",
+            "dc_download_id": 27,
+        },
+    )
+    meta = build_intervention_item_meta(pending)
+    assert meta["lane"] == "recovery"
+    assert "AirDC++" in meta["recovery_summary"]
+
+
 def test_intervention_review_reason_labels_and_summaries() -> None:
     """Review reason helpers should preserve the established display contract."""
     from pullbox.ui.intervention_filter_helpers import (
@@ -95,6 +115,9 @@ def test_build_intervention_item_meta_formats_protocol_outcome_and_source() -> N
     )
 
     assert build_intervention_item_meta(pending_match) == {
+        "replacement_recovery": False,
+        "pack_recovery": False,
+        "pack_review_reason": "",
         "protocol_label": "Torrent",
         "outcome_label": "Rejected",
         "review_reason_codes": ["needs_review"],
@@ -106,6 +129,11 @@ def test_build_intervention_item_meta_formats_protocol_outcome_and_source() -> N
         "rejection_reason": "Wrong year",
         "lane": "review",
         "recovery_summary": "",
+        "metadata_recovery": False,
+        "size_recovery": False,
+        "safety_recovery": False,
+        "can_allow_size": False,
+        "size_review_reason": "",
     }
 
 
@@ -178,3 +206,45 @@ def test_build_intervention_item_meta_identifies_direct_acquisition_recovery() -
 
     assert meta["lane"] == "recovery"
     assert meta["recovery_summary"] == "TeraBox authentication required"
+
+
+def test_pack_ownership_recovery_does_not_offer_single_file_metadata_review():
+    from pullbox.ui.intervention_filter_helpers import build_intervention_item_meta
+
+    pending = SimpleNamespace(
+        is_torrent=False,
+        status="pending",
+        indexer=None,
+        match_details={
+            "source_kind": "direct",
+            "failure_class": "post_process",
+            "failure_code": "direct_pack_ownership_changed",
+        },
+    )
+    meta = build_intervention_item_meta(pending)
+    assert meta["pack_recovery"] is True
+    assert meta["metadata_recovery"] is False
+    assert meta["recovery_summary"] == (
+        "Library ownership changed during pack import; recheck the retained pack"
+    )
+
+
+def test_metadata_recovery_is_not_described_as_a_broken_download_route():
+    from pullbox.ui.intervention_filter_helpers import build_intervention_item_meta
+
+    pending = SimpleNamespace(
+        is_torrent=False,
+        status="pending",
+        indexer=None,
+        match_details={
+            "source_kind": "direct",
+            "failure_class": "post_process",
+            "failure_code": "direct_metadata_review_required",
+        },
+    )
+    meta = build_intervention_item_meta(pending)
+    assert (
+        meta["recovery_summary"]
+        == "Downloaded file needs metadata review; no new download is needed"
+    )
+    assert meta["metadata_recovery"] is True

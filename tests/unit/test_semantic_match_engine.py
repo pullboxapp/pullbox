@@ -23,6 +23,45 @@ class TestSemanticMatchEngine:
         self.extractor = SourceMetadataExtractor()
         self.config = SemanticMatchConfig()
 
+    @pytest.mark.parametrize("policy", [SearchPolicy(), ImportPolicy()])
+    @pytest.mark.parametrize("label", ["B Story", "[B Story]", "(B Story)"])
+    def test_explicit_story_extract_is_not_a_complete_issue(self, policy, label) -> None:
+        metadata = self.extractor.from_release_title(
+            f"Marvel Comics Presents 158 {label} (1994) (digital) (Marika-Empire)"
+        )
+        decision = SemanticMatchEngine(self.config, policy).match_against_issue(
+            metadata=metadata,
+            wanted_series="Marvel Comics Presents",
+            wanted_issue=158,
+            wanted_year=1988,
+            wanted_issue_cv_id=39372,
+        )
+        assert not decision.is_match
+        assert decision.match_method == "partial_issue"
+        assert "complete issue" in decision.rejection_reason
+
+    @pytest.mark.parametrize("number", ["13B", "50-X", "50-O"])
+    def test_story_guard_keeps_lettered_issue_designations(self, number) -> None:
+        metadata = self.extractor.from_release_title(f"Example {number} (2024)")
+        decision = SemanticMatchEngine(self.config, SearchPolicy()).match_against_issue(
+            metadata=metadata,
+            wanted_series="Example",
+            wanted_issue=13 if number == "13B" else 50,
+            wanted_issue_number_text=number,
+            wanted_year=2024,
+        )
+        assert decision.is_match
+
+    def test_story_in_series_title_is_not_an_extract_marker(self) -> None:
+        metadata = self.extractor.from_release_title("Toy Story 158 (1994)")
+        decision = SemanticMatchEngine(self.config, SearchPolicy()).match_against_issue(
+            metadata=metadata,
+            wanted_series="Toy Story",
+            wanted_issue=158,
+            wanted_year=1994,
+        )
+        assert decision.is_match
+
     def test_collection_release_matches_collection_target(self) -> None:
         metadata = self.extractor.from_release_title("Batman TPB Vol 5 [2024] [Digital]")
         decision = SemanticMatchEngine(self.config, SearchPolicy()).match_against_issue(

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import enum
+import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -1516,6 +1517,17 @@ async def validate_story_arc_placement_policy_input(
         raise StoryArcPlacementIntegrationError(
             "destination_root_outside_library_root",
             "Story-arc destination root must be within the selected library root",
+            category="safety",
+        )
+    required_access = os.R_OK | os.X_OK
+    if mode is not StoryArcPlacementPolicyMode.REFERENCE_ONLY:
+        required_access |= os.W_OK
+    if not await asyncio.to_thread(os.access, resolved_destination, required_access):
+        operation = "read and write" if required_access & os.W_OK else "read"
+        raise StoryArcPlacementIntegrationError(
+            "destination_root_unavailable",
+            f"Pullbox cannot {operation} the Story Arc folder {resolved_destination}. "
+            "Check this folder's permissions for the container user, then recheck and retry.",
             category="safety",
         )
     return StoryArcPlacementPolicy(

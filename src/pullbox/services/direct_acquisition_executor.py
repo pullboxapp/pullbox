@@ -64,7 +64,7 @@ from pullbox.services.direct_acquisition_state import (
     transition_acquisition,
     transition_artifact,
 )
-from pullbox.services.direct_artifact_pack import DirectArtifactPackError
+from pullbox.services.direct_artifact_pack import RECOVERABLE_PACK_FAILURES, DirectArtifactPackError
 from pullbox.services.direct_artifact_post_processing import (
     DirectPostProcessingResult,
     run_direct_artifact_pack_post_processing,
@@ -76,6 +76,7 @@ from pullbox.services.direct_artifact_quarantine import (
     DirectArtifactValidationResult,
     DirectQuarantineWorkspace,
     validate_direct_artifact,
+    validate_direct_resource_approval,
 )
 from pullbox.services.direct_configuration_service import load_host_credential_material
 from pullbox.services.direct_download_history_adapter import sync_direct_download_history
@@ -253,6 +254,12 @@ class DirectAcquisitionExecutor:
         try:
             _raise_if_cancelled(cancel_event)
             final_path = _recover_final_path(workspace, artifact)
+            if attempt.failure_code in RECOVERABLE_PACK_FAILURES:
+                if final_path is None:
+                    raise _missing_quarantine_error()
+                # A retained matching failure is never permission to trust changed content.
+                if not _resource_safety_override_allowed(attempt):
+                    await self._validator(session, final_path)
             if (
                 attempt.state is DirectAcquisitionState.INTERVENTION
                 and attempt.failure_class is DirectArtifactFailureClass.POST_PROCESS
@@ -623,6 +630,19 @@ class DirectAcquisitionExecutor:
         download_history_id = progress.download_history_id
         if download_history_id is None:
             raise RuntimeError("Direct post-processing requires a download history record.")
+        if _resource_safety_override_allowed(attempt):
+            review = (attempt.plan_snapshot or {}).get("safety_review")
+            await asyncio.to_thread(validate_direct_resource_approval, final_path, review)
+            try:
+                await validate_direct_artifact(
+                    session, final_path, allow_resource_safety_exception=True
+                )
+            except DirectArtifactValidationError as exc:
+                # Keep a newly discovered safety finding actionable without another transfer.
+                raise DirectArtifactValidationError(
+                    code=exc.code, message=str(exc), safety_block=exc.safety_block
+                ) from exc
+            await asyncio.to_thread(validate_direct_resource_approval, final_path, review)
         try:
             pack_coverage = _selected_pack_coverage(attempt)
             if len(pack_coverage) > 1:
@@ -668,10 +688,27 @@ class DirectAcquisitionExecutor:
             artifact.failure_class = DirectArtifactFailureClass.POST_PROCESS
             artifact.failure_code = exc.code
             artifact.error_message = str(exc)
-            transition_artifact(artifact, DirectArtifactState.FAILED, at=self._now())
-            transition_acquisition(attempt, DirectAcquisitionState.FAILED, at=self._now())
-            self._quarantine.cleanup(workspace)
-            await progress.write(stage="failed", force=True)
+            if exc.code in RECOVERABLE_PACK_FAILURES:
+                transition_artifact(artifact, DirectArtifactState.INTERVENTION, at=self._now())
+                transition_acquisition(attempt, DirectAcquisitionState.INTERVENTION, at=self._now())
+                await progress.write(stage="intervention", force=True)
+                if exc.code == "direct_pack_ownership_changed":
+                    from pullbox.services.direct_pack_completion import reconcile_fulfilled_pack
+
+                    if await reconcile_fulfilled_pack(session, acquisition_id):
+                        await session.commit()
+                        attempt, artifact = await _load_attempt(
+                            session, acquisition_id, artifact_id
+                        )
+                        return _result(attempt, artifact)
+                    attempt, artifact = await _load_attempt(session, acquisition_id, artifact_id)
+                await InterventionService().create_direct_attempt_intervention(session, attempt)
+                await session.commit()
+            else:
+                transition_artifact(artifact, DirectArtifactState.FAILED, at=self._now())
+                transition_acquisition(attempt, DirectAcquisitionState.FAILED, at=self._now())
+                self._quarantine.cleanup(workspace)
+                await progress.write(stage="failed", force=True)
             return _result(attempt, artifact)
         except Exception as exc:
             await session.rollback()
@@ -691,6 +728,8 @@ class DirectAcquisitionExecutor:
             artifact.failure_class = DirectArtifactFailureClass.POST_PROCESS
             artifact.failure_code = attempt.failure_code
             artifact.error_message = attempt.error_message
+            if isinstance(exc, DirectMetadataReviewError) and exc.code == "partial_issue":
+                attempt.plan_snapshot = {**attempt.plan_snapshot, "metadata_failure_code": exc.code}
             transition_artifact(artifact, DirectArtifactState.INTERVENTION, at=self._now())
             transition_acquisition(attempt, DirectAcquisitionState.INTERVENTION, at=self._now())
             await InterventionService().create_direct_attempt_intervention(session, attempt)
@@ -713,6 +752,23 @@ class DirectAcquisitionExecutor:
             force=True,
             final_path=str(processed.final_path),
         )
+        from pullbox.services.direct_metadata_recovery import reconcile_metadata_replacements
+
+        for imported_issue_id in processed.imported_issue_ids:
+            await reconcile_metadata_replacements(session, imported_issue_id)
+        attempt, artifact = await _load_attempt(session, acquisition_id, artifact_id)
+        if len(pack_coverage) > 1:
+            from pullbox.services.direct_pack_completion import reconcile_completed_pack_issues
+
+            try:
+                await reconcile_completed_pack_issues(session, processed.imported_issue_ids)
+            except Exception:
+                # The import is already committed. A follow-up failure must not undo it.
+                await session.rollback()
+                logger.exception(
+                    "direct_pack_completion_reconciliation_failed", acquisition_id=acquisition_id
+                )
+            attempt, artifact = await _load_attempt(session, acquisition_id, artifact_id)
         try:
             request_story_arc_sync_now()
         except Exception:

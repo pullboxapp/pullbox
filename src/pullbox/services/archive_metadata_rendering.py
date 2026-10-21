@@ -18,6 +18,7 @@ from pullbox.core.metadata_identity import (
 )
 from pullbox.core.metadata_xml import MetadataXmlError, parse_metadata_xml
 from pullbox.core.metroninfo_schema import validate_metroninfo_xml
+from pullbox.schemas.issue_file_metadata import SharedXmlChoices
 from pullbox.schemas.metadata_snapshot import MetadataSnapshot, MetadataValues
 from pullbox.services.archive_metadata_preservation import (
     ArchiveMetadataRenderError as ArchiveMetadataRenderError,
@@ -68,6 +69,8 @@ def render_archive_metadata(
     previous_series: MetadataSnapshot | None = None,
     previous_issue: MetadataSnapshot | None = None,
     replace_managed: bool = False,
+    shared_choices: SharedXmlChoices | None = None,
+    propagation_fields: frozenset[str] | None = None,
 ) -> RenderedArchiveMetadata:
     """Render both documents from bound snapshots; this is not write permission.
 
@@ -75,6 +78,15 @@ def render_archive_metadata(
     metadata into these snapshots, and authorize the eventual file operation.
     Previous managed baselines authorize refresh only while XML is unchanged.
     """
+    if propagation_fields is not None:
+        from pullbox.services.series_metadata_propagation_rendering import render_series_propagation
+
+        return render_series_propagation(series, issue, files, propagation_fields)
+    from pullbox.services.archive_series_metadata import archive_render_series
+
+    series = archive_render_series(series)
+    if previous_series is not None:
+        previous_series = archive_render_series(previous_series)
     if (
         series.entity_kind is not MetadataEntityKind.SERIES
         or issue.entity_kind is not MetadataEntityKind.ISSUE
@@ -113,7 +125,7 @@ def render_archive_metadata(
     _render_core(series, issue, ci, mi)
     _render_ids(series, issue, ci, mi, primary)
     _render_credits(issue, archive, ci, mi)
-    coordinate_preserved_fields(ci, mi)
+    coordinate_preserved_fields(ci, mi, shared_choices)
     return _validated_pair(ci, mi)
 
 
@@ -233,14 +245,20 @@ def _guard_values(
                         _format_text(snapshot.values.series_type),
                     )
                 if (
-                    field == "title"
+                    field in {"title", "sort_title"}
                     and snapshot.entity_kind is MetadataEntityKind.SERIES
                     and isinstance(old, str)
                     and isinstance(new, str)
-                    and _series_separator_key(old) == _series_separator_key(new)
-                    and any(item.identity in issue.identities for item in archive.evidence)
+                    and (
+                        old.strip() == new.strip()
+                        or (
+                            field == "title"
+                            and _series_separator_key(old) == _series_separator_key(new)
+                            and any(item.identity in issue.identities for item in archive.evidence)
+                        )
+                    )
                 ):
-                    # Only a proven exact issue can reconcile filesystem-safe subtitle separators.
+                    # XML readers trim both names; only verified titles may change separators.
                     continue
                 if old != new and not _authorized(
                     snapshot,
@@ -429,12 +447,6 @@ def _render_credits(
             for tag in COMICINFO_ROLES:
                 set_text(ci, tag, None)
         return
-    if any(
-        "," in credit.name
-        for credit in credits
-        if any(role in COMICINFO_ROLES.values() for role in credit.role.split(", "))
-    ):
-        raise ArchiveMetadataRenderError("unsupported_content", "credits")
     for tag, role in COMICINFO_ROLES.items():
         names = [credit.name for credit in credits if role in credit.role.split(", ")]
         set_text(ci, tag, ", ".join(names))
@@ -484,5 +496,9 @@ def _validated_pair(ci: ET.Element, mi: ET.Element) -> RenderedArchiveMetadata:
         or check.identity_conflicts
         or any(item.code != "unmapped_content" for item in check.diagnostics)
     ):
-        raise ArchiveMetadataRenderError("output_disagreement")
+        locator = next(
+            (item.locator for item in check.diagnostics if item.code != "unmapped_content"),
+            check.differences[0].field if check.differences else "",
+        )
+        raise ArchiveMetadataRenderError("output_disagreement", locator)
     return result

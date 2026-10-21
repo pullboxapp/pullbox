@@ -75,3 +75,8 @@
 {% block footer_dock %}
   {% include "partials/series_detail_footer_dock.html" %}
 {% endblock %}
+
+{% block scripts %}
+  <script src="/static/js/series-metadata-editor.js?v={{ app_shell_asset_version|default('') }}"></script>
+  <script src="/static/js/series-metadata-propagation.js?v={{ app_shell_asset_version|default('') }}"></script>
+{% endblock %}

@@ -235,11 +235,10 @@ async def _reconcile_ready_client(config_id: int) -> None:
     registry = _registry
     reconciler = _reconciler
     supervisor = registry.get(config_id) if registry is not None else None
-    if (
-        reconciler is None
-        or supervisor is None
-        or supervisor.state is not AirDcppSupervisorState.READY
-    ):
+    if reconciler is None:
+        return
+    if supervisor is None or supervisor.state is not AirDcppSupervisorState.READY:
+        await reconciler.defer_unconfirmed_requests(config_id)
         return
     result = await reconciler.reconcile_client(
         config_id,

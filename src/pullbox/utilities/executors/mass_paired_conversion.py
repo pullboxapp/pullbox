@@ -220,9 +220,10 @@ async def process_paired_mass(
             pass
         return ProcessedItem(item_id, ItemResult.CANCELLED)
     except ArchiveMetadataBindingError as exc:
-        if exc.code == "import_rollback_protected":
+        if exc.code == "import_operation_active":
             return skipped(
-                "This file belongs to an import rollback journal; it was left unchanged."
+                "An unfinished import or rollback controls this file. "
+                "Finish or cancel it, then retry."
             )
         return ProcessedItem(
             item_id,

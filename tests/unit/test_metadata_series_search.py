@@ -65,6 +65,20 @@ def test_no_enabled_sources_has_an_actionable_message():
     ]
 
 
+def test_metron_backoff_message_includes_when_to_retry():
+    snapshot = SeriesDiscoveryRead(
+        results=[],
+        sources=[
+            SourceOutcome(
+                source=Source.METRON_API,
+                status=SourceStatus.RATE_LIMITED,
+                retry_after_seconds=4,
+            )
+        ],
+    )
+    assert search.source_messages(snapshot) == ["Metron: requests paused; try again in 4 seconds."]
+
+
 async def test_unreadable_catalog_does_not_bypass_search_admission(monkeypatch):
     started, release = asyncio.Event(), asyncio.Event()
 

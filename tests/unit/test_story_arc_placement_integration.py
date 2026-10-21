@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -117,6 +118,38 @@ def _copy_policy(root_id: int, arc_root: Path) -> StoryArcPlacementPolicyInput:
         symlink_style=None,
         synchronize=True,
     )
+
+
+@pytest.mark.parametrize("mode", ["copy", "hardlink", "symlink", "reference_only"])
+async def test_policy_checks_actual_destination_access(
+    db_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    arc_id, _, root_id, canonical, destination = await _seed_membership(db_factory, tmp_path)
+    original_access = os.access
+    monkeypatch.setattr(
+        os,
+        "access",
+        lambda path, flags: (
+            False if Path(path) == destination and flags & os.W_OK else original_access(path, flags)
+        ),
+    )
+    proposal = replace(
+        _copy_policy(root_id, destination),
+        mode=mode,
+        symlink_style="relative" if mode == "symlink" else None,
+    )
+    async with db_factory() as session:
+        if mode == "reference_only":
+            await StoryArcPlacementSyncService().validate_policy(session, arc_id, proposal)
+        else:
+            with pytest.raises(StoryArcPlacementIntegrationError) as failure:
+                await StoryArcPlacementSyncService().validate_policy(session, arc_id, proposal)
+            assert failure.value.code == "destination_root_unavailable"
+            assert str(destination) in str(failure.value)
+    assert canonical.read_bytes() == b"canonical archive"
 
 
 async def test_later_acquisition_uses_saved_arc_policy_after_global_defaults_change(

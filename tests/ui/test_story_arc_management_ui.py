@@ -138,6 +138,113 @@ async def test_detail_does_not_inspect_placement_files_for_removed_cards(
     assert "No separate folder" in response.text
 
 
+@pytest.mark.parametrize("resolution_state", list(StoryArcResolutionState))
+async def test_arc_file_status_is_a_small_independently_refreshed_surface(
+    authenticated_client: AsyncClient,
+    sec_db: async_sessionmaker[AsyncSession],
+    resolution_state: StoryArcResolutionState,
+) -> None:
+    ids = await _seed_detail_arc(sec_db)
+    async with sec_db() as session:
+        member = await session.get(IssueStoryArc, ids["fractional_membership"])
+        member.resolution_state = resolution_state
+        await session.commit()
+        detail = await story_arc_presenters.load_story_arc_detail(
+            session, story_arc_id=ids["arc"], page=1, per_page=25, user_id=1
+        )
+    response = await authenticated_client.get(f"/story-arcs/{ids['arc']}/file-sync")
+    assert response.status_code == 200
+    assert 'id="story-arc-file-sync"' in response.text
+    assert "Representative placement preview" not in response.text
+    assert "Durable placement state" not in response.text
+    assert f">{detail.review_count} review</span>" in response.text
+    assert 'id="story-arc-review-footer" hx-swap-oob="outerHTML"' in response.text
+
+
+async def test_arc_file_retry_is_csrf_protected_idempotent_and_background_only(
+    authenticated_client: AsyncClient,
+    sec_db: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pullbox.services.story_arc_sync_queue import enqueue_story_arc_sync_work
+
+    ids = await _seed_placement_arc(sec_db, tmp_path)
+    arc_id = int(ids["arc"])
+    async with sec_db() as session:
+        await StoryArcPlacementSyncService().update_policy(
+            session,
+            arc_id,
+            expected_revision=int(ids["revision"]),
+            proposal=StoryArcPlacementPolicyInput(
+                mode="copy",
+                target_library_root_id=int(ids["root"]),
+                destination_root=str(ids["destination"]),
+                synchronize=True,
+            ),
+        )
+        arc = await session.get(StoryArc, arc_id)
+        source = await session.scalar(select(LibraryFile))
+        await enqueue_story_arc_sync_work(session, source)
+        work = await session.scalar(select(StoryArcSyncWork))
+        assert work is not None
+        work.state = StoryArcSyncWorkState.FAILED
+        work.last_error_code = "root_unavailable"
+        revision = arc.revision
+        session.add(
+            StoryArcSyncWork(
+                issue_story_arc_id=work.issue_story_arc_id,
+                library_file_id=source.id,
+                desired_generation="old-failed-attempt",
+                source_signature_hash="old",
+                source_file_path=source.file_path,
+                source_file_size=source.file_size,
+                source_file_modified_at=source.file_modified_at,
+                story_arc_revision=revision - 1,
+                membership_sequence=1,
+                policy_schema_version=1,
+                state=StoryArcSyncWorkState.FAILED,
+            )
+        )
+        await session.commit()
+        detail = await story_arc_presenters.load_story_arc_detail(
+            session,
+            story_arc_id=arc_id,
+            page=1,
+            per_page=25,
+            user_id=1,
+        )
+        assert detail.sync_failure_count == 1, "Historical retries must not inflate review counts"
+    monkeypatch.setattr(story_arc_routes, "request_story_arc_sync_now", lambda: None)
+    page = await authenticated_client.get(f"/story-arcs/{arc_id}")
+    assert (
+        "1 files could not synchronize because the destination folder was unavailable" in page.text
+    )
+    assert "Recheck and retry" in page.text
+    assert page.text.count('id="story-arc-review-badge"') == 1
+    assert page.text.count('id="story-arc-review-footer"') == 1
+    url = f"/story-arcs/{arc_id}/file-sync/retry"
+    denied = await authenticated_client.post(url, data={"expected_revision": revision})
+    assert denied.status_code == 403
+    first = await authenticated_client.post(
+        url, data={"expected_revision": revision}, headers=_csrf_header_for(authenticated_client)
+    )
+    assert first.status_code == 200
+    assert "1 files queued" in first.text
+    assert 'id="story-arc-review-badge"' in first.text
+    assert 'hx-swap-oob="outerHTML"' in first.text
+    assert ">0 review</span>" in first.text
+    assert 'id="story-arc-review-footer"' in first.text
+    assert 'role="progressbar"' in first.text
+    assert 'hx-trigger="every 3s"' in first.text
+    second = await authenticated_client.post(
+        url, data={"expected_revision": revision}, headers=_csrf_header_for(authenticated_client)
+    )
+    assert "0 files queued" in second.text
+    assert Path(str(ids["canonical"])).read_bytes() == b"canonical story arc issue"
+    assert list(Path(str(ids["destination"])).iterdir()) == []
+
+
 async def test_monitor_help_uses_shared_tooltip_and_screen_reader_description(
     authenticated_client: AsyncClient,
     sec_db: async_sessionmaker[AsyncSession],

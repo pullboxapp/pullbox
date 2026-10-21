@@ -3,6 +3,8 @@
 from collections.abc import Sequence
 from datetime import UTC, datetime
 
+from pydantic import ValidationError
+
 from pullbox.core.issue_numbers import parse_issue_number_text
 from pullbox.core.metadata_identity import ExternalIdentityRef, MetadataEntityKind, MetadataSource
 from pullbox.schemas.metadata_snapshot import (
@@ -61,6 +63,13 @@ def _candidate_values(
         for key, value in candidate.model_dump().items()
         if key in MetadataValues.model_fields
     }
+    if isinstance(candidate, ProviderSeriesRead):
+        try:
+            MetadataValues(issue_count=candidate.issue_count)
+        except ValidationError:
+            # Summary counts are advisory; retain the raw provider row as evidence.
+            values["issue_count"] = None
+            diagnostics.add(f"{candidate.source.value}:invalid_advisory_issue_count")
     if candidate.image_url and (
         candidate.source in {MetadataSource.GCD_LOCAL, MetadataSource.GCD_API_V2}
         or not allowed_artwork_url(candidate.image_url)
@@ -199,7 +208,11 @@ def assemble_metadata(
                     diagnostics.add(f"archive:{kind.value}:{field}:current_disagreement")
             unchanged_managed = (
                 prior is not None
-                and (prior.source is not None or prior.derivation is not None)
+                and (
+                    prior.source is not None
+                    or prior.derivation is not None
+                    or prior.provider_managed
+                )
                 and existing == local_value
             )
             if chosen.embedded_documents or (has_local_value and not unchanged_managed):
@@ -215,7 +228,8 @@ def assemble_metadata(
                     replace_managed
                     and prior is not None
                     and (
-                        prior.derivation is not None
+                        prior.provider_managed
+                        or prior.derivation is not None
                         or prior.passive_release is not None
                         or (
                             prior.source is not None

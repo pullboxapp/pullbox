@@ -1,5 +1,6 @@
 """User-approved existing CBZ writes preserve pages, edits and durable results."""
 
+from datetime import UTC, datetime
 from uuid import uuid4
 from zipfile import ZipFile
 
@@ -39,6 +40,62 @@ async def noop(*args):
 async def preview(factory, issue_id):
     async with factory() as session:
         return await prepare_file_metadata(session, issue_id)
+
+
+async def test_story_extract_preview_preserves_file_and_names_replacement_action(
+    identity_probe_db, tmp_path
+):
+    from pullbox.services.issue_file_metadata import file_metadata_error
+
+    _, factory, _ = identity_probe_db
+    async with prepared(factory, tmp_path) as (path, _, plan):
+        issue_id = plan.target.binding.metadata.issues[0].local_id
+        with ZipFile(path, "w") as archive:
+            archive.writestr("page.jpg", b"story pages")
+            archive.writestr(
+                "ComicInfo.xml", "<ComicInfo><Number>158 (B Story)</Number></ComicInfo>"
+            )
+        async with factory.begin() as session:
+            file = await session.get(LibraryFile, plan.target.binding.library_file_id)
+            file.file_size = path.stat().st_size
+            file.file_modified_at = datetime.fromtimestamp(path.stat().st_mtime, UTC)
+        before = path.read_bytes()
+        with pytest.raises(ArchiveMetadataBindingError) as caught:
+            await preview(factory, issue_id)
+        assert caught.value.code == "partial_issue"
+        message = file_metadata_error(caught.value)
+        assert "story-only" in message
+        assert "complete issue" in message
+        assert path.read_bytes() == before
+
+
+async def test_long_synopsis_preview_and_write_preserve_pages(identity_probe_db, tmp_path):
+    from xml.etree import ElementTree as ET
+
+    _, factory, _ = identity_probe_db
+    synopsis = "S" * 11531
+    async with prepared(factory, tmp_path) as (path, _, plan):
+        issue_id = plan.target.binding.metadata.issues[0].local_id
+        async with factory.begin() as session:
+            (await session.get(Issue, issue_id)).description = synopsis
+        before = path.read_bytes()
+        reviewed = await preview(factory, issue_id)
+        assert reviewed.preview.ready
+        assert path.read_bytes() == before
+        await write_file_metadata(
+            factory,
+            issue_id,
+            reviewed.preview.review_key,
+            uuid4(),
+            limit=1000000,
+            check_control=noop,
+            progress=noop,
+        )
+        with ZipFile(path) as archive:
+            assert archive.read("page.jpg") == b"page bytes"
+            for name in ("ComicInfo.xml", "MetronInfo.xml"):
+                assert ET.fromstring(archive.read(name)).findtext("Summary") == synopsis
+        assert (await preview(factory, issue_id)).preview.unchanged
 
 
 async def test_approved_job_writes_both_documents_and_preserves_pages_and_manual_values(
@@ -203,7 +260,7 @@ async def test_cancel_during_archive_preparation_preserves_original(identity_pro
         assert (path.read_bytes(), path.stat()) == original
 
 
-async def test_import_rollback_protection_never_changes_the_file(identity_probe_db, tmp_path):
+async def test_unfinished_import_never_changes_the_file(identity_probe_db, tmp_path):
     _, factory, _ = identity_probe_db
     async with prepared(factory, tmp_path) as (path, _, plan):
         issue_id = plan.target.binding.metadata.issues[0].local_id
@@ -211,7 +268,7 @@ async def test_import_rollback_protection_never_changes_the_file(identity_probe_
             job = ImportJob(
                 source_path=str(tmp_path),
                 source_type=ImportSourceType.FILESYSTEM,
-                status=ImportJobStatus.COMPLETED,
+                status=ImportJobStatus.IMPORTING,
             )
             session.add(job)
             await session.flush()
@@ -229,7 +286,7 @@ async def test_import_rollback_protection_never_changes_the_file(identity_probe_
                 )
             )
         original = path.read_bytes(), path.stat()
-        with pytest.raises(ArchiveMetadataBindingError, match="import_rollback_protected"):
+        with pytest.raises(ArchiveMetadataBindingError, match="import_operation_active"):
             await preview(factory, issue_id)
         assert (path.read_bytes(), path.stat()) == original
 

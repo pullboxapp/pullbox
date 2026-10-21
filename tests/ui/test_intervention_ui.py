@@ -41,6 +41,134 @@ if TYPE_CHECKING:
 os.environ.setdefault("PULLBOX_SECRET_KEY", "test-secret-key-for-intervention-ui")
 
 
+@pytest.mark.parametrize("embedded_only", [False, True])
+async def test_partial_issue_recovery_offers_replacement_not_metadata_review(
+    client, _db_factory, embedded_only
+):
+    [pending_id] = await _seed_pending_matches(_db_factory, count=1)
+    async with _db_factory.begin() as session:
+        pending = await session.get(PendingMatch, pending_id)
+        issue_id = pending.issue_id
+        pending.release_title = (
+            "Marvel Comics Presents 158.cbz"
+            if embedded_only
+            else "Marvel Comics Presents 158 B Story (1994) (digital)"
+        )
+        pending.match_details = {
+            "source_kind": "direct",
+            "failure_class": "post_process",
+            "failure_code": "direct_metadata_review_required",
+            "metadata_failure_code": "partial_issue" if embedded_only else None,
+        }
+    response = await client.get("/intervention?tab=recovery")
+    assert response.status_code == 200
+    assert "Incomplete copy: replacement needed" in response.text
+    assert f'href="/issues/{issue_id}?replacement=search"' in response.text
+    assert f'href="/issues/{issue_id}?replacement=import"' in response.text
+    assert "Find complete copy" in response.text
+    assert "Import replacement" in response.text
+    assert f'data-testid="intervention-review-metadata-{pending_id}"' not in response.text
+    assert "does not fix or delete the incomplete file" in response.text
+
+
+@pytest.mark.parametrize("action", ["recheck", "retry", "cancel"])
+async def test_airdcpp_recovery_actions_use_verified_queue_path(
+    client, _db_factory, monkeypatch, action
+):
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from sqlalchemy import select
+
+    from pullbox.models.airdcpp import AirDcppAcquisition
+    from pullbox.models.download import DownloadState
+    from pullbox.providers.airdcpp.contracts import AirDcppQueueFile
+    from pullbox.providers.airdcpp.supervisor import AirDcppSupervisorState
+    from pullbox.services.airdcpp_recovery import record_queue_recovery
+    from tests.unit.test_airdcpp_queue_contracts import _queue_file_payload
+    from tests.unit.test_airdcpp_reconciliation import _FakeApi, _seed
+
+    cid, _, aid = await _seed(_db_factory, state=DownloadState.QUEUED, bundle_id=None)
+    async with _db_factory() as session:
+        a = await session.get(AirDcppAcquisition, aid)
+        await session.refresh(a, ["download_history"])
+        await record_queue_recovery(session, a, code="queue_lookup_failed", at=datetime.now(UTC))
+        pending = await session.scalar(select(PendingMatch))
+        pid = pending.id
+        await session.commit()
+    api = _FakeApi([[]], files=[AirDcppQueueFile.model_validate(_queue_file_payload())])
+    supervisor = SimpleNamespace(state=AirDcppSupervisorState.READY, api_client=api)
+    monkeypatch.setattr(
+        "pullbox.composition.airdcpp.get_airdcpp_supervisor_registry",
+        lambda: SimpleNamespace(get=lambda config: supervisor if config == cid else None),
+    )
+    response = await client.post(
+        f"/htmx/intervention/{pid}/airdcpp/{action}", data={"protocol": "dc"}
+    )
+    assert response.status_code == 200
+    assert f'data-testid="intervention-airdcpp-recheck-{pid}"' not in response.text
+    async with _db_factory() as session:
+        pending = await session.get(PendingMatch, pid)
+        assert pending.status == (
+            PendingMatchStatus.REJECTED if action == "cancel" else PendingMatchStatus.APPROVED
+        )
+    assert not api.create_calls
+
+
+@pytest.mark.parametrize("failure_code", ["queue_lookup_failed", "queue_hash_mismatch"])
+async def test_airdcpp_recovery_has_recheck_retry_cancel_not_direct_route_refresh(
+    client, _db_factory, failure_code
+):
+    async with _db_factory() as session:
+        series = Series(
+            title="Queue recovery",
+            sort_title="Queue recovery",
+            year_start=2026,
+            comicvine_id=987321,
+            status=SeriesStatus.CONTINUING,
+            series_type=SeriesType.STANDARD,
+        )
+        session.add(series)
+        await session.flush()
+        issue = Issue(
+            series_id=series.id, comicvine_id=987322, issue_number=1, status=IssueStatus.DOWNLOADING
+        )
+        session.add(issue)
+        await session.flush()
+        pending = PendingMatch(
+            issue_id=issue.id,
+            release_title="Queue recovery 001.cbz",
+            download_url="airdcpp-recovery://download/27",
+            confidence="high",
+            match_details={
+                "source_kind": "dc",
+                "provider_name": "AirDC++",
+                "failure_class": "queue_confirmation",
+                "failure_code": failure_code,
+                "dc_download_id": 27,
+            },
+        )
+        session.add(pending)
+        await session.commit()
+        pid = pending.id
+    response = await client.get("/intervention?tab=recovery&protocol=dc")
+    assert response.status_code == 200
+    assert f"/htmx/intervention/{pid}/airdcpp/recheck" in response.text
+    button = re.search(
+        rf'<button[^>]*data-testid="intervention-airdcpp-recheck-{pid}"[^>]*>', response.text
+    )
+    assert button is not None
+    assert "btn-ghost btn-sm whitespace-nowrap" in button.group(0)
+    assert (f"/htmx/intervention/{pid}/airdcpp/retry" in response.text) == (
+        failure_code == "queue_lookup_failed"
+    )
+    if failure_code == "queue_hash_mismatch":
+        assert "TTH inconsistency" in response.text
+    assert f"/htmx/intervention/{pid}/airdcpp/cancel" in response.text
+    assert f"/htmx/intervention/{pid}/retry-recovery" not in response.text
+    assert f'data-testid="intervention-reject-{pid}"' not in response.text
+
+
 # ── Fixtures ───────────────────────────────────────────────────────────
 
 
@@ -645,6 +773,131 @@ class TestHandlersDirect:
             r'data-testid="intervention-select-mode-toggle"[^>]*\sdisabled(?:\s|>|=)', body
         )
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("overrideable", [True, False])
+    async def test_retained_size_recovery_offers_approval_not_another_download(
+        self, _db_factory, overrideable
+    ) -> None:
+        from pullbox.ui.routes import intervention_page
+
+        [pending_id] = await _seed_pending_matches(_db_factory, count=1)
+        async with _db_factory() as session:
+            pending = await session.get(PendingMatch, pending_id)
+            pending.match_details = {
+                "source_kind": "direct",
+                "failure_class": "safety",
+                "failure_code": "artifact_resource_safety_review",
+                "safety_block": {
+                    "kind": "archive_decompressed_size",
+                    "overrideable": overrideable,
+                    "reason": (
+                        "Archive decompressed size (3,340,633,597 bytes) "
+                        "exceeds limit (2,097,152,000 bytes)"
+                    ),
+                },
+            }
+            await session.commit()
+            response = await intervention_page(
+                request=_mock_request(), user=MagicMock(), session=session, tab="recovery"
+            )
+        body = response.body.decode()
+        assert "Downloaded file needs size approval" in body
+        assert "3,340,633,597 bytes" in body and "2,097,152,000 bytes" in body
+        assert "Download route needs recovery" not in body
+        assert f"intervention-retry-recovery-{pending_id}" not in body
+        assert ("Allow and continue" in body) is overrideable
+        if overrideable:
+            assert "No new download" in body
+            assert f'hx-post="/htmx/intervention/{pending_id}/approve"' in body
+
+    async def test_retained_pack_recovery_offers_retry_import_not_download_routes(
+        self, _db_factory
+    ):
+        from pullbox.ui.routes import intervention_page
+
+        [pending_id] = await _seed_pending_matches(_db_factory, count=1)
+        async with _db_factory() as session:
+            pending = await session.get(PendingMatch, pending_id)
+            pending.match_details = {
+                "source_kind": "direct",
+                "failure_class": "post_process",
+                "failure_code": "direct_pack_ambiguous_issue",
+                "pack_review_reason": "More than one file matches issue 3.",
+            }
+            await session.commit()
+            response = await intervention_page(
+                request=_mock_request(), user=MagicMock(), session=session, tab="recovery"
+            )
+        body = response.body.decode()
+        assert "Downloaded pack needs issue review" in body
+        assert "More than one file matches issue 3" in body
+        assert "Retry import" in body and "No new download" in body
+        assert f'hx-post="/htmx/intervention/{pending_id}/approve"' in body
+        assert "Download route needs recovery" not in body
+        assert f"intervention-retry-recovery-{pending_id}" not in body
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "failure", ["artifact_resource_safety_review", "direct_pack_ambiguous_issue"]
+    )
+    async def test_size_approval_keeps_recovery_tab_and_truthful_success(
+        self, _db_factory, failure
+    ):
+        from pullbox.ui.routes import htmx_intervention_approve
+
+        [pending_id] = await _seed_pending_matches(_db_factory, count=1)
+        async with _db_factory() as session:
+            pending = await session.get(PendingMatch, pending_id)
+            pending.match_details = {
+                "source_kind": "direct",
+                "direct_attempt_id": 44,
+                "failure_code": failure,
+                "failure_class": "safety",
+            }
+            await session.commit()
+            request = _mock_request()
+            request.headers = {"HX-Target": "intervention-queue-results"}
+            with patch(
+                "pullbox.services.intervention_service.InterventionService.approve_match",
+                new_callable=AsyncMock,
+            ):
+                response = await htmx_intervention_approve(
+                    request=request, pending_id=pending_id, user=MagicMock(), session=session
+                )
+        body = response.body.decode()
+        assert 'value="recovery"' in body
+        assert "retained file" in response.headers.get("HX-Trigger", "").lower()
+
+    @pytest.mark.asyncio
+    async def test_size_approval_reports_missing_file_without_download_error(self, _db_factory):
+        from pullbox.services.direct_artifact_quarantine import DirectArtifactValidationError
+        from pullbox.ui.routes import htmx_intervention_approve
+
+        [pending_id] = await _seed_pending_matches(_db_factory, count=1)
+        async with _db_factory() as session:
+            pending = await session.get(PendingMatch, pending_id)
+            pending.match_details = {
+                "source_kind": "direct",
+                "direct_attempt_id": 44,
+                "failure_code": "artifact_resource_safety_review",
+            }
+            await session.commit()
+            with patch(
+                "pullbox.services.intervention_service.InterventionService.approve_match",
+                side_effect=DirectArtifactValidationError(
+                    code="artifact_quarantine_missing",
+                    message="The retained file is missing. Restore it before approving.",
+                ),
+            ):
+                response = await htmx_intervention_approve(
+                    request=_mock_request(),
+                    pending_id=pending_id,
+                    user=MagicMock(),
+                    session=session,
+                )
+        assert "The retained file is missing" in response.body.decode()
+        assert "Failed to queue" not in response.body.decode()
+
     def test_intervention_selection_controller_respects_recovery_bulk_action_lock(self) -> None:
         """Recovery rows must never enter the generic approve/reject bulk flow."""
         script = Path("src/pullbox/ui/static/js/pullbox.js").read_text(encoding="utf-8")
@@ -969,9 +1222,18 @@ class TestHandlersDirect:
         assert "Failed to queue" not in body
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("code", "fragment"),
+        [
+            ("no_eligible_complete_plan", "complete, eligible download route"),
+            ("artifact_coverage_unverified", "which issues are included"),
+        ],
+    )
     async def test_htmx_direct_incomplete_plan_does_not_blame_provider_configuration(
         self,
         _db_factory: async_sessionmaker[AsyncSession],
+        code: str,
+        fragment: str,
     ) -> None:
         """Incomplete artifact coverage reports the safe-planning failure accurately."""
         from pullbox.services.direct_acquisition_planner_service import (
@@ -996,7 +1258,7 @@ class TestHandlersDirect:
                 "pullbox.services.intervention_service.InterventionService.approve_match",
                 new_callable=AsyncMock,
                 side_effect=DirectAcquisitionPlanningError(
-                    "no_eligible_complete_plan",
+                    code,
                     "No enabled artifact route completely covers this issue.",
                 ),
             ):
@@ -1008,8 +1270,11 @@ class TestHandlersDirect:
                 )
 
         body = response.body.decode()
-        assert "complete, eligible download route" in body
+        assert fragment in body
         assert "provider configuration" not in body
+        if code == "artifact_coverage_unverified":
+            assert "artifact-host settings" not in body
+            assert "No download was started" in body
 
     @pytest.mark.asyncio
     async def test_htmx_approve_service_error(

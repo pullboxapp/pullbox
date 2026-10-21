@@ -41,6 +41,7 @@ async def apply_issue_batch(
     now: datetime,
     *,
     complete: bool = False,
+    reconcile_crosswalks: bool = False,
     replace_managed: bool = False,
     release_facts: tuple[IssueReleaseFacts, ...] = (),
 ) -> tuple[int, ...]:
@@ -50,6 +51,8 @@ async def apply_issue_batch(
     checkpoint updates. This writer never starts provider or filesystem work.
     """
     source = batch.source
+    if reconcile_crosswalks and not complete:
+        raise IssueCatalogConflictError("Linked issue reconciliation requires a complete catalog.")
     parent = ExternalIdentityRef(
         source.identity_namespace, MetadataEntityKind.SERIES, batch.series_external_id
     )
@@ -67,6 +70,7 @@ async def apply_issue_batch(
     except ValueError as exc:
         raise IssueCatalogConflictError(str(exc)) from exc
     by_identity = {identity: item for item in state.issues for identity in item.identities}
+    parent_namespaces = {identity.namespace for identity in state.series.identities}
     offered = {
         ExternalIdentityRef(source.identity_namespace, MetadataEntityKind.ISSUE, item.external_id)
         for item in batch.issues
@@ -87,6 +91,27 @@ async def apply_issue_batch(
             source.identity_namespace, MetadataEntityKind.ISSUE, metadata.external_id
         )
         existing = by_identity.get(identity)
+        if reconcile_crosswalks:
+            # Native membership plus a verified local crosswalk proves overlap;
+            # equal issue numbers alone never authorize attachment.
+            matches = {
+                by_identity[claim].local_id: by_identity[claim]
+                for claim in _identities(metadata, MetadataEntityKind.ISSUE)
+                if claim in by_identity and claim.namespace in parent_namespaces
+            }
+            if len(matches) > 1:
+                raise IssueCatalogConflictError(
+                    "Provider crosswalks identify different library issues. Review their matches."
+                )
+            if matches:
+                existing = next(iter(matches.values()))
+                if any(
+                    claim.namespace is identity.namespace and claim != identity
+                    for claim, _, _ in existing.claims
+                ):
+                    raise IssueCatalogConflictError(
+                        "This issue already has a different provider identity. Review its match."
+                    )
         if existing is not None and existing.values.issue_number_text != text:
             raise IssueCatalogConflictError(
                 "A provider issue was renumbered. Review the issue match; existing files were kept."
@@ -98,7 +123,7 @@ async def apply_issue_batch(
             )
         snapshot = assemble_metadata(
             MetadataEntityKind.ISSUE,
-            existing.identities if existing else (identity,),
+            tuple(dict.fromkeys((*existing.identities, identity))) if existing else (identity,),
             [metadata.model_copy(update={"issue_number_text": text})],
             state.policies,
             now=now,
@@ -114,6 +139,8 @@ async def apply_issue_batch(
             )
         prepared.append((existing, metadata, number, text, snapshot))
     new_metadata = tuple(metadata for old, metadata, *_rest in prepared if old is None)
+    if len(state.issues) + len(new_metadata) > 10000:
+        raise IssueCatalogConflictError("The combined catalog exceeds the 10,000 issue limit.")
     if new_metadata:
         await _require_unowned_issues(session, replace(batch, issues=new_metadata))
     series = await session.get(Series, state.series.local_id)
@@ -149,7 +176,12 @@ async def apply_issue_batch(
                 )
                 for issue, old, metadata, _ in pending
                 if old is None
+                or ExternalIdentityRef(
+                    source.identity_namespace, MetadataEntityKind.ISSUE, metadata.external_id
+                )
+                not in old.identities
             ],
+            require_current_ownership=True,
         )
         for issue, old, metadata, _ in pending:
             if old is None:

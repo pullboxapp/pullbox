@@ -25,6 +25,10 @@ from pullbox.services.archive_metadata_binding import (
 )
 from pullbox.services.archive_metadata_finalization import apply_bound_archive_metadata
 from pullbox.services.archive_metadata_publication import _fingerprint
+from pullbox.services.import_file_edit_history import (
+    lock_import_file_history,
+    record_post_import_edit,
+)
 from pullbox.services.library_conversion_files import (
     ConversionBinding,
     ConversionFile,
@@ -45,13 +49,16 @@ from pullbox.services.library_mutation_coordination import (
 logger = structlog.get_logger(__name__)
 
 
-async def _require_conversion_metadata(session: AsyncSession, plan: ConversionPlan) -> None:
+async def _require_conversion_metadata(
+    session: AsyncSession, plan: ConversionPlan, *, published: bool = False
+) -> None:
     if plan.metadata_state_digest is None:
         return
     if plan.binding.file_id is None or plan.binding.issue_id is None:
         raise ValidationError("Conversion metadata requires a verified issue match.")
     try:
-        await require_unowned_metadata_file(session, plan.binding.file_id)
+        if not published:
+            await require_unowned_metadata_file(session, plan.binding.file_id)
         binding = await read_archive_metadata_binding(
             session,
             plan.binding.file_id,
@@ -59,7 +66,8 @@ async def _require_conversion_metadata(session: AsyncSession, plan: ConversionPl
             allow_conversion_source=True,
         )
         await lock_archive_metadata_binding(session, binding)
-        await require_unowned_metadata_file(session, plan.binding.file_id)
+        if not published:
+            await require_unowned_metadata_file(session, plan.binding.file_id)
         binding = await read_archive_metadata_binding(
             session,
             plan.binding.file_id,
@@ -67,10 +75,10 @@ async def _require_conversion_metadata(session: AsyncSession, plan: ConversionPl
             allow_conversion_source=True,
         )
     except ArchiveMetadataBindingError as exc:
-        if exc.code == "import_rollback_protected":
+        if exc.code == "import_operation_active":
             raise ValidationError(
-                "This file still belongs to an import's rollback journal. "
-                "Paired conversion is not available for it yet; the file has not been changed."
+                "An unfinished import or rollback still controls this file. "
+                "Finish or cancel that operation, then retry conversion."
             ) from None
         raise ValidationError(
             "File metadata needs review before conversion can continue."
@@ -187,6 +195,9 @@ async def record_conversion(
 
     decode_plan(plan.model_dump_json())
     await lock_file_mutation_admission(session)
+    if plan.binding.file_id is not None:
+        await lock_import_file_history(session, plan.binding.file_id)
+        await require_unowned_metadata_file(session, plan.binding.file_id)
     await require_no_archive_publication(session, *plan.paths, include_descendants=False)
     if await read_conversion_binding(session, plan.original.path) != plan.binding:
         raise ValidationError("The library registration changed during conversion.")
@@ -226,6 +237,9 @@ async def publish_conversion(session: AsyncSession, operation_id: UUID) -> None:
     if row is None or not row.active or row.state != "intended":
         raise ValidationError("Conversion has already been recovered; retry from the Library.")
     plan = decode_plan(row.plan_json)
+    if plan.binding.file_id is not None:
+        await lock_import_file_history(session, plan.binding.file_id)
+        await require_unowned_metadata_file(session, plan.binding.file_id)
     if await read_conversion_binding(session, plan.original.path) != plan.binding:
         raise ValidationError("The library registration changed during conversion.")
     await _require_conversion_metadata(session, plan)
@@ -274,6 +288,8 @@ async def _apply_inspected_conversion(
         return row.state if row else "missing"
     if row.plan_json != encoded:
         raise ValidationError("Conversion evidence changed during recovery.")
+    if plan.binding.file_id is not None:
+        await lock_import_file_history(session, plan.binding.file_id)
     check_directories(plan)
     for name, actual in inspected.items():
         if _fingerprint(getattr(plan, name).path) != (actual.fingerprint if actual else None):
@@ -308,7 +324,9 @@ async def _apply_inspected_conversion(
             current = await read_conversion_binding(session, plan.original.path)
             if current != plan.binding or (not plan.same_path and not proven["original"]):
                 raise ValidationError("Conversion registration changed.")
-            await _require_conversion_metadata(session, plan)
+            # Proven output and backup already exist. Finish their accounting even
+            # if rollback was requested after publication; preserve the edit there.
+            await _require_conversion_metadata(session, plan, published=True)
             if not plan.same_path and await session.scalar(
                 select(LibraryFile.id).where(LibraryFile.file_path == str(plan.output.path))
             ):
@@ -319,6 +337,10 @@ async def _apply_inspected_conversion(
                 after_path=str(plan.output.path),
                 metadata_embedded=plan.metadata_state_digest is not None,
             )
+            if plan.binding.file_id is not None:
+                await record_post_import_edit(
+                    session, plan.binding.file_id, kind="conversion", operation_id=operation_id
+                )
         except ValidationError:
             row.state = "review"
             await session.commit()
@@ -345,7 +367,7 @@ async def _apply_inspected_conversion(
         await session.commit()
         return "review"
     try:
-        await _require_conversion_metadata(session, plan)
+        await _require_conversion_metadata(session, plan, published=True)
     except ValidationError:
         row.state = "review"
         await session.commit()

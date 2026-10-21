@@ -24,6 +24,11 @@ from pullbox.models.direct_acquisition import (
 )
 from pullbox.models.download import DownloadHistory, DownloadState
 from pullbox.models.issue import IssueStatus
+from pullbox.services.direct_metadata_file_proof import (
+    capture_file_proof,
+    proof_identity,
+    verify_file_proof,
+)
 from pullbox.services.issue_file_metadata import (
     file_metadata_error,
     prepare_file_metadata,
@@ -41,6 +46,11 @@ _COPY_KEY = "paired_metadata_copy"
 
 class DirectMetadataReviewError(ValidationError):
     """A managed direct copy needs attention before acquisition completion."""
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        if code is not None:
+            self.code = code
 
 
 @dataclass
@@ -106,21 +116,30 @@ class DirectMetadataHandoff:
         if self.marker is None:
             if file.file_path != download.final_path:
                 raise DirectMetadataReviewError("The direct-download destination changed.")
-            if (
+            source_proof = await asyncio.to_thread(capture_file_proof, self.source_path)
+            copy_proof = await asyncio.to_thread(capture_file_proof, Path(file.file_path))
+            if proof_identity(source_proof) != self.source_signature or (
                 await asyncio.to_thread(build_file_identity_signature, self.source_path)
                 != self.source_signature
             ):
                 raise DirectMetadataReviewError(
                     "The downloaded source changed during placement. Review it before retrying."
                 )
+            await asyncio.to_thread(
+                verify_file_proof,
+                self.source_path,
+                self.source_signature,
+                source_proof["sha256"],
+                source_proof,
+            )
             self.marker = {
                 "artifact_id": self.artifact_id,
                 "plan_revision": self.plan_revision,
                 "file_id": file.id,
                 "source_signature": self.source_signature,
-                "copy_signature": await asyncio.to_thread(
-                    build_file_identity_signature, Path(file.file_path)
-                ),
+                "copy_signature": proof_identity(copy_proof),
+                "source_sha256": source_proof["sha256"],
+                "copy_sha256": copy_proof["sha256"],
             }
             attempt.plan_snapshot = {**(attempt.plan_snapshot or {}), _COPY_KEY: self.marker}
             attempt.library_file_id = file.id
@@ -190,6 +209,10 @@ class DirectMetadataHandoff:
             await session.refresh(attempt)
             return Path(self.final_path)
         except ValueError as exc:
+            if getattr(exc, "code", None) == "partial_issue":
+                raise DirectMetadataReviewError(
+                    file_metadata_error(exc), code="partial_issue"
+                ) from exc
             raise DirectMetadataReviewError(
                 f"{file_metadata_error(exc)} Review file metadata on the issue, "
                 "then retry this acquisition."

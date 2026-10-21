@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -377,6 +378,8 @@ class _ResolveClient:
 
 
 class _FallbackResolveClient(_ResolveClient):
+    failure_code = "resolver_timed_out"
+
     async def resolve(self, request: Any) -> DirectResolveResponse:
         self.requests.append(request)
         profile = request.resolver_profile
@@ -388,7 +391,7 @@ class _FallbackResolveClient(_ResolveClient):
             )
         if profile.endpoint == "http://flaresolverr:8191":
             raise DirectProviderClientError(
-                "resolver_timed_out",
+                self.failure_code,
                 "Resolver timed out.",
                 retryable=True,
             )
@@ -431,6 +434,66 @@ async def test_planning_selects_best_eligible_route_and_persists_no_urls(
     assert "token" not in rendered.casefold()
     assert "pixel-mirror" in rendered
     assert client.closed is True
+
+
+@pytest.mark.asyncio
+async def test_story_only_candidate_is_rejected_before_resolving_routes(session):
+    attempt = await session.get(DirectAcquisitionAttempt, 1)
+    attempt.candidate_snapshot = {
+        "display_title": "Marvel Comics Presents 158 B Story (1994) (digital) (Marika-Empire)"
+    }
+    await session.commit()
+    client = _ResolveClient(_response())
+    with pytest.raises(DirectAcquisitionPlanningError) as caught:
+        await plan_direct_acquisition(
+            session,
+            acquisition_id=1,
+            provider_client_factory=lambda **_kwargs: client,
+            provider_secret_loader=lambda _config: _provider_material(),
+            now=lambda: NOW,
+        )
+    assert caught.value.code == "partial_issue"
+    assert "complete issue" in str(caught.value)
+    assert client.requests == []
+    assert attempt.plan_snapshot == {}
+
+
+@pytest.mark.asyncio
+async def test_story_only_artifact_cannot_claim_complete_issue_coverage(session):
+    response = _response()
+    response.artifacts[0].coverage.description = "Planner Series 001 [B Story]"
+    client = _ResolveClient(response)
+    with pytest.raises(DirectAcquisitionPlanningError) as caught:
+        await plan_direct_acquisition(
+            session,
+            acquisition_id=1,
+            provider_client_factory=lambda **_kwargs: client,
+            provider_secret_loader=lambda _config: _provider_material(),
+            now=lambda: NOW,
+        )
+    assert caught.value.code == "partial_issue"
+    attempt = await session.get(DirectAcquisitionAttempt, 1)
+    assert attempt.plan_snapshot == {}
+
+
+@pytest.mark.asyncio
+async def test_story_extract_does_not_hide_complete_alternative(session):
+    response = _response()
+    partial = response.artifacts[0].model_copy(deep=True)
+    partial.artifact_id = "story-only"
+    partial.coverage.description = "Planner Series 001 [B Story]"
+    response.artifacts.insert(0, partial)
+    client = _ResolveClient(response)
+    result = await plan_direct_acquisition(
+        session,
+        acquisition_id=1,
+        provider_client_factory=lambda **_kwargs: client,
+        provider_secret_loader=lambda _config: _provider_material(),
+        now=lambda: NOW,
+    )
+    assert result.plan.complete
+    assert result.attempt.state is DirectAcquisitionState.PLANNED
+    assert "story-only" not in repr(result.attempt.plan_snapshot)
 
 
 @pytest.mark.asyncio
@@ -507,6 +570,100 @@ async def test_planning_persists_selected_contiguous_pack_coverage(
     assert result.attempt.plan_snapshot["coverage"]["selected_content_issue_numbers"] == ["5", "6"]
 
 
+@pytest.mark.parametrize(
+    ("coverage", "enabled", "expected"),
+    [
+        ([], True, "artifact_coverage_unverified"),
+        (["2"], True, "artifact_coverage_unverified"),
+        ([], False, "no_eligible_complete_plan"),
+        (["1"], False, "no_eligible_complete_plan"),
+    ],
+)
+async def test_planning_distinguishes_missing_coverage_from_disabled_routes(
+    session: AsyncSession,
+    coverage: list[str],
+    enabled: bool,
+    expected: str,
+) -> None:
+    response = _generic_response()
+    response.artifacts[0].coverage = DirectArtifactCoverage(issue_numbers=coverage)
+    config = await session.scalar(
+        select(DirectHostConfig).where(
+            DirectHostConfig.host_kind == DirectArtifactHostKind.GENERIC_HTTPS
+        )
+    )
+    config.enabled = enabled
+    with pytest.raises(DirectAcquisitionPlanningError) as failure:
+        await plan_direct_acquisition(
+            session,
+            acquisition_id=1,
+            provider_client_factory=lambda **_kwargs: _ResolveClient(response),
+            provider_secret_loader=lambda _config: _provider_material(),
+            now=lambda: NOW,
+        )
+    assert failure.value.code == expected
+    attempt = await session.get(DirectAcquisitionAttempt, 1)
+    assert attempt.state is DirectAcquisitionState.INTERVENTION
+    assert attempt.failure_code == expected
+    assert not attempt.artifact_attempts
+
+
+async def test_ineligible_covering_route_is_not_reported_as_missing_provider_coverage(
+    session: AsyncSession,
+) -> None:
+    response = _generic_response()
+    wrong = response.artifacts[0].model_copy(deep=True)
+    wrong.artifact_id = "unrelated-artifact"
+    wrong.coverage = DirectArtifactCoverage(issue_numbers=["2"])
+    response.artifacts[0].mirrors = [
+        DirectMirror(
+            mirror_id="disabled-covering-route",
+            host_kind="terabox",
+            share_url="https://terabox.com/s/disabled",
+        )
+    ]
+    response.artifacts.append(wrong)
+    with pytest.raises(DirectAcquisitionPlanningError) as failure:
+        await plan_direct_acquisition(
+            session,
+            acquisition_id=1,
+            provider_client_factory=lambda **_kwargs: _ResolveClient(response),
+            provider_secret_loader=lambda _config: _provider_material(),
+            now=lambda: NOW,
+        )
+    assert failure.value.code == "no_eligible_complete_plan"
+
+
+@pytest.mark.parametrize(("count", "target"), [(8, 3), (8, 7), (4, 1), (4, 2), (4, 3), (4, 4)])
+async def test_house_of_m_corrected_pack_coverage_plans_each_requested_issue(
+    session: AsyncSession,
+    count: int,
+    target: int,
+) -> None:
+    attempt = await session.get(DirectAcquisitionAttempt, 1)
+    attempt.state = DirectAcquisitionState.INTERVENTION
+    attempt.failure_code = "no_eligible_complete_plan"
+    attempt.requested_coverage = {"issue_numbers": [str(target)], "issue_type": "issue"}
+    response = _generic_response()
+    numbers = [str(n) for n in range(1, count + 1)]
+    response.artifacts[0].coverage = DirectArtifactCoverage(
+        issue_numbers=numbers,
+        description="House of M" if count == 8 else "House of M - Masters of Evil",
+    )
+    result = await plan_direct_acquisition(
+        session,
+        acquisition_id=1,
+        provider_client_factory=lambda **_kwargs: _ResolveClient(response),
+        provider_secret_loader=lambda _config: _provider_material(),
+        now=lambda: NOW,
+    )
+    assert result.plan.complete
+    assert result.plan.requested == frozenset({str(target)})
+    assert result.attempt.plan_snapshot["coverage"]["selected_content_issue_numbers"] == numbers
+    assert result.attempt.failure_code is None
+    assert result.attempt.state is DirectAcquisitionState.PLANNED
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("requested_coverage", "artifact_volume"),
@@ -539,7 +696,7 @@ async def test_planning_rejects_unsafe_volume_only_coverage(
             now=lambda: NOW,
         )
 
-    assert error.value.code == "no_eligible_complete_plan"
+    assert error.value.code == "artifact_coverage_unverified"
 
 
 @pytest.mark.asyncio
@@ -681,7 +838,7 @@ async def test_planning_rejects_title_only_alternatives_with_mixed_collection_ti
             now=lambda: NOW,
         )
 
-    assert error.value.code == "no_eligible_complete_plan"
+    assert error.value.code == "artifact_coverage_unverified"
 
 
 @pytest.mark.asyncio
@@ -744,7 +901,7 @@ async def test_planning_rejects_unsafe_title_only_coverage(
             now=lambda: NOW,
         )
 
-    assert error.value.code == "no_eligible_complete_plan"
+    assert error.value.code == "artifact_coverage_unverified"
 
 
 @pytest.mark.asyncio
@@ -867,9 +1024,11 @@ async def test_generic_only_provider_does_not_require_visible_host_setting(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure_code", ["resolver_timed_out", "provider_timed_out", "stall"])
 async def test_planning_resolve_tries_ordinary_http_then_ranked_resolvers(
     session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
+    failure_code: str,
 ) -> None:
     from pullbox.services import direct_resolver_service
 
@@ -906,20 +1065,48 @@ async def test_planning_resolve_tries_ordinary_http_then_ranked_resolvers(
 
     monkeypatch.setattr(direct_resolver_service, "build_provider_resolver_profiles", profiles)
     client = _FallbackResolveClient(_response())
+    client.failure_code = failure_code
+    progress: list[str] = []
+    if failure_code == "stall":
+        from pullbox.services import direct_acquisition_planner_service as planner
 
-    result = await plan_direct_acquisition(
-        session,
-        acquisition_id=1,
-        provider_client_factory=lambda **_kwargs: client,
-        provider_secret_loader=lambda _config: _provider_material(),
-        now=lambda: NOW,
-    )
+        monkeypatch.setattr(planner, "_RESOLVE_SECONDS", 0.6)
+    original_resolve = client.resolve
+
+    async def observed_resolve(request: Any) -> DirectResolveResponse:
+        if request.resolver_profile:
+            attempt = await session.get(DirectAcquisitionAttempt, 1)
+            assert attempt is not None
+            progress.append(attempt.progress_snapshot["resolver_name"])
+            if failure_code == "stall" and "flaresolverr" in request.resolver_profile.endpoint:
+                client.requests.append(request)
+                await asyncio.Event().wait()
+        return await original_resolve(request)
+
+    monkeypatch.setattr(client, "resolve", observed_resolve)
+
+    try:
+        async with asyncio.timeout(2):
+            result = await plan_direct_acquisition(
+                session,
+                acquisition_id=1,
+                provider_client_factory=lambda **_kwargs: client,
+                provider_secret_loader=lambda _config: _provider_material(),
+                now=lambda: NOW,
+            )
+    except TimeoutError:
+        pytest.fail("The stalled resolver consumed the entire candidate-resolution budget")
 
     assert result.attempt.state is DirectAcquisitionState.PLANNED
     assert [
         request.resolver_profile.endpoint if request.resolver_profile else None
         for request in client.requests
     ] == [None, "http://flaresolverr:8191", "http://byparr:8191"]
+    assert client.requests[1].deadline < client.requests[0].deadline
+    assert client.requests[2].deadline <= client.requests[0].deadline
+    assert options[0].profile.timeout_seconds == 60
+    assert client.closed
+    assert progress == ["FlareSolverr", "Byparr"]
 
 
 @pytest.mark.asyncio

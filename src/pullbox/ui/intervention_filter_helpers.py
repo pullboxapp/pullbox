@@ -7,9 +7,11 @@ from typing import cast as typing_cast
 
 from sqlalchemy import ColumnElement, and_, case, func, or_, true
 
+from pullbox.core.partial_issue import needs_complete_copy
 from pullbox.models.indexer import IndexerConfig
 from pullbox.models.issue import Issue
 from pullbox.models.pending_match import PendingMatch, PendingMatchStatus
+from pullbox.services.direct_artifact_pack import RECOVERABLE_PACK_FAILURES
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -70,10 +72,10 @@ def intervention_lane_clause(lane: str) -> ColumnElement[bool]:
     """Separate failed direct acquisition from semantic matching decisions."""
     source_kind = func.coalesce(PendingMatch.match_details["source_kind"].as_string(), "")
     failure_class = PendingMatch.match_details["failure_class"].as_string()
-    recovery = and_(source_kind == "direct", failure_class.is_not(None))
+    recovery = and_(source_kind.in_(("direct", "dc")), failure_class.is_not(None))
     if lane == "recovery":
         return recovery
-    return or_(source_kind != "direct", failure_class.is_(None))
+    return or_(source_kind.not_in(("direct", "dc")), failure_class.is_(None))
 
 
 def normalize_intervention_confidence_filter(confidence: str | None) -> str:
@@ -310,15 +312,37 @@ def build_intervention_item_meta(pending_match: Any) -> dict[str, object]:
 
     lane = (
         "recovery"
-        if details.get("source_kind") == "direct" and details.get("failure_class")
+        if details.get("source_kind") in {"direct", "dc"} and details.get("failure_class")
         else "review"
     )
+    size_recovery = (
+        lane == "recovery" and details.get("failure_code") == "artifact_resource_safety_review"
+    )
+    safety_block = details.get("safety_block")
+    safety_block = safety_block if isinstance(safety_block, dict) else {}
+    replacement = needs_complete_copy(details, getattr(pending_match, "release_title", None))
     return {
+        "replacement_recovery": lane == "recovery" and replacement,
+        "pack_recovery": lane == "recovery"
+        and details.get("failure_code") in RECOVERABLE_PACK_FAILURES,
+        "pack_review_reason": str(details.get("pack_review_reason") or ""),
+        "size_recovery": size_recovery,
+        "safety_recovery": lane == "recovery" and details.get("failure_class") == "safety",
+        "size_review_reason": str(safety_block.get("reason") or "") if size_recovery else "",
+        "can_allow_size": size_recovery
+        and safety_block.get("kind") == "archive_decompressed_size"
+        and safety_block.get("overrideable") is True,
         "protocol_label": intervention_protocol_label(
             bool(pending_match.is_torrent),
             str(details.get("source_kind") or ""),
         ),
-        "outcome_label": intervention_outcome_label(str(pending_match.status)),
+        "outcome_label": (
+            "Dismissed (incomplete copy)"
+            if details.get("resolution_reason") == "incomplete_copy_dismissed"
+            else "Resolved by replacement"
+            if details.get("resolution_reason") == "metadata_superseded"
+            else intervention_outcome_label(str(pending_match.status))
+        ),
         "review_reason_codes": reason_codes,
         "review_reason_labels": reason_labels,
         "review_reason_summary": intervention_review_reason_summary(reason_codes),
@@ -327,7 +351,15 @@ def build_intervention_item_meta(pending_match: Any) -> dict[str, object]:
         "source_label": source_label.strip() or "Unknown",
         "rejection_reason": str(details.get("rejection_reason") or "").strip(),
         "lane": lane,
-        "recovery_summary": _direct_recovery_summary(details) if lane == "recovery" else "",
+        "recovery_summary": (
+            "Incomplete copy: replacement needed"
+            if lane == "recovery" and replacement
+            else _direct_recovery_summary(details)
+            if lane == "recovery"
+            else ""
+        ),
+        "metadata_recovery": lane == "recovery"
+        and details.get("failure_code") == "direct_metadata_review_required",
     }
 
 
@@ -349,6 +381,22 @@ def _direct_source_label(details: dict[str, object]) -> str:
 
 def _direct_recovery_summary(details: dict[str, object]) -> str:
     """Describe the acquisition failure without implying the semantic match was wrong."""
+    if details.get("source_kind") == "dc":
+        from pullbox.services.airdcpp_recovery import RECOVERY_MESSAGES
+
+        return RECOVERY_MESSAGES.get(
+            str(details.get("failure_code")), "AirDC++ request needs review."
+        )
+    if details.get("failure_code") == "direct_pack_ownership_changed":
+        return "Library ownership changed during pack import; recheck the retained pack"
+    if details.get("failure_code") in RECOVERABLE_PACK_FAILURES:
+        return "Downloaded pack needs issue review; no new download is needed"
+    if details.get("failure_code") == "direct_metadata_review_required":
+        return "Downloaded file needs metadata review; no new download is needed"
+    if details.get("failure_code") == "artifact_resource_safety_review":
+        return "Downloaded file needs size approval"
+    if details.get("failure_class") == "safety":
+        return "Downloaded file needs safety review"
     host = _DIRECT_ARTIFACT_HOST_LABELS.get(
         str(details.get("artifact_host_kind") or "").strip(),
         "Artifact host",

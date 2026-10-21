@@ -102,6 +102,112 @@ def test_paired_core_output_uses_one_snapshot_and_validates_offline():
     assert "[cv_vol_id:42]" in ci.findtext("Notes")
 
 
+def test_long_synopsis_round_trips_in_both_documents_without_truncation():
+    synopsis = "S" * 11531
+    series, issue = snapshots(description=synopsis)
+    rendered = render_archive_metadata(series, issue, files())
+    reconciled = reconcile_archive_metadata(
+        files(rendered.comicinfo.decode(), rendered.metroninfo.decode())
+    )
+    assert not reconciled.requires_review
+    assert reconciled.comicinfo.issue.description == synopsis
+    assert reconciled.metroninfo.issue.description == synopsis
+    assert (
+        render_archive_metadata(
+            series, issue, files(rendered.comicinfo.decode(), rendered.metroninfo.decode())
+        )
+        == rendered
+    )
+
+
+def test_generated_xml_validation_identifies_failed_summary_field():
+    from pullbox.services.archive_metadata_rendering import _validated_pair
+    from pullbox.services.issue_file_metadata import file_metadata_error
+
+    rendered = render_archive_metadata(*snapshots(), files())
+    ci = ET.fromstring(rendered.comicinfo)
+    mi = ET.fromstring(rendered.metroninfo)
+    ET.SubElement(mi, "Summary").text = "S" * 200001
+    with pytest.raises(ArchiveMetadataRenderError) as caught:
+        _validated_pair(ci, mi)
+    assert caught.value.code == "output_disagreement"
+    assert caught.value.field == "Summary"
+    message = file_metadata_error(caught.value)
+    assert "summary" in message
+    assert "generated" in message
+    assert "unchanged" in message
+
+
+def test_comma_containing_creator_names_round_trip_without_invented_people():
+    series, issue = snapshots(
+        credits=(
+            {"name": "Mike Deodato, Jr.", "role": "penciller, cover"},
+            {"name": "Another Artist", "role": "penciller"},
+            {"name": "Doe, Jane", "role": "writer, translator"},
+        )
+    )
+    result = render_archive_metadata(series, issue, files())
+    ci = ET.fromstring(result.comicinfo)
+    assert ci.findtext("Penciller") == "Another Artist, Mike Deodato, Jr."
+    assert ci.findtext("CoverArtist") == "Mike Deodato, Jr."
+    incoming = files(result.comicinfo.decode(), result.metroninfo.decode())
+    reconciled = reconcile_archive_metadata(incoming)
+    assert reconciled.comicinfo.issue.credits == issue.values.credits
+    assert reconciled.metroninfo.issue.credits == issue.values.credits
+    assert reconciled.issue.credits == issue.values.credits
+    assert not reconciled.requires_review
+    assert render_archive_metadata(series, issue, incoming) == result
+
+
+@pytest.mark.parametrize("canonical", ["Example & Friends ", " Example & Friends"])
+@pytest.mark.parametrize("field", ["title", "sort_title"])
+def test_series_outer_whitespace_does_not_require_an_override_or_identity_anchor(canonical, field):
+    series, issue = snapshots()
+    series = series.model_copy(
+        update={"values": series.values.model_copy(update={field: canonical})}
+    )
+    result = render_archive_metadata(
+        series, issue, files(ci="<ComicInfo><Series>Example &amp; Friends</Series></ComicInfo>")
+    )
+    assert ET.fromstring(result.comicinfo).findtext("Series").strip() == canonical.strip()
+    assert parse_metroninfo(result.metroninfo).series.strip() == canonical.strip()
+    rendered = files(result.comicinfo.decode(), result.metroninfo.decode())
+    assert render_archive_metadata(series, issue, rendered) == result
+
+
+@pytest.mark.parametrize("canonical", ["Example &  Friends", "Example: Friends", "Other series"])
+def test_sort_title_content_changes_still_require_review(canonical):
+    series, issue = snapshots()
+    series = series.model_copy(
+        update={"values": series.values.model_copy(update={"sort_title": canonical})}
+    )
+    incoming = files(
+        mi=metron(
+            "<Number>50-X</Number>",
+            series="<Name>Example &amp; Friends</Name><SortName>Example &amp; Friends</SortName>",
+        )
+    )
+    with pytest.raises(ArchiveMetadataRenderError) as failure:
+        render_archive_metadata(series, issue, incoming)
+    assert failure.value.code == "unreconciled_field"
+    assert failure.value.field == "sort_title"
+
+
+def test_verified_issue_does_not_authorize_sort_title_separator_changes():
+    series, issue = snapshots()
+    series = series.model_copy(
+        update={"values": series.values.model_copy(update={"sort_title": "Example: Friends"})}
+    )
+    pair = render_archive_metadata(series, issue, files())
+    mi = ET.fromstring(pair.metroninfo)
+    mi.find("Series/SortName").text = "Example - Friends"
+    incoming = files(pair.comicinfo.decode(), ET.tostring(mi, encoding="unicode"))
+    with pytest.raises(ArchiveMetadataRenderError) as failure:
+        render_archive_metadata(series, issue, incoming)
+    assert failure.value.code == "unreconciled_field"
+    assert failure.value.field == "sort_title"
+
+
 def test_passive_release_store_date_writes_metron_date_without_inventing_comicinfo_cover_date():
     series, issue = snapshots(store_date=date(2026, 9, 25))
     issue = MetadataSnapshot.model_validate(

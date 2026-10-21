@@ -360,7 +360,11 @@ class DownloadService:
         download.next_retry_at = None
 
         # noinspection PyTypeChecker
-        return await self._send_download(download, log)
+        result = await self._send_download(download, log)
+        from pullbox.services.download_operation_progress import project_download_operation_progress
+
+        await project_download_operation_progress(session, result)
+        return result
 
     async def manual_retry(
         self,
@@ -390,7 +394,11 @@ class DownloadService:
         download.next_retry_at = None
 
         # noinspection PyTypeChecker
-        return await self._send_download(download, log)
+        result = await self._send_download(download, log)
+        from pullbox.services.download_operation_progress import project_download_operation_progress
+
+        await project_download_operation_progress(session, result)
+        return result
 
     async def _send_download(
         self,

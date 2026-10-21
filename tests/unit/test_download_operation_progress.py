@@ -94,3 +94,23 @@ def test_non_running_download_states_drop_stale_rate_and_eta() -> None:
         assert update.state is not OperationProgressState.RUNNING
         assert update.rate is None
         assert update.eta_seconds is None
+
+
+def test_cancelled_download_drops_stale_mutation_pending_metrics() -> None:
+    download = _download(DownloadState.FAILED)
+    download.error_message = "Cancelled by user"
+    update = build_download_operation_update(download, {"client_state": "mutation_pending"})
+    assert update.state is OperationProgressState.CANCELLED
+    assert update.phase == "cancelled"
+    assert update.message == "Cancelled by user"
+    assert not update.attention_required
+
+
+def test_duplicate_request_does_not_duplicate_owner_recovery_notification() -> None:
+    download = _download(DownloadState.FAILED)
+    download.download_client = DownloadClientType.AIRDCPP
+    download.error_message = "AirDC++ merged this request into an existing Pullbox download."
+    update = build_download_operation_update(download)
+    assert not update.attention_required
+    assert update.visibility.value == "quiet"
+    assert update.phase == "superseded"

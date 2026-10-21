@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+from itertools import pairwise
 
 import httpx
 import pytest
@@ -724,6 +725,83 @@ async def test_transport_timeout_and_transient_retry_are_bounded(monkeypatch):
         assert len(requests) == 2
     finally:
         await client.close()
+
+
+async def test_pacing_does_not_consume_the_network_timeout(monkeypatch):
+    import pullbox.providers.metadata.metron as module
+
+    monkeypatch.setattr(module, "_REQUEST_TIMEOUT", 0.02)
+    cooldown = ProviderCooldown()
+    cooldown.last_request_time = module.time.monotonic()
+    client = source(
+        lambda request: httpx.Response(200, json=issue_row(7)),
+        cooldown=cooldown,
+        minimum_interval=0.04,
+    )
+    try:
+        assert (await client.issue("7")).status is SourceStatus.OK
+    finally:
+        await client.close()
+
+
+async def test_busy_request_queue_is_not_a_provider_failure(monkeypatch):
+    import pullbox.providers.metadata.metron as module
+
+    monkeypatch.setattr(module, "_REQUEST_TIMEOUT", 0.02)
+    monkeypatch.setattr(module, "_QUEUE_TIMEOUT", 0.01, raising=False)
+    cooldown = ProviderCooldown()
+    client = source(lambda request: pytest.fail("queue must prevent network"), cooldown=cooldown)
+    try:
+        async with cooldown.request_lock:
+            with pytest.raises(MetadataSourceError) as error:
+                await client.issue("7")
+        assert error.value.status is SourceStatus.RATE_LIMITED
+        assert error.value.retry_after_seconds == 3
+        assert error.value.account_failure is False
+        assert cooldown.remaining_seconds == 0
+    finally:
+        await client.close()
+
+
+async def test_cancelling_a_queued_request_does_not_release_another_requests_lock():
+    cooldown = ProviderCooldown()
+    client = source(
+        lambda request: pytest.fail("cancelled request must not run"), cooldown=cooldown
+    )
+    try:
+        async with cooldown.request_lock:
+            task = asyncio.create_task(client.issue("7"))
+            await asyncio.sleep(0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert cooldown.request_lock.locked()
+        assert cooldown.remaining_seconds == 0
+    finally:
+        await client.close()
+
+
+async def test_consecutive_clients_share_pacing_without_false_network_timeouts(monkeypatch):
+    import pullbox.providers.metadata.metron as module
+
+    monkeypatch.setattr(module, "_REQUEST_TIMEOUT", 0.02)
+    cooldown = ProviderCooldown()
+    starts = []
+
+    def handle(request):
+        starts.append(module.time.monotonic())
+        return httpx.Response(200, json=issue_row(7))
+
+    clients = [source(handle, cooldown=cooldown, minimum_interval=0.04) for _ in range(3)]
+    try:
+        results = await asyncio.gather(*(client.issue("7") for client in clients))
+        assert all(result.status is SourceStatus.OK for result in results)
+        assert len(starts) == 3
+        assert all(b - a >= 0.035 for a, b in pairwise(starts))
+        assert cooldown.remaining_seconds == 0
+    finally:
+        for client in clients:
+            await client.close()
 
 
 async def test_changed_total_between_search_pages_is_not_a_complete_result():

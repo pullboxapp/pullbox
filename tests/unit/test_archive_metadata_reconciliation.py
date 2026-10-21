@@ -192,6 +192,56 @@ def test_credit_order_is_not_a_difference_but_an_explicit_empty_list_is():
     assert [item.field for item in cleared.differences] == ["credits"]
 
 
+@pytest.mark.parametrize(
+    "names", ["Mike Deodato, Jr., Another Artist", "Another Artist, Mike Deodato, Jr."]
+)
+def test_structured_credits_disambiguate_only_the_matching_comicinfo_role(names):
+    incoming = files(
+        ci(f"<Penciller>{names}</Penciller>"),
+        mi(
+            "<Credits><Credit><Creator>Mike Deodato, Jr.</Creator><Roles><Role>Penciller</Role>"
+            "<Role>Artist</Role></Roles></Credit><Credit><Creator>Another Artist</Creator>"
+            "<Roles><Role>Penciller</Role></Roles></Credit></Credits>"
+        ),
+    )
+    result = reconcile_archive_metadata(incoming)
+    assert [c.name for c in result.comicinfo.issue.credits] == [
+        "Another Artist",
+        "Mike Deodato, Jr.",
+    ]
+    assert result.issue.credits == result.metroninfo.issue.credits
+    assert not result.requires_review
+    assert result.files is incoming
+
+
+@pytest.mark.parametrize(
+    "names,role",
+    [
+        ("Mike Deodato, Jr., Other Artist", "Penciller"),
+        ("Mike Deodato, Jr.", "Writer"),
+        ("Mike Deodato, Jr., Jr.", "Penciller"),
+        ("Jr., Mike Deodato", "Penciller"),
+    ],
+)
+def test_comma_names_do_not_hide_changed_people_roles_or_extra_entries(names, role):
+    result = reconcile_archive_metadata(
+        files(
+            ci(f"<{role}>{names}</{role}>"),
+            mi(
+                "<Credits><Credit><Creator>Mike Deodato, Jr.</Creator>"
+                "<Roles><Role>Penciller</Role></Roles></Credit></Credits>"
+            ),
+        )
+    )
+    assert result.requires_review
+    assert "credits" in [item.field for item in result.differences]
+
+
+def test_comicinfo_alone_does_not_guess_creator_grouping():
+    result = reconcile_archive_metadata(files(ci("<Penciller>Mike Deodato, Jr.</Penciller>")))
+    assert [c.name for c in result.issue.credits] == ["Jr.", "Mike Deodato"]
+
+
 def test_missing_xml_is_optional_and_invalid_xml_does_not_hide_valid_evidence():
     empty = reconcile_archive_metadata(files())
     assert not empty.requires_review

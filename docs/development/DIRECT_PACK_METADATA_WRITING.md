@@ -44,6 +44,28 @@ hard-crash or lost-final-commit recovery guarantees beyond the existing executor
 Combined books are not split into guessed page boundaries, and mixed-series
 packs remain rejected by the existing extractor.
 
+## Overlapping Pack Completion
+
+If another request imports the same issue during pack preparation, the guarded
+ownership failure is now `direct_pack_ownership_changed`, not a single-file XML
+conflict. Pack completion checks only affected requests; Retry import also uses
+this completion path. The exact legacy ownership-guard error is recognized.
+
+Reconciliation verifies a sole owned CBZ, matching embedded issue ID and number,
+non-conflicting metadata, archive safety/integrity, and unchanged file/metadata
+bindings under the existing mutation lock. Optional descriptive enrichment does
+not require rewriting the comic. Missing, ambiguous, unsafe, changed, replacement,
+and genuine metadata-conflict cases stay unresolved.
+
+The redundant request is superseded, its Recovery entry is resolved, and its
+activity notification no longer requires attention. Original failure evidence
+and the retained pack remain available. The failed attempt is not recorded as a
+second successful import, and no download or file write is performed.
+
+`tests/integration/metadata_identity/test_direct_pack_completion.py` covers both
+completion orderings, legacy recovery, optional enrichment, positive identity
+proof, unchanged bytes, cancellation, and concurrent file/metadata changes.
+
 ## Qualification
 
 `tests/integration/metadata_identity/test_direct_pack_writer_boundary.py`

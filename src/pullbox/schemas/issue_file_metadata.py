@@ -4,29 +4,45 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from pullbox.schemas.issue_metadata_editor import IssueMetadataEditorField
+
 type FileMetadataSource = Literal["library", "ComicInfo.xml", "MetronInfo.xml"]
-type FileMetadataField = Literal[
-    "series.title",
-    "series.sort_title",
-    "series.publisher",
-    "series.language",
-    "series.year_start",
-    "series.volume",
-    "series.series_type",
-    "series.issue_count",
-    "issue.title",
-    "issue.description",
-    "issue.cover_date",
-    "issue.store_date",
-    "issue.page_count",
-    "issue.credits",
+type SharedXmlField = Literal[
+    "xml.AgeRating",
+    "xml.Genre",
+    "xml.Tags",
+    "xml.Characters",
+    "xml.Teams",
+    "xml.Locations",
+    "xml.Imprint",
+    "xml.StoryArc",
 ]
+type SharedXmlChoices = dict[SharedXmlField, Literal["ComicInfo.xml", "MetronInfo.xml"]]
+type FileMetadataField = (
+    Literal[
+        "series.title",
+        "series.sort_title",
+        "series.publisher",
+        "series.language",
+        "series.year_start",
+        "series.volume",
+        "series.series_type",
+        "series.issue_count",
+        "issue.title",
+        "issue.description",
+        "issue.cover_date",
+        "issue.store_date",
+        "issue.page_count",
+        "issue.credits",
+    ]
+    | SharedXmlField
+)
 type FileMetadataChoices = dict[FileMetadataField, FileMetadataSource]
 
 
 class FileMetadataReview(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    choices: FileMetadataChoices = Field(default_factory=dict, max_length=14)
+    choices: FileMetadataChoices = Field(default_factory=dict, max_length=22)
 
 
 class FileMetadataOption(BaseModel):
@@ -60,6 +76,8 @@ class FileMetadataPreview(BaseModel):
     ready: bool = True
     conflicts: list[FileMetadataConflict] = Field(default_factory=list)
     converts_to_cbz: bool = False
+    editor_fields: list[IssueMetadataEditorField] = Field(default_factory=list)
+    editor_changed: bool = False
 
 
 class FileMetadataApproval(FileMetadataReview):

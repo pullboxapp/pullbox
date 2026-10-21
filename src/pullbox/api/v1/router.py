@@ -22,6 +22,7 @@ from pullbox.api.v1.import_jobs import router as import_jobs_router
 from pullbox.api.v1.import_safety_bulk import router as import_safety_bulk_router
 from pullbox.api.v1.indexers import router as indexers_router
 from pullbox.api.v1.intervention import router as intervention_router
+from pullbox.api.v1.intervention_metadata import router as intervention_metadata_router
 from pullbox.api.v1.issue_metadata_links import router as issue_metadata_links_router
 from pullbox.api.v1.issues import router as issues_router
 from pullbox.api.v1.library import router as library_router
@@ -53,6 +54,7 @@ v1_router.include_router(story_arcs_router)
 v1_router.include_router(story_arc_placements_router)
 v1_router.include_router(issues_router)
 v1_router.include_router(issue_metadata_links_router)
+v1_router.include_router(intervention_metadata_router)
 v1_router.include_router(library_router)
 v1_router.include_router(metadata_identities_router)
 v1_router.include_router(metadata_sources_router)

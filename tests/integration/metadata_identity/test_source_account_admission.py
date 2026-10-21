@@ -81,6 +81,66 @@ async def test_search_failure_is_shared_with_exact_reads_but_local_source_still_
     assert remote.calls == [0], "Search and catalog reads must share the same account guard"
 
 
+@pytest.mark.parametrize("search", [True, False])
+async def test_metron_operation_deadline_does_not_hold_healthy_account(accounts, search):
+    _, factory = accounts
+    adapter = ReadAdapter()
+    adapter.wait = asyncio.Event()
+    registry = await reader(factory, adapter)
+    registry.per_source_timeout = 0.02
+    if search:
+        result = await registry.discover(
+            SeriesDiscoveryQuery(query="Example", sources=[adapter.source])
+        )
+        assert result.sources[0].status is SourceStatus.TIMEOUT
+    else:
+        assert (await registry.series(adapter.source, "42")).status is SourceStatus.TIMEOUT
+    async with factory() as session:
+        row = await session.scalar(select(Account))
+        assert row.status is None, (
+            "Local operation budgets must not create a five-minute account outage"
+        )
+    adapter.wait = None
+    assert (
+        await (await reader(factory, adapter)).series(adapter.source, "42")
+    ).status is SourceStatus.OK
+
+
+@pytest.mark.parametrize("search", [True, False])
+async def test_local_metron_queue_backoff_never_holds_the_account(accounts, search):
+    _, factory = accounts
+    adapter = ReadAdapter(
+        error=MetadataSourceError(
+            SourceStatus.RATE_LIMITED,
+            3,
+            account_failure=False,
+        )
+    )
+    registry = await reader(factory, adapter)
+    if search:
+        result = await registry.discover(
+            SeriesDiscoveryQuery(query="Example", sources=[adapter.source])
+        )
+        assert result.sources[0].retry_after_seconds == 3
+    else:
+        assert (await registry.series(adapter.source, "42")).retry_after_seconds == 3
+    async with factory() as session:
+        row = await session.scalar(select(Account))
+        assert row.status is None and row.retry_at is None
+    adapter.error = None
+    assert (await registry.series(adapter.source, "42")).status is SourceStatus.OK
+
+
+async def test_metron_short_retry_after_is_not_extended_to_a_minute(accounts):
+    _, factory = accounts
+    adapter = ReadAdapter(error=MetadataSourceError(SourceStatus.RATE_LIMITED, 4))
+    await (await reader(factory, adapter)).series(adapter.source, "42")
+    blocked = await (await reader(factory, adapter)).series(adapter.source, "43")
+    assert blocked.status is SourceStatus.RATE_LIMITED
+    assert 0 < blocked.retry_after_seconds <= 4
+    assert len(adapter.calls) == 1
+
+
 async def test_priority_edit_does_not_bypass_authentication_hold_but_new_token_does(accounts):
     _, factory = accounts
     adapter = ReadAdapter(error=MetadataSourceError(SourceStatus.AUTHENTICATION_FAILED))

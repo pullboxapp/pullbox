@@ -197,7 +197,7 @@ async def test_explicit_pdf_review_runs_in_existing_metadata_job(identity_probe_
         assert "MetronInfo.xml" in archive.namelist()
 
 
-async def test_native_preview_preserves_retained_import_evidence(identity_probe_db, tmp_path):
+async def test_native_preview_defers_unfinished_import(identity_probe_db, tmp_path):
     from pullbox.models.import_job import (
         ImportedFile,
         ImportedSeries,
@@ -214,7 +214,7 @@ async def test_native_preview_preserves_retained_import_evidence(identity_probe_
         job = ImportJob(
             source_type=ImportSourceType.FILESYSTEM,
             source_path=str(tmp_path),
-            status=ImportJobStatus.COMPLETED,
+            status=ImportJobStatus.IMPORTING,
         )
         session.add(job)
         await session.flush()
@@ -232,7 +232,7 @@ async def test_native_preview_preserves_retained_import_evidence(identity_probe_
             )
         )
     async with factory() as session:
-        with pytest.raises(ValueError, match="import_rollback_protected"):
+        with pytest.raises(ValueError, match="import_operation_active"):
             await prepare_file_metadata(session, issue_id)
     assert source.read_bytes() == before
     assert not source.with_suffix(".cbz").exists()

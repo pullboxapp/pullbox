@@ -8,5 +8,10 @@
     "@tailwindcss/cli": "^4.3.3",
     "axe-core": "^4.14.0",
     "tailwindcss": "^4.3.3"
+  },
+  "overrides": {
+    "@tailwindcss/cli": {
+      "@parcel/watcher": "2.6.0"
+    }
   }
 }

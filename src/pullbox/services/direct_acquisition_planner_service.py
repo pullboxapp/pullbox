@@ -16,6 +16,7 @@ from pullbox.core.exceptions import ValidationError
 from pullbox.core.issue_numbers import normalize_issue_number_text
 from pullbox.core.log_sanitizer import sanitize_log_string
 from pullbox.core.name_matcher import NameMatcher
+from pullbox.core.partial_issue import is_story_extract
 from pullbox.core.type_semantics import TypeFamily, issue_type_family
 from pullbox.models.direct_acquisition import (
     DirectAcquisitionAttempt,
@@ -70,6 +71,7 @@ from pullbox.services.direct_provider_quota import (
     record_provider_quota,
     record_provider_resolution_error,
 )
+from pullbox.services.direct_resolver_budget import ProviderResolverBudget, resolver_retry_allowed
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -187,6 +189,13 @@ async def plan_direct_acquisition(
     clock = now or (lambda: datetime.now(UTC))
     try:
         provider = _validate_planning_source(attempt, at=clock())
+        title = (attempt.candidate_snapshot or {}).get("display_title")
+        if isinstance(title, str) and is_story_extract(title):
+            raise DirectAcquisitionPlanningError(
+                "partial_issue",
+                "This result is a story-only extract, not a complete issue. "
+                "Choose a complete copy. No download was started.",
+            )
         response = await _resolve_provider_candidate(
             session,
             attempt,
@@ -194,6 +203,7 @@ async def plan_direct_acquisition(
             provider_client_factory=provider_client_factory,
             provider_secret_loader=provider_secret_loader,
             deadline=clock() + timedelta(seconds=_RESOLVE_SECONDS),
+            now=clock,
         )
         if response.quota is not None:
             record_provider_quota(provider, response.quota, observed_at=clock())
@@ -217,6 +227,28 @@ async def plan_direct_acquisition(
             pinned_route_identity=pinned_route_identity,
         )
         if not plan.selected or not plan.complete:
+            known_coverage = frozenset().union(
+                *(route.option.coverage for route in resolved_routes)
+            )
+            if not plan.requested <= known_coverage and any(
+                is_story_extract(artifact.coverage.description) for artifact in response.artifacts
+            ):
+                raise DirectAcquisitionPlanningError(
+                    "partial_issue",
+                    "The available file is a story-only extract, not a complete issue. "
+                    "Choose a complete copy. No download was started.",
+                )
+            if (
+                any(route.route.eligible for route in resolved_routes)
+                and not plan.requested <= known_coverage
+            ):
+                raise DirectAcquisitionPlanningError(
+                    "artifact_coverage_unverified",
+                    "Download links are available, but the provider's file details do not "
+                    "establish coverage of the requested issue. No download was started. "
+                    "Update the provider and retry, or choose a result with explicit "
+                    "issue coverage.",
+                )
             raise DirectAcquisitionPlanningError(
                 "no_eligible_complete_plan",
                 "No enabled artifact route completely covers this issue.",
@@ -415,6 +447,7 @@ async def resolve_planned_artifact_source(
         provider_client_factory=provider_client_factory,
         provider_secret_loader=provider_secret_loader,
         deadline=clock() + timedelta(seconds=_RESOLVE_SECONDS),
+        now=clock,
     )
     provider_artifact = next(
         (
@@ -488,6 +521,7 @@ async def _resolve_provider_candidate(
     provider_client_factory: DirectResolveClientFactory | None,
     provider_secret_loader: ProviderSecretLoader | None,
     deadline: datetime,
+    now: Callable[[], datetime],
 ) -> DirectResolveResponse:
     from pullbox.services.direct_configuration_service import load_provider_secret_material
     from pullbox.services.direct_resolver_service import (
@@ -513,6 +547,7 @@ async def _resolve_provider_candidate(
         provider_id=provider.provider_id,
     )
     try:
+        budget = ProviderResolverBudget(deadline, now=now)
         resolver_options = await build_provider_resolver_profiles(session, provider)
         options = (None, *resolver_options)
         last_error: DirectProviderClientError | None = None
@@ -542,7 +577,7 @@ async def _resolve_provider_candidate(
                 )
                 await session.commit()
             try:
-                return await client.resolve(
+                return await budget.run(
                     DirectResolveRequest(
                         protocol_version=(
                             provider.negotiated_protocol or "direct-download-provider/v1"
@@ -553,13 +588,13 @@ async def _resolve_provider_candidate(
                         source_credentials=material.configuration,
                         resolver_profile=option.profile if option is not None else None,
                         provider_candidate_id=attempt.provider_candidate_id,
-                    )
+                    ),
+                    client.resolve,
+                    remaining_resolvers=len(options) - option_index,
                 )
             except DirectProviderClientError as exc:
                 last_error = exc
-                retry_allowed = exc.code == "browser_challenge_required" or exc.code.startswith(
-                    "resolver_"
-                )
+                retry_allowed = resolver_retry_allowed(exc, using_resolver=option is not None)
                 if not retry_allowed or option_index == len(options) - 1:
                     record_provider_resolution_error(
                         provider,
@@ -716,6 +751,8 @@ def _build_route_options(
     for artifact in artifacts:
         _validate_stable_identity("provider artifact", artifact.artifact_id)
         if artifact.route is not DirectArtifactRoute.DIRECT_ARTIFACT:
+            continue
+        if is_story_extract(artifact.coverage.description):
             continue
         coverage = _artifact_coverage(
             artifact,

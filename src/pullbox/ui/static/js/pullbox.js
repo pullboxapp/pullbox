@@ -13450,11 +13450,21 @@ function appShell() {
     activityActiveCount: 0,
     activitySpinnerCount: 0,
     activityAttentionCount: 0,
-    activitySource: null,
+    activityTotalCount: 0,
+    activityOffset: 0,
+    activityPageOffset: 0,
+    activityPageSize: 20,
     activityPollTimer: null,
-    activityRefreshTimer: null,
-    activityStreamOpen: false,
+    activityExpiryTimer: null,
+    activityRequestController: null,
+    activityRequestTimer: null,
+    activityRefreshQueued: false,
+    activityDestroyed: false,
     activityRefreshing: false,
+    activityPageHidden: false,
+    activityVisibilityHandler: null,
+    activityPageHideHandler: null,
+    activityPageShowHandler: null,
 
     get collapsed() {
       return !this.sidebarOpen && !this.sidebarMobileOpen;
@@ -13493,15 +13503,31 @@ function appShell() {
     },
 
     destroy: function () {
+      this.activityDestroyed = true;
+      this.pauseActivity();
+      document.removeEventListener("visibilitychange", this.activityVisibilityHandler);
+      document.removeEventListener("pullbox:styles-ready", this.activityVisibilityHandler);
+      window.removeEventListener("pagehide", this.activityPageHideHandler);
+      window.removeEventListener("pageshow", this.activityPageShowHandler);
       if (this.resizeHandler) {
         window.removeEventListener("resize", this.resizeHandler);
       }
       if (window.__pullboxUpdateUsageStatsPreference) {
         delete window.__pullboxUpdateUsageStatsPreference;
       }
-      this.disconnectActivityStream();
+    },
+
+    canRefreshActivity: function () {
+      return !this.activityDestroyed && !this.activityPageHidden && !document.hidden &&
+        document.documentElement.getAttribute("data-pullbox-stylesheet-ready") === "true";
+    },
+
+    pauseActivity: function () {
       this.clearActivityTimer();
-      this.clearActivityRefreshTimer();
+      window.clearTimeout(this.activityExpiryTimer);
+      window.clearTimeout(this.activityRequestTimer);
+      this.activityRefreshQueued = false;
+      if (this.activityRequestController) this.activityRequestController.abort();
     },
 
     clearActivityTimer: function () {
@@ -13513,6 +13539,7 @@ function appShell() {
 
     scheduleActivityPoll: function (delayMs) {
       var self = this;
+      if (!self.canRefreshActivity()) return;
       self.clearActivityTimer();
       self.activityPollTimer = window.setTimeout(function () {
         self.activityPollTimer = null;
@@ -13520,35 +13547,80 @@ function appShell() {
       }, delayMs || 3000);
     },
 
-    clearActivityRefreshTimer: function () {
-      if (this.activityRefreshTimer) {
-        window.clearTimeout(this.activityRefreshTimer);
-        this.activityRefreshTimer = null;
-      }
-    },
-
-    scheduleActivityRefresh: function (delayMs) {
-      var self = this;
-      self.clearActivityRefreshTimer();
-      self.activityRefreshTimer = window.setTimeout(function () {
-        self.activityRefreshTimer = null;
-        self.refreshActivity();
-      }, delayMs || 500);
-    },
-
     bootstrapActivity: function () {
-      this.connectActivityStream();
+      var self = this;
+      // Short requests leave HTTP/1.1 connections available to other tabs.
+      self.activityVisibilityHandler = function () {
+        if (self.canRefreshActivity()) self.refreshActivity();
+        else self.pauseActivity();
+      };
+      self.activityPageHideHandler = function () {
+        self.activityPageHidden = true;
+        self.pauseActivity();
+      };
+      self.activityPageShowHandler = function (event) {
+        if (!self.activityPageHidden && !event.persisted) return;
+        self.activityPageHidden = false;
+        self.activityVisibilityHandler();
+      };
+      document.addEventListener("visibilitychange", self.activityVisibilityHandler);
+      document.addEventListener("pullbox:styles-ready", self.activityVisibilityHandler);
+      window.addEventListener("pagehide", self.activityPageHideHandler);
+      window.addEventListener("pageshow", self.activityPageShowHandler);
+      self.refreshActivity();
+    },
+
+    toggleActivity: function () {
+      this.activityOpen = !this.activityOpen;
+      if (this.activityOpen) this.refreshActivity();
+    },
+
+    changeActivityPage: function (direction) {
+      if (this.activityOffset !== this.activityPageOffset) return;
+      var offset = this.activityPageOffset + direction * this.activityPageSize;
+      if (offset < 0 || offset >= this.activityTotalCount) return;
+      this.activityOffset = offset;
       this.refreshActivity();
+    },
+
+    activityPageLabel: function () {
+      if (!this.activityTotalCount) return "0 items";
+      return (this.activityPageOffset + 1) + "-" +
+        (this.activityPageOffset + this.activityOperations.length) +
+        " of " + this.activityTotalCount;
+    },
+
+    scheduleActivityExpiry: function (delayMs, elapsedMs) {
+      var self = this;
+      window.clearTimeout(self.activityExpiryTimer);
+      self.activityExpiryTimer = null;
+      if (delayMs == null || !Number.isFinite(Number(delayMs))) return;
+      self.activityExpiryTimer = window.setTimeout(function () {
+        self.activityExpiryTimer = null;
+        self.refreshActivity();
+      }, Math.max(100, Number(delayMs) - elapsedMs));
     },
 
     refreshActivity: function () {
       var self = this;
+      if (!self.canRefreshActivity()) return;
       if (self.activityRefreshing) {
+        self.activityRefreshQueued = true;
         return;
       }
+      self.clearActivityTimer();
       self.activityRefreshing = true;
-      fetch("/api/v1/activity", {
+      self.activityRefreshQueued = false;
+      var offset = self.activityOffset;
+      var startedAt = Date.now();
+      var controller = new AbortController();
+      self.activityRequestController = controller;
+      self.activityRequestTimer = window.setTimeout(function () {
+        controller.abort();
+      }, 15000);
+      fetch("/api/v1/activity" + (offset ? "?offset=" + offset : ""), {
         headers: { Accept: "application/json" },
+        signal: controller.signal,
       })
         .then(function (response) {
           if (!response.ok) {
@@ -13557,8 +13629,19 @@ function appShell() {
           return response.json();
         })
         .then(function (payload) {
+          if (!self.canRefreshActivity()) return;
+          var operations = payload && Array.isArray(payload.operations) ? payload.operations : [];
+          var total = Math.max(0, Number(payload && payload.total_count) || operations.length);
+          var lastOffset = Math.max(0, Math.ceil(total / self.activityPageSize) - 1) * self.activityPageSize;
+          if (offset !== self.activityOffset || offset > lastOffset) {
+            self.activityOffset = Math.min(self.activityOffset, lastOffset);
+            self.activityRefreshQueued = true;
+            return;
+          }
           self.activityOperations =
-            payload && Array.isArray(payload.operations) ? payload.operations : [];
+            operations;
+          self.activityTotalCount = total;
+          self.activityPageOffset = offset;
           self.activityActiveCount = Math.max(
             0,
             Number(payload && payload.active_count) || 0,
@@ -13571,63 +13654,22 @@ function appShell() {
             0,
             Number(payload && payload.attention_count) || 0,
           );
+          self.scheduleActivityExpiry(payload.refresh_after_ms, Date.now() - startedAt);
         })
         .catch(function () {
           // Activity is supplemental; a transient failure must not interrupt the page.
         })
         .finally(function () {
+          window.clearTimeout(self.activityRequestTimer);
+          self.activityRequestController = null;
           self.activityRefreshing = false;
-          if (!self.activityStreamOpen) {
-            self.scheduleActivityPoll(3000);
+          if (!self.canRefreshActivity()) return;
+          if (self.activityRefreshQueued) {
+            self.refreshActivity();
+            return;
           }
-          if (!self.activitySource) {
-            self.connectActivityStream();
-          }
+          self.scheduleActivityPoll(3000);
         });
-    },
-
-    connectActivityStream: function () {
-      var self = this;
-      if (self.activitySource) {
-        return;
-      }
-      var source = new EventSource("/api/v1/activity/stream");
-      self.activitySource = source;
-      var refreshFromEvent = function () {
-        if (self.activitySource === source) {
-          self.scheduleActivityRefresh(500);
-        }
-      };
-      source.onopen = function () {
-        if (self.activitySource !== source) {
-          return;
-        }
-        self.activityStreamOpen = true;
-        self.clearActivityTimer();
-      };
-      source.addEventListener("ready", refreshFromEvent);
-      source.addEventListener("progress", refreshFromEvent);
-      source.onmessage = refreshFromEvent;
-      source.onerror = function () {
-        if (self.activitySource !== source) {
-          return;
-        }
-        self.disconnectActivityStream();
-        self.scheduleActivityPoll(3000);
-      };
-    },
-
-    disconnectActivityStream: function () {
-      if (!this.activitySource) {
-        return;
-      }
-      try {
-        this.activitySource.close();
-      } catch (_) {
-        // Closing a stale activity stream is best-effort.
-      }
-      this.activitySource = null;
-      this.activityStreamOpen = false;
     },
 
     acknowledgeActivity: function (operationId) {
@@ -13689,7 +13731,8 @@ function appShell() {
 
     activitySummaryLabel: function () {
       if (this.activityAttentionCount > 0) {
-        return this.activityAttentionCount + " need attention";
+        return this.activityAttentionCount + " need attention" +
+          (this.activityActiveCount > 0 ? " / " + this.activityActiveCount + " active" : "");
       }
       if (this.activityActiveCount > 0) {
         return this.activityActiveCount + " active";
@@ -14123,6 +14166,7 @@ function issueSearchResultActions(config) {
 
   return {
     grabbing: false,
+    grabbed: false,
     blocking: false,
     blocked: false,
 
@@ -14136,10 +14180,22 @@ function issueSearchResultActions(config) {
       }
     },
 
-    grabRelease: function (button) {
+    grabRelease: async function (button) {
       var self = this;
-      if (self.grabbing || self.blocked) {
+      if (self.grabbing || self.grabbed || self.blocked) {
         return;
+      }
+
+      if (cfg.hasLibraryFile) {
+        self.grabbing = true;
+        var confirmed = await pbConfirm({
+          title: "Download replacement?",
+          message: "The selected download will replace the current library file after validation. The current file stays in place until replacement succeeds. Cancel leaves it unchanged.",
+          confirmText: "Download replacement",
+          destructive: true,
+        });
+        self.grabbing = false;
+        if (!confirmed) return;
       }
 
       var directAttemptId = parseInt(button.dataset.directAttempt, 10) || 0;
@@ -14163,6 +14219,8 @@ function issueSearchResultActions(config) {
       } else if (dcRouteToken) {
         endpoint = "/api/v1/issues/" + cfg.issueId + "/dc-grab";
         payload = { dc_route_token: dcRouteToken };
+        if (button.dataset.dcOverride === "true") payload.override_rejection = true;
+        if (cfg.hasLibraryFile) payload.replace_existing_file = true;
       }
       if (cfg.releaseSelection) {
         endpoint = "/api/v1/whats-new/grab";
@@ -14182,6 +14240,7 @@ function issueSearchResultActions(config) {
       })
         .then(function (response) {
           if (response.ok) {
+            if (dcRouteToken) self.grabbed = true;
             self.dispatchToast(
               directAttemptId || dcRouteToken
                 ? "Direct download queued"
@@ -14222,23 +14281,28 @@ function issueSearchResultActions(config) {
 
     grabRejectedRelease: function (button) {
       var self = this;
-      if (self.grabbing || self.blocked) {
+      if (self.grabbing || self.grabbed || self.blocked) {
         return;
       }
 
       var reason = button.dataset.rejectionReason || "Pullbox rejected this result.";
       var isDirect = Boolean(parseInt(button.dataset.directAttempt, 10) || 0);
+      var isDc = Boolean(button.dataset.dcRouteToken);
+      self.grabbing = true;
       pbConfirm({
         title: "Grab Rejected Result",
         message:
           "Pullbox rejected this result: " +
           reason +
-          (isDirect
+          (isDc
+            ? " If you continue, Pullbox will queue this file in AirDC++. File safety and metadata checks still apply before import."
+            : isDirect
             ? " If you continue, Pullbox will plan and queue this direct result anyway."
             : " If you continue, Pullbox will send it to your download client anyway."),
         confirmText: "Grab anyway",
         destructive: false,
       }).then(function (ok) {
+        self.grabbing = false;
         if (!ok) {
           return;
         }
@@ -19179,6 +19243,20 @@ function issueDetailPage(config) {
   var cfg = config || {};
 
   return Object.assign(fileBrowserMixin(cfg), readerMixin(cfg), {
+    replacementAction: "",
+    init: function () {
+      readerMixin(cfg).init.call(this);
+      var url = new URL(window.location.href);
+      var action = url.searchParams.get("replacement");
+      if (action !== "search" && action !== "import") return;
+      this.replacementAction = action;
+      url.searchParams.delete("replacement");
+      window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash);
+      this.$nextTick(() => {
+        if (action === "search") this.openManualSearchModal();
+        else this.openImportFileBrowser();
+      });
+    },
     coverModalOpen: false,
     coverModalUrl: "",
     searching: false,
@@ -19187,6 +19265,9 @@ function issueDetailPage(config) {
     importing: false,
     cancellingImport: false,
     importReplacementConfirmed: false,
+    importMetadataPreview: null,
+    importMetadataChoices: {},
+    importPreviewController: null,
     importModalOpen: false,
     importPollTimer: null,
     importState: "idle",
@@ -19281,11 +19362,26 @@ function issueDetailPage(config) {
       this.form.file_size = selection.size || 0;
       this.form.file_ext = selection.ext || "";
       this.importReplacementConfirmed = false;
+      this.importMetadataPreview = null;
+      this.importMetadataChoices = {};
       this.submitImport();
     },
 
     showImportModal: function () {
       return this.importModalOpen;
+    },
+
+    trapImportFocus: function (event) {
+      var dialog = event.currentTarget;
+      var elements = Array.from(dialog.querySelectorAll('button:not([disabled]), input:not([disabled]), a[href], [tabindex="0"]'))
+        .filter(function (element) { return element.getClientRects().length > 0; });
+      var first = elements[0], last = elements[elements.length - 1];
+      if (!first) { event.preventDefault(); return; }
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) {
+        event.preventDefault(); last.focus();
+      } else if (!event.shiftKey && (document.activeElement === last || document.activeElement === dialog)) {
+        event.preventDefault(); first.focus();
+      }
     },
 
     closeImportModal: function () {
@@ -19303,6 +19399,8 @@ function issueDetailPage(config) {
         completed: "Complete",
         failed: "Needs attention",
         safety_blocked: "Safety review",
+        metadata_review: "Metadata review",
+        checking: "Checking metadata",
         cancelled: "Cancelled",
       };
       return labels[this.importState] || "Importing";
@@ -19488,6 +19586,14 @@ function issueDetailPage(config) {
 
     cancelIssueImport: async function () {
       if (this.cancellingImport || this.importState === "completed") return;
+      if (this.importState === "checking") {
+        if (this.importPreviewController) this.importPreviewController.abort();
+        return;
+      }
+      if (this.importState === "metadata_review") {
+        this.closeImportModal();
+        return;
+      }
       if (this.importState === "failed" || this.importState === "safety_blocked" || this.importState === "cancelled") {
         this.closeImportModal();
         return;
@@ -19531,7 +19637,17 @@ function issueDetailPage(config) {
       return (bytes / 1048576).toFixed(1) + " MB";
     },
 
-    submitImport: async function () {
+    canImportReviewedMetadata: function () {
+      var self = this;
+      return !self.importing && self.importMetadataPreview &&
+        self.importMetadataPreview.conflicts.every(function (conflict) {
+          return conflict.options.some(function (option) {
+            return option.selectable && self.importMetadataChoices[conflict.key] === option.source;
+          });
+        });
+    },
+
+    submitImport: async function (approveMetadata) {
       if (!this.form.file_path || this.importing) return;
 
       if (cfg.hasLibraryFile && !this.importReplacementConfirmed) {
@@ -19564,17 +19680,45 @@ function issueDetailPage(config) {
       });
 
       try {
+        var approval = null;
+        if (cfg.pairedImportMetadata && cfg.importMetadataPreviewUrl) {
+          this.importState = "checking";
+          this.importMessage = "Checking file metadata...";
+          this.importPreviewController = new AbortController();
+          var previewResponse = await fetch(cfg.importMetadataPreviewUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-CSRF-Token": this.csrfToken() },
+            signal: this.importPreviewController.signal,
+            body: JSON.stringify({ file_path: this.form.file_path, move_to_library: this.form.move_to_library, choices: this.importMetadataChoices }),
+          });
+          var preview = await previewResponse.json();
+          if (!previewResponse.ok) throw new Error(preview.detail || "Unable to review file metadata.");
+          var changed = preview && this.importMetadataPreview &&
+            preview.context_key !== this.importMetadataPreview.context_key;
+          if (changed) this.importMetadataChoices = {};
+          this.importMetadataPreview = preview;
+          if (preview && (changed || (preview.conflicts.length && (!approveMetadata || !preview.ready)))) {
+            this.importState = "metadata_review";
+            this.importMessage = changed ? "File or catalog changed. Review the current values." : "Review file metadata";
+            this.importing = false;
+            return;
+          }
+          if (preview) approval = { review_key: preview.review_key, choices: this.importMetadataChoices };
+        }
+        this.importState = "running";
+        var requestBody = {
+          file_path: this.form.file_path,
+          move_to_library: this.form.move_to_library,
+          allow_resource_safety_exception: allowSafetyException,
+        };
+        if (approval) requestBody.metadata_approval = approval;
         var response = await fetch(cfg.importStartUrl, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             "X-CSRF-Token": this.csrfToken(),
           },
-          body: JSON.stringify({
-            file_path: this.form.file_path,
-            move_to_library: this.form.move_to_library,
-            allow_resource_safety_exception: allowSafetyException,
-          }),
+          body: JSON.stringify(requestBody),
         });
 
         if (!response.ok) {
@@ -19594,18 +19738,25 @@ function issueDetailPage(config) {
       } catch (error) {
         this.stopImportPolling();
         this.importing = false;
+        if (error.name === "AbortError") {
+          this.importState = "cancelled";
+          this.importModalOpen = false;
+          return;
+        }
         this.importState = "failed";
         this.importMessage = "Import failed.";
         this.importErrorMessage =
           error.message || "An error occurred during import";
         this.dispatchToast(this.importErrorMessage, "error");
+      } finally {
+        this.importPreviewController = null;
       }
     },
 
     retryImportWithSafetyException: function () {
       if (!this.form.file_path || this.importing) return;
       this.importAllowSafetyException = true;
-      this.submitImport();
+      this.submitImport(Boolean(this.importMetadataPreview));
     },
 
     deleteIssueFile: async function () {
@@ -20728,6 +20879,10 @@ function interventionQueueResultsActive() {
 
 function interventionQueueRefreshEnabled() {
   if (!pullboxLiveUpdatesEnabled()) {
+    return false;
+  }
+
+  if (document.querySelector("[data-metadata-recovery-open='true']")) {
     return false;
   }
 
@@ -22379,9 +22534,15 @@ document.addEventListener("htmx:afterRequest", function (e) {
     return;
   }
 
-  if (e.detail.failed) {
+  if (e.detail.failed || (e.detail.xhr && e.detail.xhr.status === 0)) {
     _setContentSwapPhase(null);
     _importEventSourceRegistry.resumeSuspended();
+    if (
+      e.detail.xhr && e.detail.xhr.status === 0 &&
+      e.detail.elt && e.detail.elt.matches("[data-story-arc-preview]")
+    ) {
+      showToast({ message: "Could not load story arc members. Try Preview members again.", level: "error" });
+    }
     return;
   }
 

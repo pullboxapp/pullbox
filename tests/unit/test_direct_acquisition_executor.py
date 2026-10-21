@@ -77,6 +77,7 @@ from pullbox.services.direct_acquisition_fallback import (
 from pullbox.services.direct_acquisition_planner_service import (
     DirectAcquisitionPlanningError,
 )
+from pullbox.services.direct_artifact_pack import DirectArtifactPackError
 from pullbox.services.direct_artifact_post_processing import DirectPostProcessingResult
 from pullbox.services.direct_artifact_quarantine import DirectArtifactQuarantine
 from pullbox.services.direct_configuration_service import update_host_credentials
@@ -703,6 +704,71 @@ async def test_executor_routes_contiguous_pack_to_pack_post_processor(
         )
     ).scalar_one()
     assert observed["download_history_id"] == history.id
+
+
+@pytest.mark.parametrize(
+    "failure", ["direct_pack_mixed_series", "direct_pack_ambiguous_issue", "direct_pack_incomplete"]
+)
+@pytest.mark.parametrize("resume", ["unchanged", "missing", "unsafe"])
+async def test_pack_matching_failure_retains_download_and_retries_without_transfer(
+    session, tmp_path, monkeypatch, failure, resume
+):
+    attempt = _attempt()
+    attempt.plan_snapshot = {"coverage": {"selected_content_issue_numbers": ["1", "2"]}}
+    session.add(attempt)
+    await session.commit()
+    artifact = attempt.artifact_attempts[0]
+    calls = 0
+
+    async def process(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise DirectArtifactPackError(code=failure, message="Choose the correct issue file.")
+        return await _successful_post_processor()
+
+    monkeypatch.setattr(direct_executor_module, "run_direct_artifact_pack_post_processing", process)
+    blocked = await _executor(
+        tmp_path, transport=_SuccessfulTransport(), post_processor=process
+    ).execute(
+        session,
+        acquisition_id=attempt.id,
+        artifact_id=artifact.id,
+        source_factory=lambda: _async_value(_source_request()),
+    )
+    assert blocked.state is DirectAcquisitionState.INTERVENTION
+    retained = Path(artifact.quarantine_path)
+    assert retained.is_file()
+    pending = await session.scalar(select(PendingMatch))
+    assert pending.status == PendingMatchStatus.PENDING
+    assert pending.match_details["failure_code"] == failure
+    if resume == "missing":
+        retained.unlink()
+    elif resume == "unsafe":
+        with zipfile.ZipFile(retained, "w") as pack:
+            pack.writestr("../escape.jpg", b"unsafe changed content")
+    result = await _executor(
+        tmp_path, transport=_UnexpectedTransport(), post_processor=process
+    ).execute(
+        session,
+        acquisition_id=attempt.id,
+        artifact_id=artifact.id,
+        source_factory=lambda: pytest.fail("Retained packs must not resolve or download again"),
+    )
+    if resume == "unchanged":
+        assert result.state is DirectAcquisitionState.COMPLETED
+        assert calls == 2
+        assert not retained.exists()
+    elif resume == "missing":
+        assert result.state is DirectAcquisitionState.INTERVENTION
+        assert attempt.failure_class is DirectArtifactFailureClass.SAFETY
+        assert attempt.failure_code == "artifact_quarantine_missing"
+        assert calls == 1
+    else:
+        assert result.state is DirectAcquisitionState.FAILED
+        assert attempt.failure_class is DirectArtifactFailureClass.SAFETY
+        assert attempt.failure_code == "artifact_safety_rejected"
+        assert calls == 1
 
 
 @pytest.mark.asyncio
@@ -1427,6 +1493,8 @@ async def test_executor_applies_approved_resource_exception_without_redownload(
     session: AsyncSession,
     tmp_path: Path,
 ) -> None:
+    from pullbox.core.library_file_ownership import build_file_identity_signature
+
     attempt = _attempt()
     attempt.state = DirectAcquisitionState.POST_PROCESSING
     attempt.plan_snapshot = {
@@ -1443,7 +1511,14 @@ async def test_executor_applies_approved_resource_exception_without_redownload(
     quarantine = DirectArtifactQuarantine(tmp_path / "quarantine")
     workspace = quarantine.prepare(acquisition_id=attempt.id, artifact_id=artifact.id)
     final_path = workspace.directory / f"artifact-{artifact.id}.cbz"
-    final_path.write_bytes(b"completed transfer")
+    with zipfile.ZipFile(final_path, "w") as archive:
+        archive.writestr("001.jpg", b"synthetic fixture")
+    attempt.plan_snapshot = {
+        "safety_review": {
+            **attempt.plan_snapshot["safety_review"],
+            "source_signature": build_file_identity_signature(final_path),
+        }
+    }
     artifact.quarantine_path = str(final_path)
     await session.commit()
     observed: dict[str, object] = {}

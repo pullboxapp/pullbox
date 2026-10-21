@@ -18,6 +18,7 @@ from pullbox.core.library_file_ownership import build_file_identity_signature
 from pullbox.models.direct_acquisition import DirectAcquisitionAttempt, DirectArtifactAttempt
 from pullbox.models.download import DownloadHistory
 from pullbox.services.archive_metadata_binding import ArchiveMetadataBindingError
+from pullbox.services.direct_artifact_pack import DirectArtifactPackError
 from pullbox.services.direct_paired_metadata import DirectMetadataReviewError
 from pullbox.services.manual_paired_metadata import (
     _directories,
@@ -179,8 +180,10 @@ async def stage_direct_pack_metadata(
                     await read_manual_metadata_plan(session, item.issue_id) != member.plan
                     or item.issue.status != statuses[item.issue_id]
                 ):
-                    raise DirectMetadataReviewError(
-                        "Pack metadata or ownership changed; review before retrying."
+                    raise DirectArtifactPackError(
+                        code="direct_pack_ownership_changed",
+                        message="The library changed while this pack was importing. "
+                        "Recheck the retained pack; no new download is needed.",
                     )
             yield staged_members
         except (ArchiveMetadataBindingError, ArchiveMetadataStagingError, ValueError) as exc:

@@ -254,10 +254,13 @@ class MetadataAccountAdmission:
                     delay = outcome.retry_after_seconds or (
                         3600 if outcome.status is SourceStatus.RATE_LIMITED else 300
                     )
+                    floor = 1 if runtime.policy.source is MetadataSource.METRON_API else 60
                     due = (
                         None
                         if outcome.status is SourceStatus.AUTHENTICATION_FAILED
-                        else (datetime.now(UTC) + timedelta(seconds=max(60, min(delay, 7 * 86400))))
+                        else (
+                            datetime.now(UTC) + timedelta(seconds=max(floor, min(delay, 7 * 86400)))
+                        )
                     )
                     statement = statement.values(status=outcome.status.value, retry_at=due)
                 elif outcome is not None and (

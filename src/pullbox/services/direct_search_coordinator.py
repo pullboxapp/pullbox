@@ -37,6 +37,7 @@ from pullbox.services.direct_provider_quota import refresh_expired_provider_quot
 from pullbox.services.direct_provider_source_origin import (
     effective_direct_provider_source_domains,
 )
+from pullbox.services.direct_resolver_budget import ProviderResolverBudget, resolver_retry_allowed
 from pullbox.services.release_validator import ReleaseValidator, ValidationResult
 from pullbox.services.search_scoring import match_confidence_rank
 
@@ -56,6 +57,7 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 _DEFAULT_SEARCH_SECONDS = 30.0
+_ANNA_BROWSER_SEARCH_SECONDS = 90.0
 _DEFAULT_RESULT_LIMIT = 20
 _MAX_FANOUT = 4
 _COLLECTION_EDITION_QUALIFIERS = ("expanded edition",)
@@ -150,7 +152,11 @@ def _default_client_factory(
         bearer_token=bearer_token,
         allow_private_http=allow_private_http,
         provider_id=provider_id,
-        request_timeout_seconds=_DEFAULT_SEARCH_SECONDS,
+        request_timeout_seconds=(
+            _ANNA_BROWSER_SEARCH_SECONDS
+            if provider_id == "pullbox.annas_archive"
+            else _DEFAULT_SEARCH_SECONDS
+        ),
     )
 
 
@@ -290,7 +296,7 @@ async def search_direct_issue_target(
     validator_kwargs: ValidatorKwargs | None = None,
     client_factory: DirectSearchClientFactory = _default_client_factory,
     result_limit: int = _DEFAULT_RESULT_LIMIT,
-    search_seconds: float = _DEFAULT_SEARCH_SECONDS,
+    search_seconds: float | None = None,
     max_fanout: int = _MAX_FANOUT,
     now: Callable[[], datetime] | None = None,
     on_resolver_attempt: ResolverAttemptCallback | None = None,
@@ -298,7 +304,7 @@ async def search_direct_issue_target(
     """Search eligible providers concurrently and preserve matcher semantics."""
     if not 1 <= result_limit <= 100:
         raise ValueError("Direct provider result limit must be between 1 and 100.")
-    if search_seconds <= 0 or search_seconds > 300:
+    if search_seconds is not None and (search_seconds <= 0 or search_seconds > 300):
         raise ValueError("Direct provider search timeout must be between 0 and 300 seconds.")
     if not 1 <= max_fanout <= _MAX_FANOUT:
         raise ValueError("Direct provider fan-out must be between 1 and 4.")
@@ -335,13 +341,23 @@ async def search_direct_issue_target(
         DirectSearchFailure | None,
     ]:
         async with semaphore:
+            seconds = search_seconds
+            if seconds is None:
+                # Anna's browser interstitial needs time to finish before fallback.
+                seconds = (
+                    _ANNA_BROWSER_SEARCH_SECONDS
+                    if provider.provider_identity == "pullbox.annas_archive"
+                    and provider.resolver_options
+                    else _DEFAULT_SEARCH_SECONDS
+                )
             return await _search_provider(
                 target,
                 provider,
                 validator=validator,
                 client_factory=client_factory,
                 result_limit=result_limit,
-                deadline=clock() + timedelta(seconds=search_seconds),
+                deadline=clock() + timedelta(seconds=seconds),
+                now=clock,
                 on_resolver_attempt=record_resolver_attempt,
             )
 
@@ -378,6 +394,7 @@ async def _search_provider(
     client_factory: DirectSearchClientFactory,
     result_limit: int,
     deadline: datetime,
+    now: Callable[[], datetime],
     on_resolver_attempt: ResolverAttemptCallback | None,
 ) -> tuple[
     list[DirectValidatedCandidate],
@@ -397,6 +414,7 @@ async def _search_provider(
             target=target,
             result_limit=result_limit,
             deadline=deadline,
+            now=now,
             on_resolver_attempt=on_resolver_attempt,
         )
     except asyncio.CancelledError:
@@ -566,9 +584,11 @@ async def _search_with_resolver_fallback(
     target: IssueSearchTarget,
     result_limit: int,
     deadline: datetime,
+    now: Callable[[], datetime],
     on_resolver_attempt: ResolverAttemptCallback | None,
 ) -> DirectSearchResponse:
     options = (None, *provider.resolver_options)
+    budget = ProviderResolverBudget(deadline, now=now)
     last_error: DirectProviderClientError | None = None
     for option_index, option in enumerate(options):
         if option is not None and on_resolver_attempt is not None:
@@ -585,7 +605,13 @@ async def _search_with_resolver_fallback(
                 )
             )
         try:
-            return await client.search(
+            attempt_budget = budget
+            if option is None and provider.provider_identity == "pullbox.annas_archive":
+                # The browser allowance must not extend an ordinary stalled HTTP request.
+                attempt_budget = ProviderResolverBudget(
+                    min(deadline, now() + timedelta(seconds=_DEFAULT_SEARCH_SECONDS)), now=now
+                )
+            return await attempt_budget.run(
                 DirectSearchRequest(
                     protocol_version=provider.protocol_version,
                     request_id=uuid4(),
@@ -595,19 +621,20 @@ async def _search_with_resolver_fallback(
                     resolver_profile=option.profile if option is not None else None,
                     intent=_build_intent(target),
                     limit=result_limit,
-                )
+                ),
+                client.search,
+                remaining_resolvers=len(options) - option_index,
             )
         except DirectProviderClientError as exc:
             last_error = exc
-            if not _resolver_retry_allowed(exc) or option_index == len(options) - 1:
+            if (
+                not resolver_retry_allowed(exc, using_resolver=option is not None)
+                or option_index == len(options) - 1
+            ):
                 raise
     if last_error is not None:
         raise last_error
     raise RuntimeError("Direct provider search had no executable request path.")
-
-
-def _resolver_retry_allowed(exc: DirectProviderClientError) -> bool:
-    return exc.code == "browser_challenge_required" or exc.code.startswith("resolver_")
 
 
 def _build_intent(target: IssueSearchTarget) -> DirectSearchIntent:

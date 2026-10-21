@@ -26,6 +26,7 @@ from pullbox.schemas.intervention import (
     PendingMatchResponse,
     RejectRequest,
 )
+from pullbox.services.direct_artifact_quarantine import DirectArtifactValidationError
 from pullbox.services.intervention_service import (
     InterventionService,
     is_direct_pending_match,
@@ -263,6 +264,8 @@ async def approve_pending_match(
 
     try:
         approved = await svc.approve_match(session, pending_id)
+    except DirectArtifactValidationError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise NotFoundError("PendingMatch", pending_id) from exc
 

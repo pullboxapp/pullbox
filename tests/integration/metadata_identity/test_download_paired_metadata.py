@@ -260,8 +260,9 @@ async def test_nonzip_download_uses_paired_conversion_and_preserves_seed_origina
 
 
 @pytest.mark.usefixtures("paired_download_setting")
-async def test_import_rollback_owned_file_cannot_be_replaced_by_the_download(
-    identity_probe_db, tmp_path
+@pytest.mark.parametrize("import_status", [ImportJobStatus.COMPLETED, ImportJobStatus.IMPORTING])
+async def test_retry_with_lost_library_path_preserves_previous_publication(
+    identity_probe_db, tmp_path, import_status
 ):
     _, factory, _ = identity_probe_db
     download_id, issue_id, source = await completed_download(factory, tmp_path)
@@ -274,7 +275,7 @@ async def test_import_rollback_owned_file_cannot_be_replaced_by_the_download(
         job = ImportJob(
             source_path=str(source.parent),
             source_type=ImportSourceType.FILESYSTEM,
-            status=ImportJobStatus.COMPLETED,
+            status=import_status,
         )
         session.add(job)
         await session.flush()
@@ -297,12 +298,12 @@ async def test_import_rollback_owned_file_cannot_be_replaced_by_the_download(
         download.final_path = None
         download.replace_existing_file = True
     await drain(factory)
+    assert path.read_bytes() == before
+    assert source.read_bytes() == original
     async with factory() as session:
         download = await session.get(DownloadHistory, download_id)
         assert download.state is DownloadState.FAILED and download.imported_at is None
-        assert "protected by import rollback history" in download.error_message
-    assert path.read_bytes() == before
-    assert source.read_bytes() == original
+        assert "library-copy reference" in download.error_message
 
 
 @pytest.mark.usefixtures("paired_download_setting")

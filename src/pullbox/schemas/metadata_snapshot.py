@@ -39,6 +39,8 @@ class MetadataValues(BaseModel):
     year_end: int | None = Field(default=None, ge=1, le=9999, strict=True)
     volume: str | None = Field(default=None, max_length=100)
     series_type: str | None = Field(default=None, max_length=50)
+    # These embedded formats describe publication, not a library classification.
+    archive_format: Literal["Limited Series", "Digital Chapter"] | None = None
     status: str | None = Field(default=None, max_length=50)
     language: str | None = Field(default=None, max_length=100)
     issue_count: int | None = Field(default=None, ge=0, le=1000000, strict=True)
@@ -106,6 +108,7 @@ class FieldOrigin(BaseModel):
     source_updated_at: AwareDatetime | None = None
     observed_at: AwareDatetime
     user_override: bool = False
+    provider_managed: bool = Field(default=False, exclude_if=lambda value: not value)
     derivation: Literal["classification", "lifecycle", "catalog", "normalization"] | None = None
     embedded_documents: tuple[EmbeddedDocument, ...] = ()
     passive_release: PassiveReleaseOrigin | None = None
@@ -138,6 +141,16 @@ class MetadataSnapshot(BaseModel):
                 or origin.field in fields
                 or origin.domain is not field_domain(self.entity_kind, origin.field)
                 or (origin.user_override and origin.source is not None)
+                or (
+                    origin.provider_managed
+                    and (
+                        origin.user_override
+                        or origin.source is not None
+                        or origin.embedded_documents
+                        or origin.passive_release is not None
+                        or origin.derivation is not None
+                    )
+                )
                 or (
                     origin.embedded_documents
                     and (

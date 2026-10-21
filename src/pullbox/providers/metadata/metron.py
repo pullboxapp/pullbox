@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 _MAX_BYTES = 2 * 1024 * 1024
 _PAGE_SIZE = 100
 _REQUEST_TIMEOUT = 8.0
+_QUEUE_TIMEOUT = 3.0
 
 
 @dataclass(frozen=True)
@@ -217,34 +218,47 @@ class MetronSource:
     ) -> _Response:
         _validator(validator)
         try:
-            async with asyncio.timeout(_REQUEST_TIMEOUT):
-                for attempt in range(2):
+            for attempt in range(2):
+                try:
+                    if self.cooldown.remaining_seconds:
+                        raise MetadataSourceError(
+                            SourceStatus.RATE_LIMITED, self.cooldown.remaining_seconds
+                        )
                     try:
-                        async with self.cooldown.request_lock:
-                            if self.cooldown.remaining_seconds:
-                                raise MetadataSourceError(
-                                    SourceStatus.RATE_LIMITED, self.cooldown.remaining_seconds
-                                )
-                            delay = self.minimum_interval - (
-                                time.monotonic() - self.cooldown.last_request_time
+                        async with asyncio.timeout(_QUEUE_TIMEOUT):
+                            await self.cooldown.request_lock.acquire()
+                    except TimeoutError:
+                        raise MetadataSourceError(
+                            SourceStatus.RATE_LIMITED, 3, account_failure=False
+                        ) from None
+                    try:
+                        if self.cooldown.remaining_seconds:
+                            raise MetadataSourceError(
+                                SourceStatus.RATE_LIMITED, self.cooldown.remaining_seconds
                             )
-                            if delay > 0:
-                                await asyncio.sleep(delay)
-                            self.cooldown.last_request_time = time.monotonic()
+                        delay = self.minimum_interval - (
+                            time.monotonic() - self.cooldown.last_request_time
+                        )
+                        if delay > 0:
+                            await asyncio.sleep(delay)
+                        self.cooldown.last_request_time = time.monotonic()
+                        async with asyncio.timeout(_REQUEST_TIMEOUT):
                             return await self._exchange(path, params or {}, validator)
-                    except MetadataSourceError as exc:
-                        if (
-                            exc.status is not SourceStatus.UNAVAILABLE
-                            or exc.retry_after_seconds
-                            or attempt
-                        ):
-                            raise
-                    except httpx.TimeoutException:
-                        raise MetadataSourceError(SourceStatus.TIMEOUT) from None
-                    except (httpx.NetworkError, httpx.RemoteProtocolError):
-                        if attempt:
-                            raise MetadataSourceError(SourceStatus.UNAVAILABLE) from None
-                    await asyncio.sleep(0.1)
+                    finally:
+                        self.cooldown.request_lock.release()
+                except MetadataSourceError as exc:
+                    if (
+                        exc.status is not SourceStatus.UNAVAILABLE
+                        or exc.retry_after_seconds
+                        or attempt
+                    ):
+                        raise
+                except httpx.TimeoutException:
+                    raise MetadataSourceError(SourceStatus.TIMEOUT) from None
+                except (httpx.NetworkError, httpx.RemoteProtocolError):
+                    if attempt:
+                        raise MetadataSourceError(SourceStatus.UNAVAILABLE) from None
+                await asyncio.sleep(0.1)
         except TimeoutError:
             raise MetadataSourceError(SourceStatus.TIMEOUT) from None
         except httpx.HTTPError:

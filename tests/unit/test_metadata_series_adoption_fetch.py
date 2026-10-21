@@ -150,20 +150,46 @@ async def test_cross_page_consistency_is_required(mutation):
         await fetch(adapter)
 
 
-async def test_series_and_issue_count_disagreement_is_not_complete():
-    adapter = CatalogAdapter(0)
-    adapter.pages[1] = MetadataFetch(
-        status=SourceStatus.OK, data=MetadataPage(results=[issue_row()], total=1)
+@pytest.mark.parametrize("summary_count", [0, 1, 3, 10001, None])
+@pytest.mark.parametrize("catalog_count", [2, 101])
+async def test_stale_summary_does_not_reject_a_complete_catalog(summary_count, catalog_count):
+    adapter = CatalogAdapter(catalog_count)
+    profile = row(adapter.source).model_copy(update={"issue_count": summary_count})
+    try:
+        result = await fetch(adapter, profile=profile)
+    except SeriesAdoptionError as exc:
+        pytest.fail(f"A complete catalog must not be rejected for its stale summary: {exc}")
+    assert result.catalog_total == len(result.issues) == catalog_count
+    assert result.series.issue_count == summary_count, "Keep the original provider evidence"
+    assert adapter.calls == [
+        ("issues", "42", page) for page in range(1, (catalog_count + 99) // 100 + 1)
+    ]
+
+
+@pytest.mark.parametrize("problem", ["changed_total", "incomplete", "repeat_id", "wrong_parent"])
+async def test_stale_summary_never_excuses_an_invalid_catalog(problem):
+    adapter = CatalogAdapter(101)
+    profile = row(adapter.source).model_copy(update={"issue_count": 1})
+    item = issue_row(external_id="1100", issue_number_text="101", issue_number_key="101")
+    total = 102 if problem == "changed_total" else 101
+    if problem == "repeat_id":
+        item.external_id = "1000"
+    elif problem == "wrong_parent":
+        item.series_external_id = "99"
+    adapter.pages[2] = MetadataFetch(
+        status=SourceStatus.OK,
+        data=MetadataPage(results=[] if problem == "incomplete" else [item], total=total),
     )
-    with pytest.raises(SeriesAdoptionError, match="count"):
-        await fetch(adapter)
+    with pytest.raises(SeriesAdoptionError):
+        await fetch(adapter, profile=profile)
+    assert adapter.calls[-1] == ("issues", "42", 2)
 
 
-async def test_resource_cap_stops_before_issue_traversal():
+async def test_resource_cap_stops_after_first_page_without_traversing_catalog():
     adapter = CatalogAdapter(201)
     with pytest.raises(SeriesAdoptionError, match="limit"):
         await fetch(adapter, max_issues=200)
-    assert adapter.calls == [("series", "42")]
+    assert adapter.calls == [("series", "42"), ("issues", "42", 1)]
 
 
 async def test_total_deadline_bounds_traversal_and_closes_adapter():

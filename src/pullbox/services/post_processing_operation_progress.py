@@ -7,6 +7,10 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
+from pullbox.core.partial_issue import (
+    INCOMPLETE_RECOVERY_DISMISSED,
+    QUIET_METADATA_RECOVERY_MESSAGES,
+)
 from pullbox.models.download import DownloadClientType, DownloadState
 from pullbox.models.operation_progress import (
     OperationProgressState,
@@ -14,6 +18,7 @@ from pullbox.models.operation_progress import (
     OperationProgressType,
     OperationProgressVisibility,
 )
+from pullbox.services.direct_artifact_pack import PACK_FULFILLED_MESSAGE
 from pullbox.services.operation_progress import (
     OperationProgressMeasure,
     OperationProgressUpdate,
@@ -75,6 +80,12 @@ def build_post_processing_operation_update(
     download_client_value = _download_client_value(download.download_client)
     phase = _phase_value(snapshot)
     is_failed = DownloadState(download.state) is DownloadState.FAILED
+    superseded = (
+        is_failed
+        and download_client_value == "direct"
+        and getattr(download, "error_message", None)
+        in {PACK_FULFILLED_MESSAGE, *QUIET_METADATA_RECOVERY_MESSAGES}
+    )
     is_complete = phase == "import_complete" or getattr(download, "imported_at", None) is not None
     if is_failed:
         state = OperationProgressState.FAILED
@@ -105,14 +116,24 @@ def build_post_processing_operation_update(
         group_key="downloads",
         revision=None,
         state=state,
-        phase="failed" if is_failed else phase,
+        phase=(
+            "dismissed"
+            if superseded and download.error_message == INCOMPLETE_RECOVERY_DISMISSED
+            else "superseded"
+            if superseded
+            else "failed"
+            if is_failed
+            else phase
+        ),
         title=download.title,
         message=message or "Post-processing",
         source_label=_source_label(download.download_client),
         detail_url="/post-processing",
-        visibility=OperationProgressVisibility.PROMINENT,
-        tone=tone,
-        attention_required=is_failed,
+        visibility=OperationProgressVisibility.QUIET
+        if superseded
+        else OperationProgressVisibility.PROMINENT,
+        tone=OperationProgressTone.INFO if superseded else tone,
+        attention_required=is_failed and not superseded,
         overall=OperationProgressMeasure(
             current=current_bytes,
             total=total_bytes,

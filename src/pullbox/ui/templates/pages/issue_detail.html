@@ -20,6 +20,7 @@
     searchUrl: {{ ('/api/v1/issues/' ~ issue.id ~ '/download')|tojson|forceescape }},
     deleteFileUrl: {{ ('/api/v1/issues/' ~ issue.id ~ '/file')|tojson|forceescape }},
     importStartUrl: {{ ('/api/v1/issues/' ~ issue.id ~ '/import-file/start')|tojson|forceescape }},
+    importMetadataPreviewUrl: {{ ('/api/v1/issues/' ~ issue.id ~ '/import-file/metadata-preview')|tojson|forceescape }},
     importCancelUrl: {{ ('/api/v1/issues/' ~ issue.id ~ '/import-file/cancel')|tojson|forceescape }},
     importProgressUrl: {{ ('/api/v1/issues/' ~ issue.id ~ '/import-file/progress')|tojson|forceescape }},
     readerManifestUrl: {{ ('/api/v1/reader/issues/' ~ issue.id ~ '/manifest')|tojson|forceescape }},
@@ -65,6 +66,10 @@
   {% endif %}
 
   {% include "partials/issue_metadata_content.html" %}
+  <div x-show="replacementAction" x-cloak class="alert-banner alert-banner-warning flex flex-wrap items-center gap-3" role="status">
+    <span>Choose a complete replacement. The current file stays in place until replacement succeeds.</span>
+    <a href="/intervention?tab=recovery" hx-boost="false" class="btn-ghost btn-sm">Back to recovery</a>
+  </div>
   {% include "partials/issue_metadata_links.html" %}
   {% include "partials/issue_detail_library_file.html" %}
 

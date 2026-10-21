@@ -1,8 +1,12 @@
+<template x-teleport="body">
 <div
   class="modal-shell"
   x-cloak
   x-show="showImportModal()"
+  x-data="{ importFocusReturn: null }"
+  x-init="$watch('importModalOpen', value => { if (value) { importFocusReturn = document.activeElement; $nextTick(() => $refs.importDialog.focus({ preventScroll: true })); } else if (importFocusReturn && importFocusReturn.isConnected) { importFocusReturn.focus({ preventScroll: true }); } })"
   data-testid="issue-import-modal"
+  @keydown.escape.window="if (showImportModal() && importState !== 'running') cancelIssueImport()"
 >
   <div
     class="modal-backdrop"
@@ -12,15 +16,18 @@
   ></div>
 
   <div
-    class="modal-panel max-w-3xl"
+    class="modal-panel max-w-3xl max-h-[calc(100dvh-5rem)] min-h-0"
+    x-ref="importDialog" tabindex="-1"
+    role="dialog" aria-modal="true" aria-labelledby="issue-import-title"
+    @keydown.tab="trapImportFocus($event)"
     x-transition:enter="transition ease-out duration-200"
     x-transition:enter-start="opacity-0 translate-y-2 scale-95"
     x-transition:enter-end="opacity-100 translate-y-0 scale-100"
   >
-    <div class="modal-header">
+    <div class="modal-header shrink-0">
       <div class="space-y-1">
         <p class="text-[11px] font-medium uppercase tracking-[0.14em] text-pb-brand">Import file</p>
-        <h3 class="text-base font-semibold text-pb-text" data-testid="issue-import-modal-title">
+        <h3 id="issue-import-title" class="text-base font-semibold text-pb-text" data-testid="issue-import-modal-title">
           Import {{ issue.series.title }} #{{ issue.issue_number|issue_num(issue.issue_number_text|default(none)) }}
         </h3>
         <p class="text-xs leading-5 text-pb-text-dim">
@@ -34,7 +41,7 @@
       </div>
     </div>
 
-    <div class="modal-body">
+    <div class="modal-body min-h-0">
       <div class="space-y-4 px-5 py-5">
         <div class="grid gap-3 md:grid-cols-3">
           <div class="rounded-lg border border-pb-border bg-pb-card px-3 py-3">
@@ -51,7 +58,24 @@
           </div>
         </div>
 
-        <div class="space-y-3 rounded-xl border border-pb-border bg-pb-card/85 px-4 py-4 shadow-sm">
+        <div x-show="importState === 'metadata_review'" x-cloak class="space-y-3">
+          <p class="text-sm font-semibold text-pb-text" x-text="importMessage"></p>
+          <p class="text-sm text-pb-text-sec">Choose the values for the managed copy. The source file and library catalog metadata stay unchanged.</p>
+          <template x-for="conflict in (importMetadataPreview ? importMetadataPreview.conflicts : [])" :key="conflict.key">
+            <fieldset class="rounded-lg border border-pb-border p-3 space-y-2">
+              <legend class="text-sm font-semibold text-pb-text px-1" x-text="conflict.label"></legend>
+              <p class="text-sm text-pb-text-sec" x-show="conflict.note" x-text="conflict.note"></p>
+              <template x-for="option in conflict.options" :key="option.source">
+                <label class="flex items-start gap-3 rounded-lg border border-pb-border p-3 text-pb-text" :class="option.selectable ? 'cursor-pointer hover:bg-pb-interactive-dim' : 'text-pb-text-sec'">
+                  <input type="radio" class="checkbox-pb !rounded-full shrink-0 mt-1" :name="'import-metadata-' + conflict.key" :value="option.source" :aria-label="option.source + ': ' + option.value" x-model="importMetadataChoices[conflict.key]" :disabled="importing || !option.selectable">
+                  <span class="min-w-0 space-y-1"><span class="block text-xs font-semibold" x-text="option.source === 'library' ? 'Library' : option.source"></span><span class="block text-sm whitespace-pre-wrap break-words max-h-40 overflow-y-auto" x-text="option.value"></span></span>
+                </label>
+              </template>
+            </fieldset>
+          </template>
+        </div>
+
+        <div x-show="importState !== 'metadata_review'" class="space-y-3 rounded-xl border border-pb-border bg-pb-card/85 px-4 py-4 shadow-sm">
           <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div class="min-w-0 space-y-1.5">
               <p class="text-[11px] font-semibold uppercase tracking-[0.14em] text-pb-brand">Import progress</p>
@@ -68,18 +92,19 @@
             <div class="app-progress-track">
               <div
                 class="app-progress-fill app-progress-fill--interactive transition-all duration-300"
+                :class="{ 'is-indeterminate': importState === 'checking' }"
                 role="progressbar"
                 aria-label="Issue import progress"
                 aria-valuemin="0"
                 aria-valuemax="100"
-                x-bind:aria-valuenow="Math.max(0, Math.min(100, importCurrentFileProgress))"
-                x-bind:style="'width: ' + importCurrentFileProgress + '%'"
+                x-bind:aria-valuenow="importState === 'checking' ? null : Math.max(0, Math.min(100, importCurrentFileProgress))"
+                x-bind:style="importState === 'checking' ? '' : 'width: ' + importCurrentFileProgress + '%'"
               ></div>
             </div>
             <span
               class="app-progress-value app-progress-value--interactive"
               data-testid="issue-import-progress-value"
-              x-text="Math.max(0, Math.min(100, importCurrentFileProgress)) + '%'"
+              x-text="importState === 'checking' ? '' : Math.max(0, Math.min(100, importCurrentFileProgress)) + '%'"
             ></span>
           </div>
 
@@ -95,31 +120,33 @@
             x-text="importErrorMessage"
           ></p>
         </div>
-
-        <div class="modal-footer">
-          <button
-            type="button"
-            class="btn-warning btn-sm"
-            x-cloak
-            x-show="importState === 'safety_blocked'"
-            @click="retryImportWithSafetyException()"
-            x-bind:disabled="importing"
-          >
-            Allow once and retry import
-          </button>
-          <button
-            type="button"
-            class="btn-danger btn-sm"
-            data-testid="issue-import-cancel"
-            @click="cancelIssueImport()"
-            x-bind:disabled="cancellingImport || importState === 'completed'"
-            x-bind:aria-disabled="(cancellingImport || importState === 'completed') ? 'true' : 'false'"
-          >
-            <span x-show="!cancellingImport" x-text="importState === 'failed' || importState === 'safety_blocked' || importState === 'cancelled' ? 'Close' : 'Cancel import'">Cancel import</span>
-            <span x-show="cancellingImport">Cancelling…</span>
-          </button>
-        </div>
       </div>
+    </div>
+
+    <div class="modal-footer">
+      <button
+        type="button"
+        class="btn-warning btn-sm"
+        x-cloak
+        x-show="importState === 'safety_blocked'"
+        @click="retryImportWithSafetyException()"
+        x-bind:disabled="importing"
+      >
+        Allow once and retry import
+      </button>
+      <button
+        type="button"
+        class="btn-danger btn-sm"
+        data-testid="issue-import-cancel"
+        @click="cancelIssueImport()"
+        x-bind:disabled="cancellingImport || importState === 'completed'"
+        x-bind:aria-disabled="(cancellingImport || importState === 'completed') ? 'true' : 'false'"
+      >
+        <span x-show="!cancellingImport" x-text="['failed', 'safety_blocked', 'cancelled', 'metadata_review'].includes(importState) ? 'Close' : 'Cancel import'">Cancel import</span>
+        <span x-show="cancellingImport">Cancelling…</span>
+      </button>
+      <button type="button" class="btn-primary btn-sm" x-show="importState === 'metadata_review'" x-cloak :disabled="!canImportReviewedMetadata()" @click="submitImport(true)">Import reviewed file</button>
     </div>
   </div>
 </div>
+</template>

@@ -17,6 +17,8 @@ from pullbox.services.archive_metadata_binding import ArchiveMetadataBinding
 from pullbox.services.archive_metadata_preservation import ArchiveMetadataRenderError
 from pullbox.services.archive_metadata_reconciliation import ArchiveMetadataReconciliation
 from pullbox.services.archive_metadata_rendering import _series_separator_key
+from pullbox.services.archive_series_metadata import project_archive_series
+from pullbox.services.metadata_series_refresh_state import SeriesRefreshState
 
 _FIELDS = {
     "series": (
@@ -51,7 +53,7 @@ def _equal(field: str, source: FileMetadataSource, old: object, new: object) -> 
 
 
 def review_metadata_fields(
-    binding: ArchiveMetadataBinding,
+    binding: ArchiveMetadataBinding | SeriesRefreshState,
     archive: ArchiveMetadataReconciliation,
     series: MetadataSnapshot,
     issue: MetadataSnapshot,
@@ -61,14 +63,17 @@ def review_metadata_fields(
     conflicts: list[FileMetadataConflict] = []
     snapshots = {"series": series, "issue": issue}
     seen: set[str] = set()
+    metadata = binding.metadata if isinstance(binding, ArchiveMetadataBinding) else binding
     for kind, fields in _FIELDS.items():
-        current = binding.metadata.series if kind == "series" else binding.metadata.issues[0]
+        current = metadata.series if kind == "series" else metadata.issues[0]
         snapshot = snapshots[kind]
         values = snapshot.values.model_dump()
         origins = {item.field: item for item in snapshot.origins}
         for field in fields:
             key = cast("FileMetadataField", f"{kind}.{field}")
             options: dict[FileMetadataSource, object] = {"library": getattr(current.values, field)}
+            if kind == "series" and field == "series_type" and current.values.archive_format:
+                options["library"] = current.values.archive_format
             for source, document in (
                 ("ComicInfo.xml", archive.comicinfo),
                 ("MetronInfo.xml", archive.metroninfo),
@@ -77,6 +82,8 @@ def review_metadata_fields(
                 if old is not None:
                     options[cast("FileMetadataSource", source)] = old
             proposed = getattr(snapshot.values, field)
+            if kind == "series" and field == "series_type" and snapshot.values.archive_format:
+                proposed = snapshot.values.archive_format
             disagrees = any(
                 source != "library" and not _equal(field, source, old, proposed)
                 for source, old in options.items()
@@ -98,12 +105,18 @@ def review_metadata_fields(
                 )
             if (
                 kind == "series"
-                and field == "title"
+                and field in {"title", "sort_title"}
                 and isinstance(proposed, str)
-                and any(item.identity in issue.identities for item in archive.evidence)
                 and all(
                     isinstance(old, str)
-                    and _series_separator_key(old) == _series_separator_key(proposed)
+                    and (
+                        old.strip() == proposed.strip()
+                        or (
+                            field == "title"
+                            and any(item.identity in issue.identities for item in archive.evidence)
+                            and _series_separator_key(old) == _series_separator_key(proposed)
+                        )
+                    )
                     for source, old in options.items()
                     if source != "library"
                 )
@@ -142,16 +155,26 @@ def review_metadata_fields(
             conflicts.append(
                 FileMetadataConflict(
                     key=key,
-                    label=f"{kind.title()} {field.replace('_', ' ')}",
+                    label="Embedded format"
+                    if field == "series_type"
+                    else f"{kind.title()} {field.replace('_', ' ')}",
                     options=display,
                     selected=selected,
                     note="Issue count comes from the library catalog; file counts cannot change it."
                     if field == "issue_count"
+                    else (
+                        "Limited Series and Digital Chapter are embedded formats; "
+                        "choosing them keeps the library classification unchanged."
+                    )
+                    if field == "series_type"
                     else "",
                 )
             )
             if selected is not None:
                 values[field] = options[selected]
+                if kind == "series" and field == "series_type":
+                    values["archive_format"] = None
+                    origins.pop("archive_format", None)
                 origins[field] = FieldOrigin(
                     field=field,
                     domain=field_domain(snapshot.entity_kind, field),
@@ -165,7 +188,11 @@ def review_metadata_fields(
                 "origins": tuple(origins.values()),
             }
         )
-    if set(choices) - seen:
+    if {key for key in choices if not key.startswith("xml.")} - seen:
         raise ArchiveMetadataRenderError("choices_changed")
     assert snapshots["series"].entity_kind is MetadataEntityKind.SERIES
-    return snapshots["series"], snapshots["issue"], conflicts
+    return (
+        project_archive_series(snapshots["series"], metadata.series.values),
+        snapshots["issue"],
+        conflicts,
+    )

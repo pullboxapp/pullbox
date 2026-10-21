@@ -64,7 +64,10 @@ from pullbox.tasks.download_post_processing_destination import (
     find_existing_destination_file,
     register_existing_destination_file,
 )
-from pullbox.tasks.download_post_processing_metadata import finish_download_metadata
+from pullbox.tasks.download_post_processing_metadata import (
+    finish_download_metadata,
+    require_unpublished_download,
+)
 from pullbox.tasks.download_post_processing_runtime import PostProcessingRuntime
 from pullbox.tasks.download_post_processing_source_validation import (
     ResolveLocalPath,
@@ -287,6 +290,21 @@ async def monitor_downloads() -> None:
     recovery_due = recovery_checked_at - _last_recovery_check >= _RECOVERY_CHECK_INTERVAL
     direct_retried = 0
     if recovery_due:
+        from pullbox.services.download_operation_reconciliation import reconcile_download_operations
+
+        async with factory() as repair_session:
+
+            async def repair_activity() -> int:
+                return await reconcile_download_operations(repair_session)
+
+            repaired = await run_sqlite_transaction_with_retry(
+                repair_session,
+                repair_activity,
+                event_name="download_activity_reconciliation",
+                logger=logger,
+            )
+        if repaired:
+            logger.info("download_activity_reconciled", repaired=repaired)
         direct_retried = await _process_direct_retry_pending()
 
     # ── Phase 1: Read — load active downloads and build registry ──
@@ -499,6 +517,9 @@ async def _run_post_processing(
             trace.finalize_current_phase()
             runtime.emit_summary(outcome="success")
             return
+
+        if paired_metadata:
+            await require_unpublished_download(session, download)
 
         source_validation = await resolve_and_validate_source(
             session=session,

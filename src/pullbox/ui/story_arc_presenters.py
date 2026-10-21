@@ -43,6 +43,7 @@ from pullbox.services.story_arc_placement_integration import (
     StoryArcPlacementView,
 )
 from pullbox.services.story_arc_search_targets import load_story_arc_search_eligible_counts
+from pullbox.services.story_arc_sync_recovery import current_story_arc_sync_work_ids
 from pullbox.ui.reading_presenters import IssueReadingView, present_issue_reading
 
 if TYPE_CHECKING:
@@ -411,10 +412,15 @@ def _sync_failure_counts_subquery() -> Subquery:
     return (
         select(
             IssueStoryArc.story_arc_id.label("story_arc_id"),
-            func.count(StoryArcSyncWork.id).label("sync_failure_count"),
+            func.count(func.distinct(StoryArcSyncWork.issue_story_arc_id)).label(
+                "sync_failure_count"
+            ),
         )
         .join(StoryArcSyncWork, StoryArcSyncWork.issue_story_arc_id == IssueStoryArc.id)
-        .where(StoryArcSyncWork.state == StoryArcSyncWorkState.FAILED)
+        .where(
+            StoryArcSyncWork.state == StoryArcSyncWorkState.FAILED,
+            StoryArcSyncWork.id.in_(current_story_arc_sync_work_ids(include_imports=True)),
+        )
         .group_by(IssueStoryArc.story_arc_id)
         .subquery()
     )
@@ -961,11 +967,14 @@ async def load_story_arc_detail(
     )
     sync_failure_count = int(
         await session.scalar(
-            select(func.count(StoryArcSyncWork.id))
+            select(func.count(func.distinct(StoryArcSyncWork.issue_story_arc_id)))
             .join(IssueStoryArc, IssueStoryArc.id == StoryArcSyncWork.issue_story_arc_id)
             .where(
                 IssueStoryArc.story_arc_id == story_arc_id,
                 StoryArcSyncWork.state == StoryArcSyncWorkState.FAILED,
+                StoryArcSyncWork.id.in_(
+                    current_story_arc_sync_work_ids(story_arc_id, include_imports=True)
+                ),
             )
         )
         or 0

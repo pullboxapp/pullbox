@@ -146,7 +146,7 @@ def test_duplicate_rich_fields_remain_ambiguous(xml: str, locator: str) -> None:
             "Credits/Credit[1]/Creator",
         ),
         ('<Tags><Tag id="' + "x" * 4097 + '">A</Tag></Tags>', "Tags/Tag[1]/@id"),
-        ("<Summary>" + "x" * 4097 + "</Summary>", "Summary"),
+        ("<Summary>" + "x" * 200001 + "</Summary>", "Summary"),
     ],
 )
 def test_malformed_rich_fields_report_safe_locators(xml: str, locator: str) -> None:

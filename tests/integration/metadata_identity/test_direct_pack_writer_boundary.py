@@ -436,6 +436,7 @@ async def test_pack_size_approval_is_bound_to_pack_and_never_waives_dangerous_co
         attempt.plan_snapshot = {
             **attempt.plan_snapshot,
             "safety_review": {
+                "kind": "archive_decompressed_size",
                 "overrideable": True,
                 "allowed_once": True,
                 "source_signature": build_file_identity_signature(source),

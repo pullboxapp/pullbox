@@ -18,5 +18,6 @@
     x-data="interventionPage({ csrfToken: '{{ csrf_token }}', bulkActionsEnabled: {{ 'false' if tab == 'recovery' else 'true' }} })"
   >
     {% include "partials/intervention_results.html" %}
+    {% with recovery_mode=true %}{% include "partials/issue_file_metadata.html" %}{% endwith %}
   </div>
 {% endif %}

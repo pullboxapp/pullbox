@@ -5,13 +5,19 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
-from pullbox.models.download import DownloadState
+from pullbox.core.partial_issue import (
+    INCOMPLETE_RECOVERY_DISMISSED,
+    QUIET_METADATA_RECOVERY_MESSAGES,
+)
+from pullbox.models.download import DownloadClientType, DownloadState
 from pullbox.models.operation_progress import (
     OperationProgressState,
     OperationProgressTone,
     OperationProgressType,
     OperationProgressVisibility,
 )
+from pullbox.services.airdcpp_recovery import RECOVERY_LINK, RECOVERY_MESSAGES
+from pullbox.services.direct_artifact_pack import PACK_FULFILLED_MESSAGE
 from pullbox.services.operation_progress import (
     OperationProgressMeasure,
     OperationProgressUpdate,
@@ -21,6 +27,8 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from pullbox.models.download import DownloadHistory
+
+CANCELLED_DOWNLOAD_MESSAGES = ("Cancelled by user", "Cancelled: series deleted")
 
 
 def _progress_value(progress: Any, name: str, default: object = None) -> object:
@@ -69,12 +77,23 @@ def _default_source_label(download: DownloadHistory) -> str:
     return download.download_client.value.replace("_", " ").title()
 
 
+def download_was_cancelled(download: DownloadHistory) -> bool:
+    """Cancellation uses FAILED in the legacy download model, but is not an alert."""
+    return (
+        download.state == DownloadState.FAILED
+        and download.error_message in CANCELLED_DOWNLOAD_MESSAGES
+    )
+
+
 def build_download_operation_update(
     download: DownloadHistory,
     progress: Any | None = None,
 ) -> OperationProgressUpdate:
     """Build a truthful download projection from durable state and client metrics."""
     shared_state = _shared_state(DownloadState(download.state))
+    source_label = _progress_value(progress, "source_label") if progress is not None else None
+    if download_was_cancelled(download):
+        shared_state = OperationProgressState.CANCELLED
     size_bytes = _int_value(
         _progress_value(progress, "size_bytes") if progress is not None else None
     )
@@ -96,10 +115,27 @@ def build_download_operation_update(
         percent = 100.0
 
     client_state = _progress_value(progress, "client_state") if progress is not None else None
-    source_label = _progress_value(progress, "source_label") if progress is not None else None
+    recovery_required = download.error_message in RECOVERY_MESSAGES.values()
+    superseded = (
+        download.download_client is DownloadClientType.AIRDCPP
+        and download.error_message
+        == "AirDC++ merged this request into an existing Pullbox download."
+    ) or (
+        download.download_client is DownloadClientType.DIRECT
+        and download.error_message in {PACK_FULFILLED_MESSAGE, *QUIET_METADATA_RECOVERY_MESSAGES}
+    )
+    if client_state:
+        client_state = {
+            "mutation_pending": "Sending to AirDC++",
+            "retry_mutation_pending": "Sending to AirDC++",
+            "recovery_check_pending": "Checking AirDC++",
+        }.get(str(client_state).lower().replace(" ", "_"), client_state)
     source_slow = (
         bool(_progress_value(progress, "source_slow", False)) if progress is not None else False
     )
+    if shared_state.is_terminal:
+        client_state = None
+        source_slow = False
     rate = _float_value(_progress_value(progress, "speed_bytes")) if progress is not None else None
     eta_seconds = (
         _int_value(_progress_value(progress, "eta_seconds")) if progress is not None else None
@@ -110,7 +146,7 @@ def build_download_operation_update(
     elif eta_seconds is not None and eta_seconds <= 0:
         eta_seconds = None
 
-    attention_required = shared_state is OperationProgressState.FAILED
+    attention_required = shared_state is OperationProgressState.FAILED and not superseded
     tone = OperationProgressTone.INFO
     if attention_required:
         tone = OperationProgressTone.DANGER
@@ -128,12 +164,29 @@ def build_download_operation_update(
         group_key="downloads",
         revision=None,
         state=shared_state,
-        phase=str(client_state or download.state.value).lower().replace(" ", "_"),
+        phase=str(
+            (
+                "dismissed"
+                if superseded and download.error_message == INCOMPLETE_RECOVERY_DISMISSED
+                else "superseded"
+                if superseded
+                else client_state
+            )
+            or (
+                "cancelled"
+                if shared_state is OperationProgressState.CANCELLED
+                else download.state.value
+            )
+        )
+        .lower()
+        .replace(" ", "_"),
         title=download.title,
         message=str(client_state or download.error_message or ""),
         source_label=str(source_label or _default_source_label(download)),
-        detail_url="/downloads",
-        visibility=OperationProgressVisibility.PROMINENT,
+        detail_url=RECOVERY_LINK if recovery_required else "/downloads",
+        visibility=OperationProgressVisibility.QUIET
+        if superseded
+        else OperationProgressVisibility.PROMINENT,
         tone=tone,
         attention_required=attention_required,
         overall=OperationProgressMeasure(

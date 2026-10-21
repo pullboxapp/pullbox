@@ -7,7 +7,7 @@ import os
 import stat
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
@@ -327,7 +327,11 @@ def _require_registered_folder(descriptor: int, location: SidecarLocation) -> No
                 )
 
 
-def _inspect(binding: SidecarBinding, location: SidecarLocation) -> SidecarTarget:
+def _inspect(
+    binding: SidecarBinding,
+    location: SidecarLocation,
+    edited_fields: frozenset[str] = frozenset(),
+) -> SidecarTarget:
     if not location.managed:
         return SidecarTarget(
             location,
@@ -344,7 +348,11 @@ def _inspect(binding: SidecarBinding, location: SidecarLocation) -> SidecarTarge
             _require_registered_folder(descriptor, location)
             previous, fingerprint = _existing(descriptor)
             content = render_series_sidecar(
-                binding.snapshot, binding.aliases, previous, updated_at=binding.updated_at
+                binding.snapshot,
+                binding.aliases,
+                previous,
+                updated_at=binding.updated_at,
+                edited_fields=edited_fields,
             )
             unchanged = previous is not None and json.loads(previous) == json.loads(content)
             read = SeriesSidecarTargetRead(
@@ -401,6 +409,101 @@ async def prepare_series_sidecar(session: AsyncSession, series_id: int) -> Prepa
 
 def _inspect_all(binding: SidecarBinding) -> list[SidecarTarget]:
     return [_inspect(binding, location) for location in binding.locations]
+
+
+async def read_series_sidecar_binding(session: AsyncSession, series_id: int) -> SidecarBinding:
+    """Read the bounded binding without committing the caller's transaction."""
+    return await _binding(session, series_id)
+
+
+async def inspect_series_sidecar_binding(
+    binding: SidecarBinding, edited_fields: frozenset[str] = frozenset()
+) -> tuple[SidecarTarget, ...]:
+    return tuple(
+        await asyncio.to_thread(
+            lambda: [_inspect(binding, location, edited_fields) for location in binding.locations]
+        )
+    )
+
+
+def _stage_or_replay(target: SidecarTarget) -> tuple[int, str]:
+    with _directory(target.location) as (descriptor, directories):
+        if directories != target.directories:
+            raise ValueError("The sidecar folder changed. Preview again.")
+        if _existing(descriptor)[0] == target.content:
+            return os.dup(descriptor), ""
+    return _stage(target)
+
+
+async def write_editor_sidecar_target(
+    session: AsyncSession,
+    binding: SidecarBinding,
+    target: SidecarTarget,
+    edited_fields: frozenset[str],
+) -> SeriesSidecarTargetRead:
+    """Replay one retained destination, never discover or approve additional folders."""
+    descriptor: int | None = None
+    stage = ""
+    try:
+        expected = render_series_sidecar(
+            binding.snapshot,
+            binding.aliases,
+            target.previous,
+            updated_at=binding.updated_at,
+            edited_fields=edited_fields,
+        )
+        if target.content != expected or target.read.action not in {"create", "update"}:
+            raise ValueError("The retained sidecar plan is invalid. Preview again.")
+        descriptor, stage = await asyncio.to_thread(_stage_or_replay, target)
+        await lock_file_mutation_admission(session)
+        await ensure_no_active_import_file_mutation(session)
+        await session.execute(
+            select(Series.id).where(Series.id == binding.series_id).with_for_update()
+        )
+        current = await _binding(session, binding.series_id)
+        if replace(current, snapshot=binding.snapshot) != binding or target.location not in (
+            location for location in current.locations if location.managed
+        ):
+            raise ValueError("Saved library metadata or folder ownership changed. Preview again.")
+        await require_no_archive_publication(
+            session, Path(target.location.directory), include_descendants=True
+        )
+
+        def publish() -> None:
+            assert descriptor is not None
+            if stage:
+                _publish(target, descriptor, stage)
+            else:
+                with _directory(target.location) as (current_fd, directories):
+                    if directories != target.directories or _existing(current_fd)[0] != expected:
+                        raise ValueError("The sidecar changed before recovery. Preview again.")
+                    _require_registered_folder(current_fd, target.location)
+            os.fsync(descriptor)
+
+        await asyncio.to_thread(publish)
+        return target.read.model_copy(update={"action": "unchanged", "changes": []})
+    except (ValueError, ValidationError, OSError) as exc:
+        return target.read.model_copy(
+            update={
+                "action": "blocked",
+                "reason": (
+                    "Library metadata is saved. Sidecar writing needs retry; "
+                    "check permissions and free space."
+                )
+                if isinstance(exc, OSError)
+                else str(exc),
+            }
+        )
+    finally:
+        await session.rollback()
+        if descriptor is not None:
+            try:
+                if stage:
+                    os.unlink(stage, dir_fd=descriptor)
+            except FileNotFoundError:
+                pass
+            finally:
+                os.close(descriptor)
 
 
 def _stage(target: SidecarTarget) -> tuple[int, str]:

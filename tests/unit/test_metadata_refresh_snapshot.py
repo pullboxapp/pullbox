@@ -134,6 +134,37 @@ async def test_explicit_refresh_requests_replacements_for_inferred_metadata():
     assert not adapters[METRON].calls
 
 
+@pytest.mark.parametrize("replace_managed", [True, False])
+async def test_reset_nonempty_field_fetches_only_on_replacing_refresh(replace_managed):
+    from pullbox.schemas.metadata_snapshot import FieldOrigin, MetadataSnapshot, MetadataValues
+
+    registry, adapters = setup()
+    before = MetadataSnapshot(
+        entity_kind=Kind.SERIES,
+        identities=(identity(CV), identity(METRON)),
+        values=MetadataValues(title="Former manual correction"),
+        origins=(
+            FieldOrigin(
+                field="title",
+                domain=Domain.CORE,
+                observed_at=NOW,
+                provider_managed=True,
+            ),
+        ),
+    )
+    result = await fetch(
+        registry,
+        current=before.values,
+        previous=before,
+        replace_managed=replace_managed,
+    )
+    assert result.snapshot.values.title == (
+        "Primary" if replace_managed else "Former manual correction"
+    )
+    assert adapters[CV].calls == ([("series", "42", None)] if replace_managed else [])
+    assert not adapters[METRON].calls
+
+
 async def test_background_already_populated_or_protected_fields_need_no_network():
     registry, adapters = setup()
     before = assemble([row(CV, title="Saved")])

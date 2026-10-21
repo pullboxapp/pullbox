@@ -25,10 +25,12 @@ from pullbox.services.archive_metadata_publication import (
     _stat_fingerprint,
     load_archive_publication,
 )
+from pullbox.services.archive_series_metadata import project_archive_series
 from pullbox.services.import_archive_publication import (
     acknowledge_import_archive_publication,
     require_import_archive_owner,
 )
+from pullbox.services.import_file_edit_history import record_post_import_edit
 from pullbox.services.metadata_baselines import MetadataBaselineWrite, save_metadata_baselines
 from pullbox.services.metadata_credits import write_issue_credits
 from pullbox.services.metadata_entity_values import (
@@ -46,6 +48,7 @@ async def apply_bound_archive_metadata(
 ) -> None:
     """Apply a proven publication's descriptive values without changing identities/counts."""
     bound = binding.metadata
+    series_snapshot = project_archive_series(series_snapshot, bound.series.values)
     if (
         not series_snapshot.values.title
         or not series_snapshot.values.sort_title
@@ -131,7 +134,10 @@ async def finalize_archive_publication(
         await require_import_archive_owner(session, plan)
         await revalidate_archive_metadata_target(session, plan.target)
         modified_at = await _file_work(lambda stop: _check_output(receipt, inspection))
-        await apply_bound_archive_metadata(session, plan.target.binding, plan.series, plan.issue)
+        if plan.propagation_fields is None:
+            await apply_bound_archive_metadata(
+                session, plan.target.binding, plan.series, plan.issue
+            )
         file = await session.get(LibraryFile, plan.target.binding.library_file_id)
         assert file is not None
         assert inspection.fingerprint is not None
@@ -139,6 +145,10 @@ async def finalize_archive_publication(
         file.file_modified_at = modified_at
         file.file_hash = plan.output_digest
         file.has_comicinfo = True
+        if plan.import_owner is None:
+            await record_post_import_edit(
+                session, file.id, kind="metadata", operation_id=receipt.operation_id
+            )
         await acknowledge_import_archive_publication(session, receipt)
         await session.flush()
         await _file_work(lambda stop: _check_output(receipt, inspection))

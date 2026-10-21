@@ -241,6 +241,7 @@ async def _run_issue_import(issue_id: int, request_payload: dict[str, Any]) -> N
                 session,
                 prepared,
                 allow_resource_safety_exception=request.allow_resource_safety_exception,
+                metadata_approval=request.metadata_approval,
                 preparation_progress_callback=emit_stage_progress,
                 transfer_progress_callback=lambda current, total: emit_stage_progress(
                     stage="transferring",
@@ -259,6 +260,9 @@ async def _run_issue_import(issue_id: int, request_payload: dict[str, Any]) -> N
             cancel_requested_after_file_work = issue_id in _issue_import_cancel_requests
             _issue_import_cancel_requests.discard(issue_id)
             await session.commit()
+            from pullbox.services.direct_metadata_recovery import reconcile_metadata_replacements
+
+            await reconcile_metadata_replacements(session, issue_id)
             completed = _set_issue_import_state(
                 issue_id,
                 state="completed",

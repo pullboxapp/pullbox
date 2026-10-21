@@ -5,7 +5,7 @@
   {"led": "green" if story_arc.monitored and story_arc.active else "off", "label": "status", "value": "Monitored" if story_arc.monitored and story_arc.active else "Paused"},
   {"label": "acquisition", "value": story_arc.acquisition_pct|string ~ "%"},
   {"label": "owned", "value": _owned_label},
-  {"label": "review", "value": story_arc.review_count|string},
+  {"label": "review", "value": story_arc.review_count|string, "value_id": "story-arc-review-footer"},
   {"label": "cvid", "value": story_arc.comicvine_id|string if story_arc.comicvine_id else "Unlinked"},
 ] %}
 

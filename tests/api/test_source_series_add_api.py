@@ -43,13 +43,12 @@ async def source_add_setup(authenticated_client, sec_db, monkeypatch, tmp_path):
         root_id = root.id
     calls = []
     responses = []
+    profile = {**series_row(8), "name": "Fixture 8", "cv_id": None, "gcd_id": None}
 
     def handle(request):
         calls.append(request)
         if request.url.path == "/api/series/8/":
-            return httpx.Response(
-                200, json={**series_row(8), "name": "Fixture 8", "cv_id": None, "gcd_id": None}
-            )
+            return httpx.Response(200, json=profile)
         assert request.url.path == "/api/series/8/issue_list/"
         if responses:
             return responses.pop(0)
@@ -106,6 +105,7 @@ async def source_add_setup(authenticated_client, sec_db, monkeypatch, tmp_path):
         },
         "calls": calls,
         "responses": responses,
+        "profile": profile,
         "events": events,
         "root": root_path,
     }
@@ -134,6 +134,47 @@ async def test_add_native_series_uses_full_server_catalog_and_is_repeat_safe(
     async with sec_db() as session:
         assert await session.scalar(select(func.count()).select_from(Series)) == 1
         assert await session.scalar(select(func.count()).select_from(Issue)) == 3
+
+
+@pytest.mark.parametrize("invalid_after_preview", [False, True])
+@pytest.mark.parametrize("summary_count", [1, 1000001, 1000000000])
+async def test_stale_summary_preview_and_final_add_revalidate_the_catalog(
+    authenticated_client, source_add_setup, sec_db, invalid_after_preview, summary_count
+):
+    fixture = source_add_setup
+    fixture["profile"]["issue_count"] = summary_count
+    complete = envelope([issue_row(100, "1"), issue_row(101, "2")])
+    fixture["responses"].append(httpx.Response(200, json=complete))
+    preview = await authenticated_client.post(
+        "/api/v1/metadata/series/preview",
+        json={key: value for key, value in fixture["body"].items() if key != "source_revision"},
+        headers=csrf(authenticated_client),
+    )
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["issues"]["data"]["total"] == 2
+    assert preview.json()["series"]["data"]["issue_count"] == summary_count
+    assert not list(fixture["root"].iterdir())
+    latest = {**complete, "count": 3} if invalid_after_preview else complete
+    fixture["responses"].append(httpx.Response(200, json=latest))
+    added = await authenticated_client.post(
+        "/api/v1/series", json=fixture["body"], headers=csrf(authenticated_client)
+    )
+    assert added.status_code == (409 if invalid_after_preview else 201), added.text
+    assert [call.url.path for call in fixture["calls"]] == [
+        "/api/series/8/",
+        "/api/series/8/issue_list/",
+        "/api/series/8/",
+        "/api/series/8/issue_list/",
+    ]
+    async with sec_db() as session:
+        assert await session.scalar(select(func.count()).select_from(Issue)) == (
+            0 if invalid_after_preview else 2
+        )
+    if invalid_after_preview:
+        assert not fixture["events"] and not list(fixture["root"].iterdir())
+    else:
+        assert added.json()["issue_count"] == 2
+        assert len(fixture["events"]) == 1
 
 
 @pytest.mark.parametrize(

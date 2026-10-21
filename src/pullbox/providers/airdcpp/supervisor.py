@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
     from pullbox.providers.airdcpp.contracts import (
         AirDcppAuthenticationInfo,
+        AirDcppQueueBundle,
         AirDcppQueueBundleAddInfo,
         AirDcppQueueFile,
         AirDcppSession,
@@ -117,6 +118,8 @@ class AirDcppSupervisorApi(Protocol):
     ) -> AirDcppQueueBundleAddInfo: ...
 
     async def get_queue_files_by_tth(self, tth: str) -> list[AirDcppQueueFile]: ...
+
+    async def get_queue_bundle(self, bundle_id: int) -> AirDcppQueueBundle: ...
 
     async def create_file_bundle(
         self,

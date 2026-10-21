@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from pullbox.core.exceptions import ValidationError
 from pullbox.core.file_publication import publish_file_without_overwrite
 from pullbox.core.metadata_identity import ExternalIdentityRef
+from pullbox.schemas.issue_file_metadata import SharedXmlChoices
 from pullbox.schemas.metadata_snapshot import MetadataSnapshot
 from pullbox.services.archive_metadata_binding import (
     FileFingerprint,
@@ -194,6 +195,7 @@ async def prepare_conversion(
     metadata_policy_limit: int | None = None,
     block_dangerous: bool = True,
     reviewed: tuple[MetadataSnapshot, MetadataSnapshot] | None = None,
+    shared_choices: SharedXmlChoices | None = None,
     primary_identity: ExternalIdentityRef | None = None,
     expected_source: FileFingerprint | None = None,
     check_control: ControlCheck | None = None,
@@ -243,6 +245,7 @@ async def prepare_conversion(
                 previous_issue=metadata_state.issues[0].baseline,
                 cancellation_check=check_control,
                 progress_callback=progress,
+                shared_choices=shared_choices,
             ) as staged:
                 staged.check_unchanged()
                 await asyncio.to_thread(publish_file_without_overwrite, staged.path, output_stage)

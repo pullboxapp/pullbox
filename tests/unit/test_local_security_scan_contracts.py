@@ -149,101 +149,7 @@ def test_local_and_remote_scanners_share_pins_and_blocking_policy() -> None:
     assert 'bash scripts/run_secret_scans.sh "$(GITLEAKS)" "$(SECRET_SCAN_BASE)"' in makefile
 
 
-def test_approved_glibc_exceptions_are_exact_version_and_package_scoped() -> None:
-    config = yaml.safe_load((ROOT / ".grype.yaml").read_text())
-    approved_cves = {"CVE-2026-5435", "CVE-2026-5450", "CVE-2026-5928"}
-    entries = [entry for entry in config["ignore"] if entry["vulnerability"] in approved_cves]
-    assert len(entries) == 21
-    assert {
-        (entry["vulnerability"], entry["package"]["name"], entry["package"]["version"])
-        for entry in entries
-    } == {
-        (cve, package, version)
-        for cve in approved_cves
-        for package in ("libc6", "libc6-dev", "libc-dev-bin")
-        for version in ("2.41-12+deb13u3+dhi1", "2.41-12+deb13u3+dhi2")
-    } | {
-        ("CVE-2026-5435", "libc6", "2.41-12+deb13u4"),
-        ("CVE-2026-5435", "libc6", "2.41-12+deb13u4+dhi0"),
-        ("CVE-2026-5435", "^libc6$", "2.41-12+deb13u4+dhi1"),
-    }
-    assert all(entry["package"]["type"] == "deb" for entry in entries)
-
-
-def test_september_glibc_renewals_cover_only_the_approved_runtime_revision() -> None:
-    config_text = (ROOT / ".grype.yaml").read_text()
-    config = yaml.safe_load(config_text)
-    entries = [
-        entry for entry in config["ignore"] if entry["package"]["version"] == "2.41-12+deb13u4+dhi0"
-    ]
-
-    assert entries == [
-        {
-            "vulnerability": "CVE-2026-5435",
-            "package": {"name": "libc6", "version": "2.41-12+deb13u4+dhi0", "type": "deb"},
-        },
-        {
-            "vulnerability": "CVE-2026-19499",
-            "package": {"name": "libc6", "version": "2.41-12+deb13u4+dhi0", "type": "deb"},
-        },
-    ]
-    assert "Renewed by Adam Hernandez on 2026-09-14" in config_text
-    assert "2026-09-30" in config_text
-    assert "NOT a fix" in config_text
-
-
-def test_strfmon_exception_is_limited_to_the_approved_package_and_review_deadline() -> None:
-    config_text = (ROOT / ".grype.yaml").read_text()
-    config = yaml.safe_load(config_text)
-    entries = [entry for entry in config["ignore"] if entry["vulnerability"] == "CVE-2026-19499"]
-    assert len(entries) == 2
-    assert {
-        (entry["package"]["name"], entry["package"]["version"], entry["package"]["type"])
-        for entry in entries
-    } == {
-        ("libc6", "2.41-12+deb13u4+dhi0", "deb"),
-        ("^libc6$", "2.41-12+deb13u4+dhi1", "deb"),
-    }
-    assert "Approved by Adam Hernandez on 2026-09-15" in config_text
-    assert "strfmon/strfmon_l" in config_text
-    assert "reachability remains unproven" in config_text
-    assert "2026-09-30 or the next base refresh, whichever comes first" in config_text
-
-
-def test_september_26_runtime_refresh_exceptions_are_exact_and_expiring() -> None:
-    config_text = (ROOT / ".grype.yaml").read_text()
-    config = yaml.safe_load(config_text)
-    versions = {"2.41-12+deb13u4+dhi1", "2.8.3-1~deb13u1+dhi4"}
-    entries = [entry for entry in config["ignore"] if entry["package"]["version"] in versions]
-
-    assert {
-        (
-            entry["vulnerability"],
-            entry["package"]["name"],
-            entry["package"]["version"],
-            entry["package"]["type"],
-        )
-        for entry in entries
-    } == {
-        ("CVE-2026-5435", "^libc6$", "2.41-12+deb13u4+dhi1", "deb"),
-        ("CVE-2026-19499", "^libc6$", "2.41-12+deb13u4+dhi1", "deb"),
-        *{
-            (cve, "libexpat1", "2.8.3-1~deb13u1+dhi4", "deb")
-            for cve in (
-                "CVE-2026-66046",
-                "CVE-2026-76956",
-                "CVE-2026-76957",
-                "CVE-2026-93990",
-            )
-        },
-    }
-    assert "Approved by Adam Hernandez on 2026-09-26" in config_text
-    assert "2026-09-30" in config_text
-    assert "2026-10-07" in config_text
-    assert "NOT fixes" in config_text
-
-
-def test_october_renewals_and_expat_exception_are_limited_to_eighteen_exact_matches() -> None:
+def test_release_exceptions_are_limited_to_seventeen_exact_matches() -> None:
     config_text = (ROOT / ".grype.yaml").read_text()
     config = yaml.safe_load(config_text)
     expected = (
@@ -254,21 +160,17 @@ def test_october_renewals_and_expat_exception_are_limited_to_eighteen_exact_matc
         }
         | {(cve, "libc6", "2.41-12+deb13u4+dhi1") for cve in ("CVE-2026-5435", "CVE-2026-19499")}
         | {
-            (cve, "libexpat1", "2.8.3-1~deb13u1+dhi5")
-            for cve in ("CVE-2026-66046", "CVE-2026-76956", "CVE-2026-76957", "CVE-2026-93990")
-        }
-        | {
             (cve, "libuuid1", "2.41.5-0+deb13u1+dhi3")
             for cve in ("CVE-2026-76642", "CVE-2026-78408", "CVE-2026-78409", "CVE-2026-78410")
         }
         | {("CVE-2026-85091", "zlib1g", "1:1.3.dfsg+really1.3.1-1+dhi4")}
-        | {("CVE-2026-77214", "libexpat1", "2.8.3-1~deb13u1+dhi5")}
+        | {
+            ("CVE-2025-69720", name, "6.5+20250216-2+dhi4")
+            for name in ("libncursesw6", "libtinfo6", "ncurses-base", "ncurses-bin")
+        }
     )
-    reviewed_versions = {version for _cve, _name, version in expected}
-    entries = [
-        entry for entry in config["ignore"] if entry["package"]["version"] in reviewed_versions
-    ]
-    assert len(entries) == 18
+    entries = config["ignore"]
+    assert len(entries) == 17
     assert {
         (entry["vulnerability"], entry["package"]["name"], entry["package"]["version"])
         for entry in entries
@@ -286,65 +188,15 @@ def test_october_renewals_and_expat_exception_are_limited_to_eighteen_exact_matc
         assert not re.search(pattern, name + "-dev")
         if name == "libstdc++6":
             assert not re.search(pattern, "libstdcc6")
-    assert "Approved by Adam Hernandez on 2026-10-07" in config_text
-    assert "Re-reviewed and renewed by Adam Hernandez on 2026-10-07 ONLY" in config_text
-    assert "Re-review by 2026-10-14 or the next base-image refresh" in config_text
-    assert "dependency\n  # reachability remains unproven" in config_text
+    assert "Approved by Adam Hernandez on 2026-10-20" in config_text
+    assert "Re-review by 2026-10-31 or the next base-image refresh" in config_text
+    assert "Accepted risk, NOT fixes or false-positive claims" in config_text
+    assert "dependency reachability remains unproven" in config_text
 
 
-def test_expat_parse_buffer_exception_is_exact_and_documents_accepted_risk() -> None:
-    config_text = (ROOT / ".grype.yaml").read_text()
-    config = yaml.safe_load(config_text)
-    entries = [entry for entry in config["ignore"] if entry["vulnerability"] == "CVE-2026-77214"]
-
-    assert entries == [
-        {
-            "vulnerability": "CVE-2026-77214",
-            "package": {"name": "^libexpat1$", "version": "2.8.3-1~deb13u1+dhi5", "type": "deb"},
-        }
-    ]
-    pattern = entries[0]["package"]["name"]
-    assert re.search(pattern, "libexpat1")
-    for other_package in ("libexpat1-dev", "other-libexpat1", "python", "expat"):
-        assert not re.search(pattern, other_package)
-
-    review = config_text.split("  # Approved by Adam Hernandez on 2026-10-08", 1)[1].split(
-        "  - vulnerability: CVE-2026-77214", 1
-    )[0]
-    assert "Accepted risk, NOT a fix or a false-positive claim" in review
-    assert "XML_ParseBuffer" in review
-    assert "Fontconfig" in review
-    assert "native dependency reachability remains unproven" in review
-    assert "Re-review by 2026-10-14 or the next base-image refresh" in review
-    assert "all other High/Critical findings remain blocking" in review
-
-
-def test_september_13_dhi_renewal_covers_only_eight_approved_matches() -> None:
-    config_text = (ROOT / ".grype.yaml").read_text()
-    config = yaml.safe_load(config_text)
-    versions = {"2.41-12+deb13u4", "2.8.3-1~deb13u1+dhi3", "2.41.5-0+deb13u1+dhi3"}
-    entries = [entry for entry in config["ignore"] if entry["package"]["version"] in versions]
-
-    assert len(entries) == 8
-    assert {
-        (
-            entry["vulnerability"],
-            entry["package"]["name"],
-            entry["package"]["version"],
-            entry["package"]["type"],
-        )
-        for entry in entries
-    } == {("CVE-2026-5435", "libc6", "2.41-12+deb13u4", "deb")} | {
-        (cve, "libexpat1", "2.8.3-1~deb13u1+dhi3", "deb")
-        for cve in ("CVE-2026-66046", "CVE-2026-76956", "CVE-2026-76957")
-    } | {
-        (cve, "^libuuid1$", "2.41.5-0+deb13u1+dhi3", "deb")
-        for cve in ("CVE-2026-76642", "CVE-2026-78408", "CVE-2026-78409", "CVE-2026-78410")
-    }
-    for entry in entries:
-        assert set(entry) == {"vulnerability", "package"}
-        assert set(entry["package"]) == {"name", "version", "type"}
-    for review_date in ("2026-09-30", "2026-10-04", "2026-10-07"):
-        assert review_date in config_text
-    assert "Renewed by Adam Hernandez on 2026-09-13" in config_text
-    assert "NOT fixes" in config_text
+def test_obsolete_container_exceptions_do_not_hide_regressions() -> None:
+    config = yaml.safe_load((ROOT / ".grype.yaml").read_text())
+    for entry in config["ignore"]:
+        pattern = entry["package"]["name"]
+        for name in ("python", "libexpat1", "libexpat1-dev", "openssl", "libc6-dev", "zlib1g-dev"):
+            assert not re.search(pattern, name)

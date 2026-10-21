@@ -45,6 +45,24 @@ def origin(snapshot, field):
     return next(item for item in snapshot.origins if item.field == field)
 
 
+@pytest.mark.parametrize("count", [-1, 1000001, 1000000000])
+def test_out_of_range_series_count_is_advisory_and_raw_evidence_is_preserved(count):
+    candidate = row(METRON).model_copy(update={"issue_count": count})
+    result = assemble([candidate])
+    assert result.values.title == candidate.title
+    assert result.values.issue_count is None
+    assert result.diagnostics == ("metron_api:invalid_advisory_issue_count",)
+    assert candidate.issue_count == count
+
+
+@pytest.mark.parametrize("count", [None, 0, 1, 1000000])
+def test_valid_advisory_series_count_is_preserved(count):
+    candidate = row(METRON).model_copy(update={"issue_count": count})
+    result = assemble([candidate])
+    assert result.values.issue_count == count
+    assert result.diagnostics == ()
+
+
 def test_derived_values_are_refreshable_without_becoming_user_overrides():
     before = MetadataSnapshot(
         entity_kind=Kind.SERIES,

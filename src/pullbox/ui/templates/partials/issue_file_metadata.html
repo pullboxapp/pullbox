@@ -1,20 +1,86 @@
-<div x-data="issueFileMetadata({{ issue.id }})" class="mt-3 space-y-2" data-testid="issue-file-metadata">
-  <button type="button" class="btn-ghost btn-sm" @click="show()">Write file metadata</button>
+{% from "components/dropdown_select.html" import dropdown_select %}
+<div x-data="issueFileMetadata({{ 'null' if recovery_mode|default(false) else issue.id }})" class="mt-3 space-y-2" data-testid="issue-file-metadata"
+  {% if recovery_mode|default(false) %}@review-direct-metadata.window="showRecovery($event.detail.pendingId)" :data-metadata-recovery-open="open ? 'true' : 'false'"{% endif %}>
+  {% if not recovery_mode|default(false) %}
+  <div class="flex flex-wrap gap-2">
+    <button type="button" class="btn-ghost btn-sm" @click="show(true)" :disabled="busy">Edit metadata</button>
+    <button type="button" class="btn-ghost btn-sm" @click="show()" :disabled="busy">Write file metadata</button>
+  </div>
   <p class="text-sm text-pb-text-sec" x-show="active()" x-cloak>File metadata is being written in the background.</p>
+  {% endif %}
   <template x-teleport="body">
     <div class="modal-shell" x-show="open" x-cloak @keydown.escape.window="if (open) close()" @keydown.tab.window="trapFocus($event)">
       <div class="modal-backdrop" @click="close()"></div>
-      <section class="modal-panel max-w-2xl max-h-[90vh]" role="dialog" aria-modal="true" aria-labelledby="file-metadata-title" tabindex="-1" x-ref="dialog">
-        <header class="modal-header"><h2 id="file-metadata-title" class="modal-title">Write file metadata</h2></header>
-        <div class="modal-body space-y-4 p-5" :aria-busy="busy">
-          <p class="text-sm text-pb-text-sec" x-show="!preview || !preview.converts_to_cbz">ComicInfo.xml and MetronInfo.xml will use the same reconciled metadata. Comic pages and your edits are preserved. This does not rename or move the file.</p>
-          <p class="text-sm text-pb-text-sec" x-show="preview && preview.converts_to_cbz" x-cloak>This managed file will be converted to CBZ with both reconciled XML files. Reading order and your metadata choices are preserved. Its original is saved in your configured library trash directory. Download originals are not changed. After completion, retry the failed download in Post-processing.</p>
+      <section class="modal-panel max-w-2xl max-h-[calc(100dvh-5rem)] min-h-0" role="dialog" aria-modal="true" aria-labelledby="file-metadata-title" tabindex="-1" x-ref="dialog">
+        <header class="modal-header shrink-0"><h2 id="file-metadata-title" class="modal-title" x-text="recovery ? 'Recover downloaded file' : editor ? 'Edit issue metadata' : 'Write file metadata'">Write file metadata</h2></header>
+        <div class="modal-body min-h-0 space-y-4 p-5" :aria-busy="busy">
+          <p class="text-sm text-pb-text-sec" x-show="!recovery && !editor && (!preview || !preview.converts_to_cbz)">ComicInfo.xml and MetronInfo.xml will use the same reconciled metadata. Comic pages and your edits are preserved. This does not rename or move the file.</p>
+          <p class="text-sm text-pb-text-sec" x-show="editor">Update this issue and both XML metadata files together. Corrections survive metadata refresh. No pages, filenames, series values or other issues are changed. Sources below are already saved values; this does not query providers.</p>
+          <p class="text-sm text-pb-text-sec" x-show="!recovery && preview && preview.converts_to_cbz" x-cloak>This managed file will be converted to CBZ with both reconciled XML files. Reading order and your metadata choices are preserved. Its original is saved in your configured library trash directory. Download originals are not changed. After completion, retry the failed download in Post-processing.</p>
+          <p class="text-sm text-pb-text-sec" x-show="recovery && !(preview && preview.replacement_required)">Review the retained file and reconcile its metadata. No new download is requested, and the original download is preserved. The recovery entry clears only after verified completion.</p>
+          <div x-show="preview && preview.replacement_required" x-cloak class="space-y-3" data-testid="incomplete-copy-recovery">
+            <h3 class="text-pb-text font-semibold">Incomplete copy: replacement needed</h3>
+            <p class="text-sm text-pb-text-sec">This file contains a story-only extract, not a complete issue. Changing metadata cannot restore missing stories. Find or import a complete copy, then confirm replacement. The current file stays in place until replacement succeeds.</p>
+            <div class="flex flex-wrap gap-2">
+              <a class="btn-primary" :href="replacementUrl('search')" hx-boost="false">Find complete copy</a>
+              <a class="btn-ghost" :href="replacementUrl('import')" hx-boost="false">Import replacement</a>
+              <button type="button" class="btn-ghost" @click="dismissReplacement()" :disabled="busy">Dismiss recovery</button>
+            </div>
+          </div>
+          <p class="text-sm text-pb-text-sec" x-show="recovery && preview && preview.restores_copy" x-cloak>The library copy is no longer registered. Your approval will restore a managed copy from the retained download, without replacing an existing library file.</p>
+          <p class="text-sm text-pb-text-sec" x-show="recovery && preview && preview.converts_to_cbz" x-cloak>The managed copy will be converted to CBZ with reconciled ComicInfo.xml and MetronInfo.xml. Comic pages are preserved.</p>
+          <p class="text-sm text-pb-text-sec" x-show="recovery && preview && preview.superseded" x-cloak>A different, verified library copy now owns this issue. This closes the obsolete recovery entry without changing that copy or marking the earlier transfer successful.</p>
           <p class="text-sm text-pb-error" role="alert" x-show="error || (job && job.error)" x-text="error || (job && job.error)"></p>
           <p class="text-sm text-pb-text-sec" role="status" x-show="busy && !job">Preparing metadata preview...</p>
           <div x-show="preview && !job" class="space-y-3">
             <p class="text-sm font-semibold text-pb-text break-all" x-text="preview && preview.file_name"></p>
-            <div x-show="preview && (preview.conflicts || []).length" class="space-y-3" data-testid="file-metadata-conflicts">
-              <p class="text-sm text-pb-text-sec">Choose which values to keep, then update the preview. Your choices will update the library and both XML files.</p>
+            <div x-show="editor" class="space-y-3" data-testid="issue-metadata-editor">
+              <div class="flex flex-wrap gap-2">
+                <button type="button" class="btn-ghost btn-sm" :aria-pressed="!allFields" @click="allFields = false">Differences</button>
+                <button type="button" class="btn-ghost btn-sm" :aria-pressed="allFields" @click="allFields = true">All fields</button>
+                <button type="button" class="btn-ghost btn-sm" :disabled="busy" @click="selectEditorFields(true)">Select all eligible</button>
+                <button type="button" class="btn-ghost btn-sm" :disabled="busy" @click="selectEditorFields(false)">Deselect all</button>
+              </div>
+              <p class="text-sm text-pb-text-sec" x-show="!editorFields().length">No differences to review.</p>
+              <p class="text-sm text-pb-warning" x-show="preview && preview.ready === false">Some existing values disagree. Select the issue fields to resolve. Protected series or XML-only conflicts must first be resolved using Write file metadata.</p>
+              <template x-for="field in editorFields()" :key="field.key">
+                <fieldset class="rounded-lg border border-pb-border p-3 space-y-2 min-w-0">
+                  <legend class="text-sm font-semibold text-pb-text px-1" x-text="field.label"></legend>
+                  <p class="text-xs text-pb-text-sec" x-show="field.origin" x-text="field.origin"></p>
+                  <p class="text-sm text-pb-text whitespace-pre-wrap break-words max-h-32 overflow-y-auto" x-text="(field.key.startsWith('xml.') ? 'Embedded: ' : 'Library: ') + (field.current || 'Not set')"></p>
+                  <p class="text-sm text-pb-text whitespace-pre-wrap break-words max-h-32 overflow-y-auto" x-show="field.selected && !choicesDirty" x-text="'Approved preview: ' + (field.proposed || 'Cleared')"></p>
+                  <p class="text-xs text-pb-text-sec" x-show="field.reason" x-text="field.reason"></p>
+                  <template x-if="field.editable && editorDrafts[field.key]">
+                    <div class="space-y-2">
+                      <label class="flex items-center gap-2 text-sm text-pb-text">
+                        <input type="checkbox" class="checkbox-pb" :aria-label="'Update ' + field.label" x-model="editorDrafts[field.key].selected" @change="choicesDirty = true" :disabled="busy">
+                        <span x-text="'Update ' + field.label"></span>
+                      </label>
+                      <div x-show="editorDrafts[field.key].selected" class="space-y-2">
+                        <label class="field-label" :for="'editor-source-' + field.key" x-text="'Value source for ' + field.label"></label>
+                        {{ dropdown_select(name="issue-editor-source", trigger_id_expression="'editor-source-' + field.key", local_model="editorDrafts[field.key].source", options_expression="editorOptions(field)", local_on_change="choicesDirty = true", disabled_expression="busy") }}
+                        <template x-for="option in field.options" :key="option.source">
+                          <p class="text-sm text-pb-text whitespace-pre-wrap break-words max-h-32 overflow-y-auto" x-show="editorDrafts[field.key].source === option.source" x-text="option.value || 'Not set'"></p>
+                        </template>
+                        <p class="text-sm text-pb-warning" x-show="editorDrafts[field.key].source === 'clear'">This deliberately removes the value and keeps it empty during refresh.</p>
+                        <p class="text-sm text-pb-text-sec" x-show="editorDrafts[field.key].source === 'reset'">Keep the current value now and allow future provider refreshes to update it.</p>
+                        <div x-show="editorDrafts[field.key].source === 'custom'" class="space-y-2">
+                          <label class="field-label" :for="'editor-value-' + field.key" x-text="'New ' + field.label"></label>
+                          <template x-if="field.input_type === 'textarea' || field.input_type === 'credits'">
+                            <textarea class="input-pb w-full min-h-24" :id="'editor-value-' + field.key" rows="4" x-model="editorDrafts[field.key].value" @input="choicesDirty = true" :disabled="busy"></textarea>
+                          </template>
+                          <template x-if="field.input_type !== 'textarea' && field.input_type !== 'credits'">
+                            <input class="input-pb w-full" :id="'editor-value-' + field.key" :type="field.input_type" x-model="editorDrafts[field.key].value" @input="choicesDirty = true" :disabled="busy">
+                          </template>
+                        </div>
+                      </div>
+                    </div>
+                  </template>
+                </fieldset>
+              </template>
+            </div>
+            <div x-show="!editor && preview && (preview.conflicts || []).length" class="space-y-3" data-testid="file-metadata-conflicts">
+              <p class="text-sm text-pb-text-sec">Choose which values to keep, then update the preview. Shared XML choices update both documents; catalog field choices also update the library.</p>
               <template x-for="conflict in (preview ? (preview.conflicts || []) : [])" :key="conflict.key">
                 <fieldset class="rounded-lg border border-pb-border p-3 space-y-2">
                   <legend class="text-sm font-semibold text-pb-text px-1" x-text="conflict.label"></legend>
@@ -40,7 +106,7 @@
             </div>
           </div>
           <div x-show="job" class="space-y-3">
-            <p class="text-sm text-pb-text" role="status" x-text="job && (job.state === 'COMPLETED' ? 'Both metadata files are up to date.' : job.message)"></p>
+            <p class="text-sm text-pb-text" role="status" x-text="job && (job.state === 'COMPLETED' ? (recovery ? (resolved ? 'Recovery complete. The queue entry has been resolved.' : 'The file job completed. Preview again to verify and finish the remaining recovery.') : 'Both metadata files are up to date.') : job.message)"></p>
             <div class="app-progress">
               <div class="app-progress-track"><div class="app-progress-fill app-progress-fill--interactive" :class="{ 'is-indeterminate': job && job.percent === null }" :style="job && job.percent !== null ? 'width: ' + job.percent + '%' : ''" role="progressbar" aria-label="File metadata progress" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="job ? job.percent : null"></div></div>
               <span class="app-progress-value" x-text="job && job.percent !== null ? Math.round(job.percent) + '%' : ''"></span>
@@ -49,12 +115,13 @@
             <a class="btn-ghost btn-sm" href="/utilities?tab=queue" x-show="job && job.state === 'PAUSED'">Resume in Utilities</a>
           </div>
         </div>
-        <footer class="modal-footer">
+        <footer class="modal-footer shrink-0">
           <button type="button" class="btn-ghost" @click="close()">Close</button>
           <button type="button" class="btn-ghost" @click="cancel()" x-show="active()" :disabled="busy || (job && job.state === 'CANCELLING')">Cancel write</button>
-          <button type="button" class="btn-primary" @click="loadPreview()" x-show="!active() && (!preview || job) && (!job || job.state !== 'PAUSED')" :disabled="busy">Preview again</button>
-          <button type="button" class="btn-ghost" @click="loadPreview(false)" x-show="preview && !job && ((preview.conflicts || []).length || choicesDirty)" :disabled="busy || !choicesDirty">Update preview</button>
-          <button type="button" class="btn-primary" @click="write()" x-show="preview && !job && !preview.unchanged" :disabled="busy || !canWrite()" x-text="preview && preview.converts_to_cbz ? 'Convert to CBZ and write metadata' : 'Write both metadata files'">Write both metadata files</button>
+          <button type="button" class="btn-primary" @click="loadPreview()" x-show="!resolved && !active() && (!preview || job) && (!job || job.state !== 'PAUSED')" :disabled="busy">Preview again</button>
+          <button type="button" class="btn-ghost" @click="loadPreview()" x-show="preview && preview.replacement_required && !job" :disabled="busy">Recheck replacement</button>
+          <button type="button" class="btn-ghost" @click="loadPreview(false)" x-show="preview && !job && (editor || (preview.conflicts || []).length || choicesDirty)" :disabled="busy || !choicesDirty">Update preview</button>
+          <button type="button" class="btn-primary" @click="write()" x-show="preview && !preview.replacement_required && !job && (!preview.unchanged || recovery || editor)" :disabled="busy || !canWrite()" x-text="recovery ? (preview && preview.restores_copy ? 'Restore and finish recovery' : 'Finish recovery') : editor ? 'Apply selected changes' : (preview && preview.converts_to_cbz ? 'Convert to CBZ and write metadata' : 'Write both metadata files')">Write both metadata files</button>
         </footer>
       </section>
     </div>

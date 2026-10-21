@@ -13,12 +13,14 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from pullbox.core.exceptions import JobCancelledError
 from pullbox.core.file_safety import get_archive_size_limit_bytes
 from pullbox.schemas.issue_file_metadata import FileMetadataReview
+from pullbox.schemas.issue_metadata_editor import IssueMetadataEditorReview
 from pullbox.services.issue_file_metadata import file_metadata_error, write_file_metadata
 from pullbox.services.operation_progress import (
     OperationItemProgress,
     OperationProgressMeasure,
     publish_operation_progress,
 )
+from pullbox.services.series_metadata_editor import read_editor_plan, run_series_editor_target
 from pullbox.services.utility_operation_progress import build_utility_operation_update
 from pullbox.utilities.base_executor import ExecutionMode, ItemResult, JobExecutor, ProcessedItem
 from pullbox.utilities.import_guards import ensure_no_active_import_file_mutation
@@ -29,9 +31,36 @@ class FileMetadataExecutor(JobExecutor):
     execution_mode = ExecutionMode.ASYNC
 
     def validate_config(self, job_config: dict[str, Any]) -> list[str]:
+        if "series_propagation" in job_config:
+            from pullbox.services.series_metadata_propagation import read_plan
+
+            try:
+                read_plan(job_config)
+            except (ValueError, TypeError, KeyError):
+                return ["Preview the series comic metadata before writing."]
+            return []
+        if "series_editor" in job_config:
+            try:
+                read_editor_plan(job_config)
+            except (ValueError, TypeError):
+                return ["Review the saved series metadata plan before retrying."]
+            return []
+        metadata_config = {
+            key: value for key, value in job_config.items() if key != "recovery_pending_id"
+        }
+        if "recovery_pending_id" in job_config and (
+            type(job_config["recovery_pending_id"]) is not int
+            or job_config["recovery_pending_id"] <= 0
+        ):
+            return ["Choose a pending metadata recovery."]
         if (
-            set(job_config)
-            not in ({"issue_id", "review_key"}, {"issue_id", "review_key", "choices"})
+            set(metadata_config)
+            not in (
+                {"issue_id", "review_key"},
+                {"issue_id", "review_key", "choices"},
+                {"issue_id", "review_key", "editor"},
+            )
+            or ("editor" in job_config and "recovery_pending_id" in job_config)
             or type(job_config.get("issue_id")) is not int
             or job_config["issue_id"] <= 0
             or not isinstance(job_config.get("review_key"), str)
@@ -40,6 +69,11 @@ class FileMetadataExecutor(JobExecutor):
             return ["Choose an issue and approve its current file metadata preview."]
         try:
             FileMetadataReview(choices=job_config.get("choices", {}))
+            if (
+                "editor" in job_config
+                and not IssueMetadataEditorReview.model_validate(job_config["editor"]).edits
+            ):
+                return ["Select at least one issue field to update."]
         except ValidationError:
             return ["Review the metadata choices before writing."]
         return []
@@ -48,6 +82,8 @@ class FileMetadataExecutor(JobExecutor):
         errors = self.validate_config(job_config)
         if errors:
             raise ValueError(errors[0])
+        if "series_editor" in job_config:
+            return {"factory": async_sessionmaker(session.bind, expire_on_commit=False)}
         await ensure_no_active_import_file_mutation(session)
         return {
             "factory": async_sessionmaker(session.bind, expire_on_commit=False),
@@ -57,6 +93,24 @@ class FileMetadataExecutor(JobExecutor):
     async def generate_items(
         self, job_config: dict[str, Any], job_context: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
+        if "series_propagation" in job_config:
+            from pullbox.services.series_metadata_propagation import read_plan
+
+            return [
+                {"operation": "series_propagation", "target_index": index}
+                for index, _ in enumerate(read_plan(job_config).targets)
+            ]
+        if "series_editor" in job_config:
+            plan = read_editor_plan(job_config)
+            return [
+                {
+                    "operation": "series_sidecar",
+                    "target_index": index,
+                    "file_path": str(target.location.directory),
+                }
+                for index, target in enumerate(plan.targets)
+                if target.read.action in {"create", "update"}
+            ] or [{"operation": "series_metadata_saved"}]
         return [{"operation": "file_metadata"}]
 
     def process_item(
@@ -75,6 +129,44 @@ class FileMetadataExecutor(JobExecutor):
     ) -> ProcessedItem:
         context = job_context or {}
         factory = context["factory"]
+        if "series_editor" in job_config:
+            plan = read_editor_plan(job_config)
+            if item_data["operation"] == "series_metadata_saved":
+                return ProcessedItem(
+                    item_data["id"], ItemResult.COMPLETED, after_state={"library_saved": True}
+                )
+            try:
+                async with factory() as session:
+                    item = await session.get(UtilityJobItem, item_data["id"])
+                    job = await session.get(UtilityJob, item.job_id) if item else None
+                    if job is None or job.state != JobState.RUNNING:
+                        raise JobCancelledError(
+                            "Sidecar writing stopped; library metadata is saved."
+                        )
+                    series_outcome = await run_series_editor_target(
+                        session, plan, item_data["target_index"]
+                    )
+                return ProcessedItem(
+                    item_data["id"],
+                    ItemResult.COMPLETED
+                    if series_outcome["outcome"] == "saved"
+                    else ItemResult.FAILED,
+                    after_state={"library_saved": True, **series_outcome},
+                    error_message=str(series_outcome["reason"])
+                    if series_outcome["outcome"] == "failed"
+                    else None,
+                )
+            except (JobCancelledError, asyncio.CancelledError):
+                return ProcessedItem(item_data["id"], ItemResult.CANCELLED)
+            except (ValueError, OSError) as exc:
+                return ProcessedItem(
+                    item_data["id"],
+                    ItemResult.FAILED,
+                    after_state={"library_saved": True, "outcome": "failed"},
+                    error_message="Library saved; sidecar is unavailable. Preview again."
+                    if isinstance(exc, OSError)
+                    else str(exc),
+                )
         async with factory() as session:
             item = await session.get(UtilityJobItem, item_data["id"])
             if item is None:
@@ -105,6 +197,14 @@ class FileMetadataExecutor(JobExecutor):
                     if stage == "verifying"
                     else 90
                 )
+                if "series_propagation" in job_config:
+                    total_items = max(job.total_items or 1, 1)
+                    finished = (
+                        (job.completed_items or 0)
+                        + (job.failed_items or 0)
+                        + (job.skipped_items or 0)
+                    )
+                    percent = min(99, (finished + percent / 100) / total_items * 100)
                 await publish_operation_progress(
                     session,
                     replace(
@@ -128,17 +228,48 @@ class FileMetadataExecutor(JobExecutor):
                 )
 
         try:
-            outcome = await write_file_metadata(
-                factory,
-                job_config["issue_id"],
-                job_config["review_key"],
-                UUID(item_data["id"]),
-                limit=context["limit"],
-                check_control=check_control,
-                progress=progress,
-                job_id=job_id,
-                choices=FileMetadataReview(choices=job_config.get("choices", {})).choices,
+            from pullbox.services.direct_metadata_recovery import (
+                DirectMetadataRecoveryError,
+                run_direct_metadata_recovery,
             )
+
+            if "series_propagation" in job_config:
+                from pullbox.utilities.executors.series_metadata_propagation import (
+                    process_projection,
+                )
+
+                return await process_projection(
+                    item_data, job_config, context, check_control, progress, job_id
+                )
+
+            recovery_id = job_config.get("recovery_pending_id")
+            writer = (
+                run_direct_metadata_recovery if recovery_id is not None else write_file_metadata
+            )
+            if "editor" in job_config:
+                outcome = await write_file_metadata(
+                    factory,
+                    job_config["issue_id"],
+                    job_config["review_key"],
+                    UUID(item_data["id"]),
+                    limit=context["limit"],
+                    check_control=check_control,
+                    progress=progress,
+                    job_id=job_id,
+                    editor=IssueMetadataEditorReview.model_validate(job_config["editor"]),
+                )
+            else:
+                outcome = await writer(
+                    factory,
+                    recovery_id if recovery_id is not None else job_config["issue_id"],
+                    job_config["review_key"],
+                    UUID(item_data["id"]),
+                    limit=context["limit"],
+                    check_control=check_control,
+                    progress=progress,
+                    job_id=job_id,
+                    choices=FileMetadataReview(choices=job_config.get("choices", {})).choices,
+                )
             return ProcessedItem(
                 item_data["id"],
                 ItemResult.COMPLETED,
@@ -155,7 +286,11 @@ class FileMetadataExecutor(JobExecutor):
             return ProcessedItem(item_data["id"], ItemResult.CANCELLED)
         except Exception as exc:
             return ProcessedItem(
-                item_data["id"], ItemResult.FAILED, error_message=file_metadata_error(exc)
+                item_data["id"],
+                ItemResult.FAILED,
+                error_message=str(exc)
+                if isinstance(exc, DirectMetadataRecoveryError)
+                else file_metadata_error(exc),
             )
 
     def rollback_item(

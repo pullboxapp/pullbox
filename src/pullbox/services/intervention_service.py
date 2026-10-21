@@ -8,8 +8,10 @@ operations for pending matches.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 from uuid import uuid4
 
@@ -34,6 +36,11 @@ from pullbox.services.direct_acquisition_state import (
     advance_acquisition_progress,
     transition_acquisition,
     transition_artifact,
+)
+from pullbox.services.direct_artifact_pack import RECOVERABLE_PACK_FAILURES
+from pullbox.services.direct_artifact_quarantine import (
+    DirectArtifactValidationError,
+    validate_direct_resource_approval,
 )
 
 if TYPE_CHECKING:
@@ -313,9 +320,13 @@ class InterventionService:
         )
         if artifact_host_kind is not None:
             details["artifact_host_kind"] = artifact_host_kind
+        if (attempt.plan_snapshot or {}).get("metadata_failure_code") == "partial_issue":
+            details["metadata_failure_code"] = "partial_issue"
         safety_review = (attempt.plan_snapshot or {}).get("safety_review")
         if isinstance(safety_review, dict):
             details["safety_block"] = dict(safety_review)
+        if attempt.failure_code in RECOVERABLE_PACK_FAILURES:
+            details["pack_review_reason"] = attempt.error_message
         if pending_match is None:
             pending_match = PendingMatch(
                 issue_id=attempt.issue_id,
@@ -360,6 +371,10 @@ class InterventionService:
             raise ValueError(f"Pending match {pending_id} is not pending (status={pm.status})")
 
         if pm.match_details.get("source_kind") == "dc":
+            if pm.match_details.get("failure_class"):
+                raise ValueError(
+                    "Use the AirDC++ recovery actions to recheck, retry, or cancel this request."
+                )
             from pullbox.services.airdcpp_search_acquisition import (
                 acquire_dc_candidate,
                 dc_review_candidate,
@@ -436,8 +451,51 @@ class InterventionService:
         if attempt is None or attempt.issue_id != pending_match.issue_id:
             raise ValueError("Pending match has an invalid direct attempt reference")
 
+        from pullbox.services.direct_pack_completion import (
+            is_pack_ownership_failure,
+            reconcile_fulfilled_pack,
+        )
+
+        if is_pack_ownership_failure(attempt):
+            from pullbox.models.issue import Issue, IssueStatus
+
+            pending_issue_id = pending_match.issue_id
+            if await reconcile_fulfilled_pack(session, attempt_id):
+                await session.commit()
+                return attempt
+            # Do not requeue an already-owned issue when its current file could
+            # not be verified. Keep the actionable recovery and retained pack.
+            await session.refresh(pending_match)
+            await session.refresh(attempt, attribute_names=["artifact_attempts"])
+            issue = await session.get(Issue, pending_issue_id, populate_existing=True)
+            if issue is not None and issue.status is IssueStatus.OWNED:
+                raise DirectArtifactValidationError(
+                    code="direct_pack_completion_unverified",
+                    message=(
+                        "The library copy needs review before this pack can be reconciled. "
+                        "Check the issue's registered file and metadata. "
+                        "No new download was started; the retained pack is unchanged."
+                    ),
+                )
+
         initial_source = None
+        if attempt.failure_code in RECOVERABLE_PACK_FAILURES:
+            selected = [item for item in attempt.artifact_attempts if item.is_selected]
+            if (
+                len(selected) != 1
+                or not selected[0].quarantine_path
+                or not await asyncio.to_thread(Path(selected[0].quarantine_path).is_file)
+            ):
+                raise DirectArtifactValidationError(
+                    code="artifact_quarantine_missing",
+                    message=(
+                        "The retained pack is missing. Restore it or manually import the "
+                        "correct issue file. No new download was started."
+                    ),
+                )
         if not attempt.artifact_attempts:
+            if attempt.failure_class is DirectArtifactFailureClass.SAFETY:
+                raise ValueError("Safety recovery requires a retained artifact, not a new download")
             try:
                 planned = await self._direct_planner(session, acquisition_id=attempt_id)
             except DirectAcquisitionPlanningError as exc:
@@ -473,6 +531,10 @@ class InterventionService:
         )
         if can_override_safety_once:
             assert isinstance(safety_review, dict)
+            assert artifact.quarantine_path is not None
+            await asyncio.to_thread(
+                validate_direct_resource_approval, Path(artifact.quarantine_path), safety_review
+            )
             transition_acquisition(attempt, DirectAcquisitionState.POST_PROCESSING)
             transition_artifact(artifact, DirectArtifactState.VALIDATING)
             plan_snapshot = dict(attempt.plan_snapshot or {})
@@ -527,6 +589,19 @@ class InterventionService:
         prior = await session.get(DirectAcquisitionAttempt, attempt_id)
         if prior is None or prior.issue_id != pending_match.issue_id:
             raise ValueError("Pending match has an invalid direct attempt reference")
+        if prior.failure_code == "direct_metadata_review_required":
+            raise ValueError(
+                "Review the retained file metadata instead of refreshing download routes."
+            )
+        if prior.failure_code in RECOVERABLE_PACK_FAILURES:
+            raise ValueError(
+                "Use Retry import to recheck the retained pack, not refresh download routes."
+            )
+        if prior.failure_class is DirectArtifactFailureClass.SAFETY:
+            raise ValueError(
+                "Review the retained file for size approval or other safety findings "
+                "instead of refreshing download routes."
+            )
 
         fresh = DirectAcquisitionAttempt(
             request_key=f"direct-recovery:{uuid4().hex}",
@@ -599,6 +674,16 @@ class InterventionService:
         if pm.status != PendingMatchStatus.PENDING:
             raise ValueError(f"Pending match {pending_id} is not pending (status={pm.status})")
 
+        from pullbox.core.partial_issue import needs_complete_copy
+
+        if needs_complete_copy(pm.match_details, pm.release_title):
+            from pullbox.services.direct_metadata_recovery import dismiss_incomplete_recovery
+
+            await dismiss_incomplete_recovery(session, pending_id)
+            return False
+
+        if pm.match_details.get("source_kind") == "dc" and pm.match_details.get("failure_class"):
+            raise ValueError("Use Cancel request to safely stop this AirDC++ request.")
         direct_attempt_id = _direct_attempt_id(pm)
         should_blocklist_release = True
         if direct_attempt_id is not None:
@@ -737,6 +822,13 @@ class InterventionService:
             select(PendingMatch.id).where(
                 PendingMatch.status == PendingMatchStatus.PENDING,
                 PendingMatch.created_at < cutoff,
+                ~(
+                    (
+                        func.coalesce(PendingMatch.match_details["source_kind"].as_string(), "")
+                        == "dc"
+                    )
+                    & PendingMatch.match_details["failure_class"].as_string().is_not(None)
+                ),
             )
         )
         stale_ids = [row[0] for row in stale.all()]

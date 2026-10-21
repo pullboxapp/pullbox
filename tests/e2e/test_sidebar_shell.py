@@ -24,6 +24,15 @@ pytestmark = pytest.mark.e2e
 class TestSidebarShell:
     """Behavior-first E2E checks for the persistent sidebar shell."""
 
+    def test_stylesheet_readiness_does_not_wait_for_background_animation_frames(
+        self, authed_page, seeded_server
+    ) -> None:
+        authed_page.add_init_script("window.requestAnimationFrame = () => 0;")
+        authed_page.goto(seeded_server + "/series", wait_until="domcontentloaded")
+        expect(authed_page.locator("html")).to_have_attribute(
+            "data-pullbox-stylesheet-ready", "true", timeout=2000
+        )
+
     @pytest.mark.parametrize("theme", ["light", "dark"])
     @pytest.mark.parametrize("username", ["admin", "reader" + "x" * 94], ids=["normal", "long"])
     def test_header_controls_fit_and_remain_reachable_at_narrow_widths(

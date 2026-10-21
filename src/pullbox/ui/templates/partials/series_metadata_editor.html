@@ -1,0 +1,109 @@
+{% from "components/dropdown_select.html" import dropdown_select %}
+<div x-data="seriesMetadataEditor({{ series.id }})" data-testid="series-metadata-editor">
+  <button type="button" class="btn-ghost btn-sm" @click="show()" :disabled="checkingJob">Edit metadata</button>
+  <template x-teleport="body">
+    <div class="modal-shell" x-show="open" x-cloak @keydown.escape.window.capture="escape($event)" @keydown.tab.window="trapFocus($event)">
+      <div class="modal-backdrop" @click="close()"></div>
+      <section class="modal-panel max-w-2xl max-h-[calc(100dvh-5rem)] min-h-0" role="dialog" aria-modal="true" aria-labelledby="series-editor-title" tabindex="-1" x-ref="dialog">
+        <header class="modal-header shrink-0"><h2 id="series-editor-title" class="modal-title">Edit series metadata</h2></header>
+        <div class="modal-body min-h-0 space-y-4 p-5" :aria-busy="busy || checkingJob">
+          <p class="text-sm text-pb-text-sec">Edit this series and its series.json files. Comic files and folder names stay unchanged.</p>
+          <p class="text-sm text-pb-text-sec">Manual corrections survive refresh. Sources shown here are saved values.</p>
+          <p class="text-sm text-pb-error" role="alert" x-show="error || (job && job.error)" x-text="error || (job && job.error)" x-cloak></p>
+          <p class="text-sm text-pb-text-sec" role="status" x-show="busy && !job" x-cloak>Preparing metadata preview...</p>
+          <div x-show="!job" class="space-y-4">
+            <fieldset class="space-y-2" :disabled="busy || checkingJob">
+              <legend class="field-label">Save to</legend>
+              <label class="flex items-center gap-2 text-sm text-pb-text"><input type="radio" class="checkbox-pb !rounded-full" name="series-editor-mode" value="library_and_sidecars" x-model="mode" @change="invalidate()">Library and eligible series.json files</label>
+              <label class="flex items-center gap-2 text-sm text-pb-text"><input type="radio" class="checkbox-pb !rounded-full" name="series-editor-mode" value="library_only" x-model="mode" @change="invalidate()">Library only</label>
+              <p class="text-xs text-pb-text-sec" x-show="mode === 'library_only'">Series.json files will not be read or written. Saved sidecar values are unavailable in this mode.</p>
+              <p class="text-sm text-pb-text-sec" x-show="mode === 'library_and_sidecars'">Library changes save first; cancelling stops only unfinished sidecar writes.</p>
+            </fieldset>
+            <div x-show="preview" class="space-y-3">
+              <div class="flex flex-wrap gap-2">
+                <button type="button" class="btn-ghost btn-sm" :aria-pressed="!allFields" @click="allFields = false">Differences</button>
+                <button type="button" class="btn-ghost btn-sm" :aria-pressed="allFields" @click="allFields = true">All fields</button>
+                <button type="button" class="btn-ghost btn-sm" :disabled="busy" @click="selectFields(true)">Select all eligible</button>
+                <button type="button" class="btn-ghost btn-sm" :disabled="busy" @click="selectFields(false)">Deselect all</button>
+              </div>
+              <p class="text-sm text-pb-text-sec" x-show="!fields().length">No differences to review. <span>Choose All fields to make a correction.</span></p>
+              <template x-for="field in fields()" :key="field.key">
+                <fieldset class="rounded-lg border border-pb-border p-3 space-y-2 min-w-0">
+                  <legend class="text-sm font-semibold text-pb-text px-1" x-text="field.label"></legend>
+                  <p class="text-xs text-pb-text-sec" x-show="field.overridden">Manual correction</p>
+                  <p class="text-sm text-pb-text whitespace-pre-wrap break-words max-h-32 overflow-y-auto" x-text="'Library: ' + (field.current || 'Not set')"></p>
+                  <p class="text-sm text-pb-text whitespace-pre-wrap break-words max-h-32 overflow-y-auto" x-show="field.selected && reviewedInputs" x-text="'Proposed: ' + (field.proposed || 'Cleared')"></p>
+                  <p class="text-xs text-pb-text-sec" x-show="field.reason" x-text="field.reason"></p>
+                  <template x-if="field.editable && drafts[field.key]">
+                    <div class="space-y-2">
+                      <label class="flex items-center gap-2 text-sm text-pb-text">
+                        <input type="checkbox" class="checkbox-pb" :aria-label="'Update ' + field.label" x-model="drafts[field.key].selected" @change="invalidate()" :disabled="busy">
+                        <span x-text="'Update ' + field.label"></span>
+                      </label>
+                      <div x-show="drafts[field.key].selected" class="space-y-2">
+                        <label class="field-label" :for="'series-editor-source-' + field.key" x-text="'Value source for ' + field.label"></label>
+                        {{ dropdown_select(name="series-editor-source", trigger_id_expression="'series-editor-source-' + field.key", local_model="drafts[field.key].source", options_expression="sourceOptions(field)", local_on_change="sourceChanged(field)", disabled_expression="busy") }}
+                        <template x-for="source in field.sources" :key="source.token">
+                          <p class="text-sm text-pb-text whitespace-pre-wrap break-words max-h-32 overflow-y-auto" x-show="drafts[field.key].source === source.token" x-text="source.value || 'Not set'"></p>
+                        </template>
+                        <p class="text-sm text-pb-warning" x-show="drafts[field.key].source === 'clear'">This deliberately removes the value and keeps it empty during refresh.</p>
+                        <p class="text-sm text-pb-text-sec" x-show="drafts[field.key].source === 'reset'">Keep the current value now and allow future provider refreshes to update it.</p>
+                        <div x-show="drafts[field.key].source === 'custom'" class="space-y-2">
+                          <label class="field-label" :for="'series-editor-value-' + field.key" x-text="'New ' + field.label"></label>
+                          <template x-if="field.options.length">
+                            <div>{{ dropdown_select(name="series-editor-value", trigger_id_expression="'series-editor-value-' + field.key", local_model="drafts[field.key].value", options_expression="valueOptions(field)", local_on_change="invalidate()", disabled_expression="busy") }}</div>
+                          </template>
+                          <template x-if="!field.options.length && field.input_type === 'textarea'">
+                            <textarea class="input-pb w-full min-h-24" :id="'series-editor-value-' + field.key" rows="4" x-model="drafts[field.key].value" @input="invalidate()" :disabled="busy"></textarea>
+                          </template>
+                          <template x-if="!field.options.length && field.input_type !== 'textarea'">
+                            <input class="input-pb w-full" :id="'series-editor-value-' + field.key" :type="field.input_type === 'number' ? 'number' : 'text'" :step="field.input_type === 'number' ? '1' : null" x-model="drafts[field.key].value" @input="invalidate()" :disabled="busy">
+                          </template>
+                        </div>
+                      </div>
+                    </div>
+                  </template>
+                </fieldset>
+              </template>
+              <template x-for="warning in (preview ? preview.warnings || [] : [])" :key="warning"><p class="text-sm text-pb-warning" x-text="warning"></p></template>
+              <p class="text-sm text-pb-warning" x-show="preview && !preview.ready && Object.keys(inputs().edits).length">The preview is not ready to apply. Review the fields and target details, then preview again.</p>
+              <p class="text-sm text-pb-text-sec" x-show="!reviewedInputs">Update the preview after changing fields or save scope.</p>
+            </div>
+          </div>
+          <div x-show="job" class="space-y-3">
+            <p class="text-sm text-pb-success" x-show="librarySaved">Library changes are saved.</p>
+            <p class="text-sm text-pb-text" role="status" x-text="job && job.message"></p>
+            <p class="text-sm text-pb-warning" x-show="partial && !active()">Some series.json files still need attention. Review the target details below; retrying does not reapply library changes.</p>
+            <template x-for="warning in jobWarnings" :key="warning"><p class="text-sm text-pb-warning" x-text="warning"></p></template>
+            <div class="app-progress">
+              <div class="app-progress-track"><div class="app-progress-fill app-progress-fill--interactive" :class="{ 'is-indeterminate': job && job.percent === null }" :style="job && job.percent !== null ? 'width: ' + job.percent + '%' : ''" role="progressbar" aria-label="Series metadata progress" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="job ? job.percent : null"></div></div>
+              <span class="app-progress-value" x-text="job && job.percent !== null ? Math.round(job.percent) + '%' : ''"></span>
+            </div>
+            <p class="text-sm text-pb-text-sec" x-show="active()">You can close this window. Progress is also shown in Background activity and Utilities. Cancelling leaves saved library changes in place.</p>
+            <a class="btn-ghost btn-sm" href="/utilities?tab=queue" x-show="job && job.state === 'PAUSED'">Resume in Utilities</a>
+          </div>
+          <div class="space-y-2" x-show="targets().length" data-testid="series-editor-targets">
+            <h3 class="text-sm font-semibold text-pb-text">Series.json files</h3>
+            <template x-for="target in targets()" :key="target.directory">
+              <article class="rounded-lg border border-pb-border p-3 space-y-1 min-w-0">
+                <p class="text-sm font-semibold text-pb-text break-all" x-text="target.directory"></p>
+                <p class="text-sm text-pb-text" x-text="targetLabel(target)"></p>
+                <p class="text-sm text-pb-text-sec break-words" x-show="target.reason" x-text="target.reason"></p>
+                <template x-for="(change, index) in target.changes || []" :key="index"><p class="text-xs text-pb-text-sec break-words" x-text="change"></p></template>
+              </article>
+            </template>
+          </div>
+          <p class="text-sm text-pb-text-sec" x-show="preview && !job && mode === 'library_and_sidecars' && reviewedInputs && !targets().length">No eligible series.json targets. Library corrections can still be saved.</p>
+        </div>
+        <footer class="modal-footer shrink-0 flex-wrap">
+          <button type="button" class="btn-ghost" @click="close()">Close</button>
+          <button type="button" class="btn-ghost" @click="cancel()" x-show="active()" :disabled="busy || (job && job.state === 'CANCELLING')">Cancel sidecar write</button>
+          <button type="button" class="btn-ghost" @click="loadPreview(true)" x-show="!active() && (!preview || job) && (!job || job.state !== 'PAUSED')" :disabled="busy || checkingJob">Preview again</button>
+          <button type="button" class="btn-primary" @click="retry()" x-show="retryable && !active()" :disabled="busy">Retry unfinished sidecars</button>
+          <button type="button" class="btn-ghost" @click="loadPreview()" x-show="preview && !job" :disabled="busy || !!reviewedInputs">Update preview</button>
+          <button type="button" class="btn-primary" @click="write()" x-show="preview && !job" :disabled="!canWrite()">Apply selected changes</button>
+        </footer>
+      </section>
+    </div>
+  </template>
+</div>

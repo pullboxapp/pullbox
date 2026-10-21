@@ -1,5 +1,7 @@
 """The credit-role overlap between ComicInfo and richer canonical metadata."""
 
+from xml.etree import ElementTree as ET
+
 from pullbox.schemas.metadata_credits import MetadataCredit, parse_credits
 
 COMICINFO_ROLES = {
@@ -23,6 +25,14 @@ ARCHIVE_FORMATS = {
     "graphic_novel": "Graphic Novel",
 }
 COMICINFO_ONLY_FORMATS = frozenset({"special", "compendium", "deluxe", "volume"})
+
+
+def normalize_comicinfo_aliases(root: ET.Element) -> None:
+    """Normalize only known aliases in a parsed copy; retain duplicates for rejection."""
+    aliases = {"Issue": "Number", "writer": "Writer"}
+    for node in root:
+        if isinstance(node.tag, str) and node.tag in aliases:
+            node.tag = aliases[node.tag]
 
 
 def archive_format_label(value: str | None) -> str | None:

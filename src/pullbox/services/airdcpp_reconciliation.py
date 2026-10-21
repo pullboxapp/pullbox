@@ -9,12 +9,17 @@ from pathlib import PurePath
 from typing import TYPE_CHECKING, Protocol
 
 import structlog
-from sqlalchemy import or_, select
-from sqlalchemy.orm import joinedload
+from sqlalchemy import or_, select, update
+from sqlalchemy.orm import aliased, joinedload
 
 from pullbox.models.airdcpp import AirDcppAcquisition
 from pullbox.models.download import DownloadHistory, DownloadState
 from pullbox.providers.airdcpp.errors import AirDcppEntityNotFoundError, AirDcppError
+from pullbox.services.airdcpp_recovery import (
+    finish_queue_recovery,
+    queue_failure_code,
+    record_queue_recovery,
+)
 from pullbox.services.download_operation_progress import project_download_operation_progress
 
 if TYPE_CHECKING:
@@ -128,6 +133,7 @@ class AirDcppReconciler:
         self._cooldown = cooldown
         self._client_locks: dict[int, asyncio.Lock] = {}
         self._reconciliation_cursors: dict[int, int] = {}
+        self._lookup_cursors: dict[int, int] = {}
 
     async def reconcile_client(
         self,
@@ -136,7 +142,11 @@ class AirDcppReconciler:
     ) -> AirDcppReconciliationResult:
         lock = self._client_locks.setdefault(client_config_id, asyncio.Lock())
         async with lock:
-            return await self._reconcile_client(client_config_id, api_client)
+            try:
+                return await self._reconcile_client(client_config_id, api_client)
+            except AirDcppError:
+                await self.defer_unconfirmed_requests(client_config_id)
+                raise
 
     async def _reconcile_client(
         self,
@@ -145,13 +155,32 @@ class AirDcppReconciler:
     ) -> AirDcppReconciliationResult:
         await self._request_due_alternate(client_config_id, api_client)
         async with self._session_factory() as session:
+            duplicate = aliased(AirDcppAcquisition)
+            legacy_failed_owner = (
+                (DownloadHistory.state == DownloadState.FAILED)
+                & AirDcppAcquisition.bundle_id.is_not(None)
+                & AirDcppAcquisition.client_state.in_(
+                    ["download_error", "completion_validation_error"]
+                )
+                & select(duplicate.id)
+                .where(
+                    duplicate.client_state == "duplicate",
+                    duplicate.client_identity == AirDcppAcquisition.client_identity,
+                    duplicate.tth == AirDcppAcquisition.tth,
+                    duplicate.size_bytes == AirDcppAcquisition.size_bytes,
+                    duplicate.original_name == AirDcppAcquisition.original_name,
+                    duplicate.route_snapshot["existing_bundle_owner_acquisition_id"].as_integer()
+                    == AirDcppAcquisition.id,
+                )
+                .exists()
+            )
             active_query = (
                 select(AirDcppAcquisition)
                 .join(DownloadHistory)
                 .where(
                     AirDcppAcquisition.client_config_id == client_config_id,
                     DownloadHistory.imported_at.is_(None),
-                    DownloadHistory.state.not_in(_TERMINAL_STATES),
+                    or_(DownloadHistory.state.not_in(_TERMINAL_STATES), legacy_failed_owner),
                 )
                 .order_by(AirDcppAcquisition.id)
             )
@@ -203,18 +232,31 @@ class AirDcppReconciler:
         adopted: dict[int, AirDcppQueueFile] = {}
         recovered: dict[int, _RecoveredMutation] = {}
         retry_failures: dict[int, str] = {}
+        recovery_required: dict[int, str] = {}
         stale_recovered_bundles: set[tuple[str, int]] = set()
         pre_id = [snapshot for snapshot in snapshots if snapshot.bundle_id is None]
+        cursor = self._lookup_cursors.get(client_config_id, 0)
+        pre_id.sort(key=lambda item: (item.acquisition_id <= cursor, item.acquisition_id))
+        lookup_batch = pre_id[:_MAX_PRE_ID_LOOKUPS]
+        if lookup_batch:
+            self._lookup_cursors[client_config_id] = lookup_batch[-1].acquisition_id
         now = datetime.now(UTC)
-        for snapshot in pre_id[:_MAX_PRE_ID_LOOKUPS]:
+        for snapshot in lookup_batch:
+            if snapshot.client_state == "recovery_check_pending" and not _pre_id_retry_due(
+                snapshot, now=now
+            ):
+                continue
             try:
                 files = await api_client.get_queue_files_by_tth(snapshot.tth)
             except AirDcppError:
+                if _pre_id_retry_due(snapshot, now=now):
+                    recovery_required[snapshot.acquisition_id] = "queue_lookup_failed"
                 continue
             exact = [
                 item
                 for item in files
-                if item.size == snapshot.size_bytes
+                if item.tth == snapshot.tth
+                and item.size == snapshot.size_bytes
                 and PurePath(item.target.get_secret_value().replace("\\", "/")).name
                 == snapshot.target_name
             ]
@@ -223,6 +265,16 @@ class AirDcppReconciler:
                 adopted[snapshot.acquisition_id] = exact[0]
                 continue
             if not _pre_id_retry_due(snapshot, now=now):
+                continue
+            if files:
+                recovery_required[snapshot.acquisition_id] = "queue_identity_ambiguous"
+                continue
+            if snapshot.client_state in {
+                "mutation_pending",
+                "retry_mutation_pending",
+                "recovery_check_pending",
+            }:
+                recovery_required[snapshot.acquisition_id] = "queue_request_unconfirmed"
                 continue
             try:
                 recovered[snapshot.acquisition_id] = await _retry_pre_id_mutation(
@@ -298,6 +350,20 @@ class AirDcppReconciler:
                     continue
                 bundle = bundles.get(snapshot.bundle_id) if snapshot.bundle_id else None
                 if bundle is not None:
+                    if snapshot.client_state == "recovery_check_pending" and not _pre_id_retry_due(
+                        snapshot, now=now
+                    ):
+                        continue
+                    legacy_failed = (
+                        acquisition.client_state == snapshot.client_state
+                        and snapshot.client_state
+                        in {"download_error", "completion_validation_error"}
+                        and acquisition.bundle_id == snapshot.bundle_id
+                        and acquisition.download_history.state is DownloadState.FAILED
+                        and acquisition.download_history.imported_at is None
+                    )
+                    if acquisition.download_history.state in _TERMINAL_STATES and not legacy_failed:
+                        continue
                     was_completed = (
                         DownloadState(acquisition.download_history.state) is DownloadState.COMPLETED
                     )
@@ -306,6 +372,35 @@ class AirDcppReconciler:
                         not was_completed
                         and acquisition.download_history.state is DownloadState.COMPLETED
                     )
+                    if (
+                        acquisition.download_history.state is DownloadState.FAILED
+                        and acquisition.download_history.imported_at is None
+                        and (
+                            legacy_failed
+                            or acquisition.client_state
+                            in {"download_error", "completion_validation_error"}
+                        )
+                    ):
+                        await record_queue_recovery(
+                            session, acquisition, code=queue_failure_code(bundle), at=now
+                        )
+                        duplicates = (
+                            await session.scalars(
+                                select(AirDcppAcquisition)
+                                .options(joinedload(AirDcppAcquisition.download_history))
+                                .where(
+                                    AirDcppAcquisition.client_state == "duplicate",
+                                    AirDcppAcquisition.route_snapshot[
+                                        "existing_bundle_owner_acquisition_id"
+                                    ].as_integer()
+                                    == acquisition.id,
+                                )
+                            )
+                        ).all()
+                        for duplicate_request in duplicates:
+                            await project_download_operation_progress(
+                                session, duplicate_request.download_history
+                            )
                 elif snapshot.acquisition_id in adopted:
                     adopted_file = adopted[snapshot.acquisition_id]
                     if _active_snapshot_is_current(acquisition, snapshot):
@@ -354,6 +449,15 @@ class AirDcppReconciler:
                         stale_recovered_bundles.add(
                             (snapshot.client_identity, recovered_mutation.bundle_id)
                         )
+                elif snapshot.acquisition_id in recovery_required:
+                    if _active_snapshot_is_current(acquisition, snapshot):
+                        await record_queue_recovery(
+                            session,
+                            acquisition,
+                            code=recovery_required[snapshot.acquisition_id],
+                            at=now,
+                        )
+                        changed += 1
                 elif snapshot.acquisition_id in retry_failures:
                     if _active_snapshot_is_current(acquisition, snapshot):
                         changed += int(
@@ -376,6 +480,13 @@ class AirDcppReconciler:
                     acquisition.download_history,
                     _shared_progress_snapshot(acquisition),
                 )
+                if (
+                    snapshot.client_state == "recovery_check_pending"
+                    and acquisition.bundle_id is not None
+                    and acquisition.client_state
+                    not in {"recovery_check_pending", "recovery_required"}
+                ):
+                    await finish_queue_recovery(session, acquisition.download_history_id)
             await session.commit()
 
         for client_identity, bundle_id in stale_recovered_bundles:
@@ -414,6 +525,60 @@ class AirDcppReconciler:
             partial=not complete_snapshot,
             pages=pages,
         )
+
+    async def defer_unconfirmed_requests(self, client_config_id: int) -> int:
+        """Retain overdue unconfirmed work for review when the client is unavailable."""
+        now = datetime.now(UTC)
+        changed = 0
+        async with self._session_factory() as session:
+            acquisitions = (
+                await session.scalars(
+                    select(AirDcppAcquisition)
+                    .options(joinedload(AirDcppAcquisition.download_history))
+                    .join(DownloadHistory)
+                    .where(
+                        AirDcppAcquisition.client_config_id == client_config_id,
+                        AirDcppAcquisition.bundle_id.is_(None),
+                        AirDcppAcquisition.client_state.in_(
+                            [
+                                "mutation_pending",
+                                "reconcile_pending",
+                                "retry_mutation_pending",
+                                "recovery_check_pending",
+                            ]
+                        ),
+                        AirDcppAcquisition.next_retry_at <= now,
+                        DownloadHistory.state.not_in(_TERMINAL_STATES),
+                        DownloadHistory.imported_at.is_(None),
+                    )
+                    .order_by(AirDcppAcquisition.id)
+                    .limit(_PAGE_SIZE)
+                )
+            ).all()
+            for acquisition in acquisitions:
+                claimed = await session.scalar(
+                    update(AirDcppAcquisition)
+                    .where(
+                        AirDcppAcquisition.id == acquisition.id,
+                        AirDcppAcquisition.bundle_id.is_(None),
+                        AirDcppAcquisition.client_state == acquisition.client_state,
+                        AirDcppAcquisition.next_retry_at == acquisition.next_retry_at,
+                        AirDcppAcquisition.download_history.has(
+                            DownloadHistory.state.not_in(_TERMINAL_STATES)
+                        ),
+                    )
+                    .values(client_state="recovery_required")
+                    .returning(AirDcppAcquisition.id)
+                )
+                if claimed is None:
+                    continue
+                await record_queue_recovery(
+                    session, acquisition, code="queue_lookup_failed", at=now
+                )
+                await project_download_operation_progress(session, acquisition.download_history)
+                changed += 1
+            await session.commit()
+        return changed
 
     async def _request_due_alternate(
         self,
@@ -482,7 +647,11 @@ def _queue_priority(route_snapshot: dict[str, object] | None) -> int | None:
 def _pre_id_retry_due(snapshot: _ActiveSnapshot, *, now: datetime) -> bool:
     if snapshot.client_state == "reconcile_pending":
         return snapshot.next_retry_at is None or snapshot.next_retry_at <= now
-    if snapshot.client_state == "mutation_pending":
+    if snapshot.client_state in {
+        "mutation_pending",
+        "retry_mutation_pending",
+        "recovery_check_pending",
+    }:
         return snapshot.next_retry_at is not None and snapshot.next_retry_at <= now
     return False
 
@@ -497,6 +666,7 @@ def _active_snapshot_is_current(
         and acquisition.bundle_id == snapshot.bundle_id
         and acquisition.client_state == snapshot.client_state
         and acquisition.retry_count == snapshot.retry_count
+        and acquisition.next_retry_at == snapshot.next_retry_at
     )
 
 
@@ -789,12 +959,14 @@ def _apply_adopted_file(
     history = acquisition.download_history
     acquisition.bundle_id = queue_file.bundle_id
     acquisition.client_state = queue_file.status.id
+    acquisition.next_retry_at = None
     acquisition.remote_target = queue_file.target.get_secret_value()
     acquisition.last_reconciled_at = at
     acquisition.reconciliation_error = None
     history.external_id = f"airdcpp:{acquisition.client_config_id}:bundle:{queue_file.bundle_id}"
     if history.imported_at is None and history.state not in _TERMINAL_STATES:
         history.state = DownloadState.SENT
+        history.completed_at = None
         history.next_retry_at = None
         history.error_message = None
     return True

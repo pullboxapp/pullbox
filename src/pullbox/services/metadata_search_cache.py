@@ -8,6 +8,7 @@ from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 
+from pullbox.core.metadata_identity import MetadataSource
 from pullbox.schemas.metadata_sources import (
     SeriesDiscoveryQuery,
     SeriesDiscoveryRead,
@@ -106,6 +107,13 @@ class MetadataSearchCache:
         if task is not None and task.cancelling():
             raise asyncio.CancelledError
         payload = result.model_dump_json().encode()
+        # Account admission already prevents requests during a cooldown. Reusing
+        # its snapshot would freeze the countdown or outlive a short local wait.
+        if any(
+            source.source is MetadataSource.METRON_API and source.retry_after_seconds
+            for source in result.sources
+        ):
+            cache_result = False
         if cache_result and len(payload) <= self.max_bytes:
             while self._entries and (
                 len(self._entries) >= self.max_entries

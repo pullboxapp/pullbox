@@ -22,7 +22,7 @@ from pullbox.providers.airdcpp.contracts import (
     AirDcppQueueBundleAddInfo,
     AirDcppQueueFile,
 )
-from pullbox.providers.airdcpp.errors import AirDcppUnavailableError
+from pullbox.providers.airdcpp.errors import AirDcppResponseError, AirDcppUnavailableError
 from pullbox.services.airdcpp_reconciliation import (
     AirDcppReconciler,
     _shared_progress_snapshot,
@@ -35,6 +35,150 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
 _TTH = "CUO74LMZUQMQCBR5UKTIFJPO32LVUH5VZBOL54Y"
+
+
+@pytest.mark.parametrize("still_failed", [True, False])
+async def test_failed_owner_of_legacy_duplicate_becomes_actionable_not_running(
+    db_factory, still_failed
+):
+    from pullbox.models.pending_match import PendingMatch
+    from pullbox.services.download_operation_progress import project_download_operation_progress
+    from pullbox.services.operation_activity import list_operation_activity
+
+    cid, hid, aid = await _seed(db_factory, state=DownloadState.FAILED)
+    async with db_factory() as session:
+        owner = await session.get(AirDcppAcquisition, aid)
+        owner.client_state = "download_error"
+        original = await session.get(DownloadHistory, hid)
+        duplicate = DownloadHistory(
+            issue_id=original.issue_id,
+            title=original.title,
+            download_url="airdcpp://intent/duplicate",
+            download_client=DownloadClientType.AIRDCPP,
+            state=DownloadState.FAILED,
+            error_message="AirDC++ merged this request into an existing Pullbox download.",
+        )
+        session.add(duplicate)
+        await session.flush()
+        session.add(
+            AirDcppAcquisition(
+                download_history_id=duplicate.id,
+                request_key="duplicate",
+                client_config_id=cid,
+                client_identity=owner.client_identity,
+                tth=owner.tth,
+                size_bytes=owner.size_bytes,
+                original_name=owner.original_name,
+                client_state="duplicate",
+                route_snapshot={"existing_bundle_owner_acquisition_id": aid},
+            )
+        )
+        await project_download_operation_progress(session, duplicate)
+        await session.commit()
+    b = _bundle(status_id="download_error" if still_failed else "queued", failed=still_failed)
+    b = b.model_copy(update={"status": b.status.model_copy(update={"str": "TTH inconsistency"})})
+    api = _FakeApi([[b]])
+    reconciler = AirDcppReconciler(db_factory)
+    await reconciler.reconcile_client(cid, api)
+    await reconciler.reconcile_client(cid, api)
+    async with db_factory() as session:
+        pending = (await session.scalars(select(PendingMatch))).all()
+        assert len(pending) == 1
+        assert pending[0].match_details["dc_download_id"] == hid
+        assert pending[0].match_details["failure_code"] == (
+            "queue_hash_mismatch" if still_failed else "queue_client_failed"
+        )
+        assert (await session.get(AirDcppAcquisition, aid)).bundle_id == 91
+        activity = await list_operation_activity(session)
+        assert activity.active_count == 0
+        assert activity.attention_count == 1
+    assert not api.create_calls and not api.removed_bundles
+
+
+async def test_unavailable_client_cannot_leave_overdue_request_active_forever(db_factory):
+    cid, hid, aid = await _seed(db_factory, state=DownloadState.QUEUED, bundle_id=None)
+    async with db_factory() as session:
+        a = await session.get(AirDcppAcquisition, aid)
+        a.client_state = "mutation_pending"
+        a.next_retry_at = datetime.now(UTC) - timedelta(days=1)
+        await session.commit()
+    assert await AirDcppReconciler(db_factory).defer_unconfirmed_requests(cid) == 1
+    async with db_factory() as session:
+        assert (await session.get(DownloadHistory, hid)).state is DownloadState.FAILED
+    assert await AirDcppReconciler(db_factory).defer_unconfirmed_requests(cid) == 0
+
+
+async def test_overdue_lookup_failure_moves_to_actionable_recovery(db_factory) -> None:
+    from pullbox.models.pending_match import PendingMatch
+    from pullbox.services.operation_activity import list_operation_activity
+
+    client_id, history_id, acquisition_id = await _seed(
+        db_factory, state=DownloadState.QUEUED, bundle_id=None
+    )
+    async with db_factory() as session:
+        acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+        acquisition.client_state = "mutation_pending"
+        acquisition.next_retry_at = datetime.now(UTC) - timedelta(days=1)
+        await session.commit()
+    api = _FakeApi([[]], lookup_failure=AirDcppResponseError("Invalid queue response"))
+    reconciler = AirDcppReconciler(db_factory)
+    await reconciler.reconcile_client(client_id, api)
+    await reconciler.reconcile_client(client_id, api)
+
+    async with db_factory() as session:
+        history = await session.get(DownloadHistory, history_id)
+        acquisition = await session.get(AirDcppAcquisition, acquisition_id)
+        pending = (await session.scalars(select(PendingMatch))).all()
+        assert history.state is DownloadState.FAILED
+        assert acquisition.client_state == "recovery_required"
+        assert acquisition.next_retry_at is None
+        assert len(pending) == 1
+        assert pending[0].match_details["source_kind"] == "dc"
+        assert pending[0].match_details["dc_download_id"] == history_id
+        activity = await list_operation_activity(session)
+        assert activity.active_count == activity.spinner_count == 0
+        assert activity.attention_count == 1
+        assert activity.operations[0].detail_url == "/intervention?tab=recovery&protocol=dc"
+    assert api.retry_calls == api.create_calls == []
+
+
+async def test_pre_id_lookup_budget_eventually_visits_every_request(db_factory) -> None:
+    client_id, _, acquisition_id = await _seed(db_factory, bundle_id=None)
+    async with db_factory() as session:
+        first = await session.get(AirDcppAcquisition, acquisition_id)
+        first.client_state = "mutation_pending"
+        first.next_retry_at = datetime.now(UTC) + timedelta(minutes=5)
+        for n in range(26):
+            history = DownloadHistory(
+                issue_id=(await session.get(DownloadHistory, first.download_history_id)).issue_id,
+                title=f"Example {n}.cbz",
+                download_url=f"airdcpp://intent/fair-{n}",
+                download_client=DownloadClientType.AIRDCPP,
+                state=DownloadState.QUEUED,
+            )
+            session.add(history)
+            await session.flush()
+            session.add(
+                AirDcppAcquisition(
+                    download_history_id=history.id,
+                    request_key=f"fair-{n}",
+                    client_config_id=client_id,
+                    client_identity=f"airdcpp:{client_id}",
+                    tth=(chr(65 + n) * 39),
+                    size_bytes=100,
+                    original_name=history.title,
+                    client_state="mutation_pending",
+                    next_retry_at=first.next_retry_at,
+                )
+            )
+        await session.commit()
+    api = _FakeApi([[]])
+    reconciler = AirDcppReconciler(db_factory)
+    for _ in range(3):
+        await reconciler.reconcile_client(client_id, api)
+    assert len(set(api.tth_calls)) == 27
+    assert len(api.tth_calls) <= 30
+    assert not api.create_calls
 
 
 def test_overshoot_keeps_download_active_and_clamps_display_only() -> None:
@@ -202,6 +346,12 @@ class _FakeApi:
             raise self.lookup_failure
         return self.files
 
+    async def get_queue_bundle(self, bundle_id: int):
+        return next(
+            (b for page in self.pages for b in page if b.id == bundle_id),
+            _bundle(bundle_id=bundle_id),
+        )
+
     async def search_queue_bundle(self, bundle_id: int) -> None:
         self.alternate_calls.append(bundle_id)
 
@@ -310,7 +460,9 @@ async def test_reconciliation_maps_stable_status_fields_without_localized_text(
             if expected is DownloadState.COMPLETED
             else None
         )
-        assert acquisition.client_state == bundle.status.id
+        assert acquisition.client_state == (
+            "recovery_required" if expected is DownloadState.FAILED else bundle.status.id
+        )
         assert acquisition.remote_target == "/Downloads/Example Comic 001 (2026).cbz"
         assert acquisition.last_reconciled_at is not None
         assert operation.source_label == "AirDC++"
@@ -877,16 +1029,16 @@ async def test_pre_id_lookup_failure_does_not_consume_mutation_retry_budget(
     assert api.tth_calls == [_TTH]
     assert api.retry_calls == []
     assert api.create_calls == []
-    assert result.changed == 0
+    assert result.changed == 1
     async with db_factory() as session:
         history = await session.get(DownloadHistory, history_id)
         acquisition = await session.get(AirDcppAcquisition, acquisition_id)
         assert history is not None and acquisition is not None
         assert acquisition.bundle_id is None
-        assert acquisition.client_state == "reconcile_pending"
+        assert acquisition.client_state == "recovery_required"
         assert acquisition.retry_count == 2
-        assert acquisition.reconciliation_error is None
-        assert history.state is DownloadState.RETRY_PENDING
+        assert acquisition.reconciliation_error == "queue_lookup_failed"
+        assert history.state is DownloadState.FAILED
 
 
 @pytest.mark.parametrize(

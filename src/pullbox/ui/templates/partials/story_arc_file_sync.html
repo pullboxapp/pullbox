@@ -1,0 +1,41 @@
+<section id="story-arc-file-sync" aria-label="Story Arc files"
+         hx-get="/story-arcs/{{ file_sync.arc_id }}/file-sync"
+         hx-trigger="{% if file_sync.pending %}every 3s{% else %}story-arc-files-refresh{% endif %}"
+         hx-target="this" hx-swap="morph:outerHTML" hx-ext="morph"
+         hx-sync="this:queue last" hx-push-url="false" hx-indicator="none">
+  {% if file_sync.enabled and file_sync.total %}
+    <div class="rounded-lg border border-pb-border bg-pb-card p-4 space-y-3">
+      <p class="text-sm font-semibold text-pb-text">Story Arc files: {{ file_sync.completed }} of {{ file_sync.total }} synchronized</p>
+      {% if file_sync_message %}<p role="status" class="text-sm text-pb-text-sec">{{ file_sync_message }}</p>{% endif %}
+      {% if file_sync.destination_failures %}
+        <p class="text-sm text-pb-warning">{{ file_sync.destination_failures }} files could not synchronize because the destination folder was unavailable. Check permissions and the mount for <span class="font-mono break-all">{{ file_sync.destination }}</span>, then recheck and retry.</p>
+      {% elif file_sync.failed %}
+        <p class="text-sm text-pb-warning">{{ file_sync.failed }} files could not synchronize. Recheck and retry without changing the originals. Existing files will not be overwritten.</p>
+      {% endif %}
+      {% if file_sync.pending %}
+        <div class="app-progress">
+          <div class="app-progress-track">
+            <div class="app-progress-fill app-progress-fill--interactive" style="width: {{ file_sync.percent }}%"
+                 role="progressbar" aria-label="Story Arc files synchronized"
+                 aria-valuenow="{{ file_sync.percent }}" aria-valuemin="0" aria-valuemax="100"></div>
+          </div>
+          <span class="app-progress-value app-progress-value--interactive">{{ file_sync.percent }}%</span>
+        </div>
+        <p class="text-xs text-pb-text-sec">{{ file_sync.pending }} files pending. You can leave this page while Pullbox works.</p>
+      {% elif file_sync.failed %}
+        <form hx-post="/story-arcs/{{ file_sync.arc_id }}/file-sync/retry"
+              hx-target="#story-arc-file-sync" hx-swap="morph:outerHTML"
+              hx-disabled-elt="find button" hx-indicator="find .htmx-indicator">
+          <input type="hidden" name="expected_revision" value="{{ file_sync.revision }}">
+          <button type="submit" class="btn-secondary btn-sm">Recheck and retry<span class="htmx-indicator ml-2" aria-hidden="true">...</span></button>
+        </form>
+      {% endif %}
+    </div>
+  {% elif file_sync_message %}
+    <p role="status" class="text-sm text-pb-text-sec">{{ file_sync_message }}</p>
+  {% endif %}
+</section>
+{% if file_sync_oob %}
+<span id="story-arc-review-badge" hx-swap-oob="outerHTML" class="pill {{ 'pill-warning' if file_sync.review_count else 'pill-success' }}">{{ file_sync.review_count }} review</span>
+<strong id="story-arc-review-footer" hx-swap-oob="outerHTML" class="page-dock-status-value">{{ file_sync.review_count }}</strong>
+{% endif %}

@@ -32,6 +32,26 @@ from tests.integration.metadata_identity.test_mass_paired_conversion import exec
 pytestmark = pytest.mark.usefixtures("paired_conversion_setting")
 
 
+def _file_snapshot(path: Path) -> tuple[bytes, dict[str, int]]:
+    content = path.read_bytes()
+    stat = path.stat()
+    # Reading may update atime; every write-sensitive field must stay unchanged.
+    return content, {
+        key: getattr(stat, key)
+        for key in (
+            "st_mode",
+            "st_ino",
+            "st_dev",
+            "st_nlink",
+            "st_uid",
+            "st_gid",
+            "st_size",
+            "st_mtime_ns",
+            "st_ctime_ns",
+        )
+    }
+
+
 async def test_same_path_runs_through_real_queue_and_rollback(identity_probe_db, tmp_path):
     _, factory, _ = identity_probe_db
     _, config, _, _, source, file_id, old_id, _ = await prepare_mass(
@@ -94,11 +114,11 @@ async def test_same_path_recovers_only_proven_publication(
         assert journal.state == expected
         assert await recovery.recover_conversion(session, UUID(item["id"])) == expected
     if point == "output":
-        before = source.read_bytes(), source.stat()
+        before = _file_snapshot(source)
         second = await execute(executor, config, context, item)
         assert second.result is ItemResult.COMPLETED
         assert second.after_state == result.after_state
-        assert (source.read_bytes(), source.stat()) == before
+        assert _file_snapshot(source) == before
         async with factory.begin() as session:
             (await session.get(UtilityJob, job_id)).state = JobState.CANCELLING
         manager = JobQueueManager(factory)
@@ -152,13 +172,13 @@ async def test_same_path_protected_sources_remain_untouched(identity_probe_db, t
             (await session.get(Issue, file.issue_id)).issue_number_text = "50-o"
     if condition == "readonly_file":
         source.chmod(0o444)
-    before = source.read_bytes(), source.stat()
+    before = _file_snapshot(source)
     try:
         result = await execute(executor, config, context, item)
         assert result.result is (
             ItemResult.FAILED if condition == "conflict" else ItemResult.SKIPPED
         )
-        assert (source.read_bytes(), source.stat()) == before
+        assert _file_snapshot(source) == before
         assert not list(tmp_path.rglob(".pullbox-conversion-*"))
     finally:
         source.chmod(0o644)
@@ -181,14 +201,14 @@ async def test_same_path_cancel_drains_preparation(identity_probe_db, tmp_path, 
             exited.set()
 
     monkeypatch.setattr(library_convert_service, "prepare_conversion", pending)
-    original = source.read_bytes(), source.stat()
+    original = _file_snapshot(source)
     task = asyncio.create_task(execute(executor, config, context, item))
     await asyncio.wait_for(entered.wait(), 3)
     async with factory.begin() as session:
         (await session.get(UtilityJob, job_id)).state = JobState.CANCELLING
     result = await asyncio.wait_for(task, 3)
     assert result.result is ItemResult.CANCELLED and exited.is_set()
-    assert (source.read_bytes(), source.stat()) == original
+    assert _file_snapshot(source) == original
 
 
 async def test_same_path_lost_acknowledgement_keeps_rollback(
@@ -218,7 +238,7 @@ async def test_same_path_requires_explicit_paired_admission(
 ):
     _, factory, _ = identity_probe_db
     _, _, _, _, source, _, _, _ = await prepare_mass(factory, tmp_path, FileFormat.CBZ)
-    original = source.read_bytes(), source.stat()
+    original = _file_snapshot(source)
     monkeypatch.setenv("PULLBOX_METADATA_PAIRED_CONVERSION_WRITER_ENABLED", str(enabled))
     get_settings.cache_clear()
     async with factory() as session:
@@ -230,7 +250,7 @@ async def test_same_path_requires_explicit_paired_admission(
                 trash_relative_path=source.name,
                 repack_cbz=repack,
             )
-    assert (source.read_bytes(), source.stat()) == original
+    assert _file_snapshot(source) == original
 
 
 async def test_same_path_detects_source_change_after_backup(

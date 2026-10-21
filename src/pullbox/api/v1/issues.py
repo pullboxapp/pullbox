@@ -8,7 +8,7 @@ from pathlib import Path
 import structlog
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
-from sqlalchemy import inspect, select
+from sqlalchemy import inspect, select, update
 from sqlalchemy.orm import joinedload, selectinload
 
 from pullbox.api.deps import AuthenticatedUser, DbSession
@@ -19,9 +19,10 @@ from pullbox.composition.airdcpp import (
 from pullbox.config import get_settings
 from pullbox.core.exceptions import ConfigurationError, NotFoundError, ValidationError
 from pullbox.core.file_safety import classify_resource_safety_exception
+from pullbox.models.airdcpp import AirDcppAcquisition
 from pullbox.models.client import DownloadClientConfig
 from pullbox.models.direct_acquisition import DirectAcquisitionAttempt
-from pullbox.models.download import DownloadClientType, DownloadState
+from pullbox.models.download import DownloadClientType, DownloadHistory, DownloadState
 from pullbox.models.indexer import IndexerConfig
 from pullbox.models.issue import Issue, IssueStatus, IssueType
 from pullbox.models.library import LibraryFile, MatchConfidence
@@ -31,6 +32,7 @@ from pullbox.schemas.issue import (
     IssueFileDeleteResponse,
     IssueResponse,
     IssueUpdate,
+    ManualFileImportPreviewRequest,
     ManualFileImportProgressResponse,
     ManualFileImportRequest,
     ManualFileImportResponse,
@@ -50,7 +52,10 @@ from pullbox.schemas.search import (
 )
 from pullbox.services.airdcpp_acquisition import AirDcppQueueAcquisitionService
 from pullbox.services.airdcpp_automatic_search import attach_automatic_airdcpp_search
-from pullbox.services.airdcpp_route_tokens import get_airdcpp_route_token_store
+from pullbox.services.airdcpp_route_tokens import (
+    can_override_dc_rejection,
+    get_airdcpp_route_token_store,
+)
 from pullbox.services.direct_acquisition_planner_service import (
     DirectAcquisitionPlanningError,
     plan_direct_acquisition,
@@ -69,6 +74,11 @@ from pullbox.services.issue_import_service import (
     prepare_manual_issue_import,
 )
 from pullbox.services.issue_service import IssueService
+from pullbox.services.manual_import_metadata_review import (
+    ManualImportMetadataPreview,
+    preview_manual_import_metadata,
+)
+from pullbox.services.manual_paired_metadata import read_manual_metadata_plan
 from pullbox.services.release_validator import (
     ValidationResult,
 )
@@ -917,6 +927,16 @@ async def grab_direct_connect_release(
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    if not grant.candidate.validation.is_match:
+        if not can_override_dc_rejection(grant.candidate):
+            raise HTTPException(
+                status_code=409, detail="This Direct Connect rejection cannot be overridden."
+            )
+        if not body.override_rejection:
+            raise HTTPException(
+                status_code=409, detail="Review the rejection and confirm Grab anyway first."
+            )
+
     route = grant.candidate.route
     client = (
         await session.execute(
@@ -945,12 +965,54 @@ async def grab_direct_connect_release(
             status_code=409,
             detail="The selected AirDC++ client is not ready.",
         )
+    # Serialize competing grabs before persisting intent, including new search tokens.
+    await session.commit()
+    await session.execute(update(Issue).where(Issue.id == issue_id).values(status=Issue.status))
     issue_result = await session.execute(
         select(Issue).options(joinedload(Issue.library_file)).where(Issue.id == issue_id)
     )
     issue = issue_result.unique().scalar_one_or_none()
     if issue is None:
         raise NotFoundError("Issue", issue_id)
+    if issue.library_file is not None and not body.replace_existing_file:
+        raise HTTPException(
+            status_code=409,
+            detail="This issue is already owned. Confirm Download replacement first.",
+        )
+    existing_intent = await session.scalar(
+        select(AirDcppAcquisition.id).where(
+            AirDcppAcquisition.request_key == grant.request_key,
+        )
+    )
+    if existing_intent is None:
+        active_download = await session.scalar(
+            select(DownloadHistory.id)
+            .where(
+                DownloadHistory.issue_id == issue_id,
+                DownloadHistory.state.in_(
+                    (
+                        DownloadState.QUEUED,
+                        DownloadState.SENT,
+                        DownloadState.DOWNLOADING,
+                        DownloadState.FINALIZING,
+                        DownloadState.PAUSED,
+                        DownloadState.RETRY_PENDING,
+                        DownloadState.POST_PROCESSING,
+                        DownloadState.COMPLETED,
+                    )
+                ),
+                DownloadHistory.imported_at.is_(None),
+            )
+            .limit(1)
+        )
+        if active_download is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This issue already has a download in progress. "
+                    "Review it in Downloads before grabbing another result."
+                ),
+            )
     result = await AirDcppQueueAcquisitionService().acquire(
         session,
         candidate=grant.candidate,
@@ -974,6 +1036,8 @@ async def grab_direct_connect_release(
         download_id=result.download_history_id,
         bundle_id=result.bundle_id,
         client_config_id=route.client_config_id,
+        rejection_overridden=not grant.candidate.validation.is_match,
+        rejection_code=grant.candidate.validation.rejection_code,
     )
     return DcGrabResponse(
         issue_id=issue_id,
@@ -1145,6 +1209,42 @@ async def download_issue(
 
 
 @router.post(
+    "/{issue_id}/import-file/metadata-preview",
+    response_model=ManualImportMetadataPreview | None,
+)
+async def preview_import_file_metadata(
+    issue_id: int,
+    body: ManualFileImportPreviewRequest,
+    _user: AuthenticatedUser,
+    session: DbSession,
+) -> ManualImportMetadataPreview | None:
+    """Review the selected source without registering it or modifying either file."""
+    from pullbox.config import get_settings
+    from pullbox.services.issue_file_metadata import file_metadata_error
+
+    try:
+        prepared = await prepare_manual_issue_import(
+            session,
+            issue_id=issue_id,
+            file_path=body.file_path,
+            move_to_library=body.move_to_library,
+        )
+        if not (
+            get_settings().metadata_paired_import_writer_enabled
+            and prepared.ingest_policy.update_embedded_comicinfo_from_match
+        ):
+            return None
+        plan = await read_manual_metadata_plan(session, issue_id)
+        source = prepared.source_path
+        await session.rollback()
+        return (await preview_manual_import_metadata(plan, source, body.choices)).preview
+    except ManualIssueImportError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=409, detail=file_metadata_error(exc)) from exc
+
+
+@router.post(
     "/{issue_id}/import-file",
     status_code=201,
     response_model=ManualFileImportResponse,
@@ -1171,6 +1271,7 @@ async def import_file_for_issue(
             session,
             prepared,
             allow_resource_safety_exception=body.allow_resource_safety_exception,
+            metadata_approval=body.metadata_approval,
         )
         library_file = result.library_file
     except ManualIssueImportError as exc:
@@ -1192,6 +1293,11 @@ async def import_file_for_issue(
         file_name=library_file.file_name,
         transfer_method=result.ingest_policy.post_processing_method,
     )
+
+    from pullbox.services.direct_metadata_recovery import reconcile_metadata_replacements
+
+    await session.commit()
+    await reconcile_metadata_replacements(session, issue_id)
 
     return _build_manual_file_import_response(
         issue_id=issue_id,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from pullbox.api.deps import (  # noqa: TC001 - FastAPI resolves route annotations
@@ -86,14 +86,18 @@ def operation_progress_read(operation: OperationProgress) -> OperationProgressRe
 async def get_activity(
     _user: AuthenticatedUser,
     session: DbSession,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
 ) -> OperationActivityRead:
     """Return visible active, recent, and attention-requiring operations."""
-    activity = await list_operation_activity(session)
+    activity = await list_operation_activity(session, limit=limit, offset=offset)
     return OperationActivityRead(
         operations=[operation_progress_read(item) for item in activity.operations],
         active_count=activity.active_count,
         spinner_count=activity.spinner_count,
         attention_count=activity.attention_count,
+        total_count=activity.total_count,
+        refresh_after_ms=activity.refresh_after_ms,
     )
 
 

@@ -48,6 +48,27 @@ def _codes(data: MetronInfoData) -> set[Code]:
     return {item.code for item in data.diagnostics}
 
 
+@pytest.mark.parametrize("length", [4097, 11531, 200000])
+def test_long_summary_retains_full_supported_description(length: int) -> None:
+    summary = "S" * length
+    data = parse_metroninfo(_xml(extra=f"<Summary>{summary}</Summary>"))
+    assert data.summary == summary
+    assert data.diagnostics == ()
+
+
+@pytest.mark.parametrize(
+    "extra,locator",
+    [
+        (f"<Summary>{'S' * 200001}</Summary>", "Summary"),
+        ("<Summary><Unexpected>text</Unexpected></Summary>", "Summary"),
+        (f"<Notes>{'N' * 4097}</Notes>", "Notes"),
+    ],
+)
+def test_summary_allowance_does_not_relax_other_limits(extra: str, locator: str) -> None:
+    data = parse_metroninfo(_xml(extra=extra))
+    assert any(d.code is Code.INVALID_FIELD and d.locator == locator for d in data.diagnostics)
+
+
 def test_v1_0_core_fields_and_parent_identity_use_primary_source() -> None:
     data = parse_metroninfo((FIXTURES / "v1_0.xml").read_bytes())
     assert data.series == "Harbor Lights"

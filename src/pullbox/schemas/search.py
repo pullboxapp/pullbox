@@ -3,7 +3,7 @@
 from datetime import date
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 
 class SeriesSearchResult(BaseModel):
@@ -219,6 +219,8 @@ class DcGrabRequest(BaseModel):
         max_length=200,
         description="Opaque server-side Direct Connect route grant",
     )
+    override_rejection: StrictBool = False
+    replace_existing_file: StrictBool = False
 
 
 class DcGrabResponse(BaseModel):

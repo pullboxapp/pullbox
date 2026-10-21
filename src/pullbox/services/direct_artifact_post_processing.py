@@ -212,15 +212,6 @@ async def run_direct_artifact_pack_post_processing(
         if get_settings().metadata_paired_direct_writer_enabled or allow_resource_safety_exception
         else None
     )
-    extracted_paths = await asyncio.to_thread(
-        extract_same_series_issue_files,
-        source_path,
-        destination=source_path.parent / "pack-members",
-        expected_issue_numbers=expected_issue_numbers,
-        expected_series_titles=frozenset(
-            (initiating_issue.series.title, *(initiating_issue.series.alternate_names or []))
-        ),
-    )
     issues_result = await session.execute(
         select(Issue)
         .options(
@@ -235,6 +226,31 @@ async def run_direct_artifact_pack_post_processing(
         ): issue
         for issue in issues_result.unique().scalars()
     }
+    required_numbers = frozenset(
+        number
+        for number, candidate in issue_by_number.items()
+        if number in expected_issue_numbers
+        and (
+            getattr(candidate, "library_file", None) is None
+            or (candidate.id == issue_id and replace_existing_file)
+        )
+        and (
+            candidate.id == issue_id
+            or candidate.status in {IssueStatus.WANTED, IssueStatus.DOWNLOADING}
+        )
+    )
+    if not required_numbers:
+        raise RuntimeError("No wanted issues in this direct-download pack can be imported.")
+    extracted_paths = await asyncio.to_thread(
+        extract_same_series_issue_files,
+        source_path,
+        destination=source_path.parent / "pack-members",
+        expected_issue_numbers=expected_issue_numbers,
+        required_issue_numbers=required_numbers,
+        expected_series_titles=frozenset(
+            (initiating_issue.series.title, *(initiating_issue.series.alternate_names or []))
+        ),
+    )
     prepared_imports = []
     for issue_number_text, file_path in sorted(extracted_paths.items()):
         candidate = issue_by_number.get(issue_number_text)

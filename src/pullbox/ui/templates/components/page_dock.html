@@ -24,7 +24,7 @@
           <span class="page-dock-led page-dock-led-{{ item.led }}"></span>
         {% endif %}
         {% if item.label %}<span class="page-dock-status-label">{{ item.label }}</span>{% endif %}
-        <strong class="page-dock-status-value">{{ item.value }}</strong>
+        <strong{% if item.value_id %} id="{{ item.value_id }}"{% endif %} class="page-dock-status-value">{{ item.value }}</strong>
       </span>
     {% endfor %}
   </div>
