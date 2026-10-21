@@ -1,12 +1,27 @@
 """Remount tolerance requires saved content, never a filename or stat-only guess."""
 
 import os
+import time
 from pathlib import Path
 
 import pytest
 
 from pullbox.core.exceptions import ConfigurationError
 from pullbox.services import direct_metadata_file_proof as evidence
+
+
+def _change_bytes_preserving_mtime(path: Path) -> None:
+    stat = path.stat()
+    path.write_bytes(b"changed! comic bytes")
+    deadline = time.monotonic() + 1
+    # Linux may coalesce a tiny rewrite into the original ctime clock tick.
+    # This test exercises changed ctime with unchanged size and mtime.
+    while True:
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        if path.stat().st_ctime_ns != stat.st_ctime_ns:
+            return
+        assert time.monotonic() < deadline, "Filesystem ctime did not advance"
+        time.sleep(0.01)
 
 
 @pytest.fixture
@@ -57,9 +72,7 @@ def test_verified_writer_control_checks_do_not_rehash_unchanged_archive(retained
             evidence, "capture_file_proof", lambda _: pytest.fail("Repeated archive hash")
         )
         assert evidence.verify_file_proof(path, saved, digest, verified) == verified
-    stat = path.stat()
-    path.write_bytes(b"changed! comic bytes")
-    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    _change_bytes_preserving_mtime(path)
     with pytest.raises(ValueError):
         evidence.verify_file_proof(path, saved, digest, verified)
 
@@ -95,9 +108,7 @@ def test_same_stat_byte_change_during_hash_is_rejected(retained, monkeypatch):
 
     def changed(target: Path):
         result = original(target)
-        stat = target.stat()
-        target.write_bytes(b"changed! comic bytes")
-        os.utime(target, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        _change_bytes_preserving_mtime(target)
         return result
 
     monkeypatch.setattr(evidence, "build_managed_placement_signature", changed)
