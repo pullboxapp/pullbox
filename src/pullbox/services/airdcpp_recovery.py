@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import PurePath
 from typing import TYPE_CHECKING, Protocol
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.orm import joinedload
 
 from pullbox.models.airdcpp import AirDcppAcquisition
@@ -15,7 +15,7 @@ from pullbox.models.download import DownloadHistory, DownloadState
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.pending_match import PendingMatch, PendingMatchStatus
 from pullbox.providers.airdcpp.errors import AirDcppEntityNotFoundError, AirDcppError
-from pullbox.services.airdcpp_acquisition import AirDcppQueueApi
+from pullbox.services.airdcpp_acquisition import AirDcppQueueApi, lock_queue_intents
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -49,6 +49,11 @@ RECOVERY_MESSAGES = {
     "queue_request_unconfirmed": (
         "AirDC++ has not confirmed this request. "
         "Recheck the client, retry the request, or cancel it."
+    ),
+    "queue_bundle_shared": (
+        "This AirDC++ bundle is shared by another Pullbox request. "
+        "Recheck AirDC++ to reconnect it, or cancel the shared bundle in AirDC++ "
+        "before cancelling this request. No download or library file was removed."
     ),
 }
 
@@ -164,6 +169,7 @@ async def act_on_queue_recovery(
     acquisition_id = acquisition.id
     client_identity = acquisition.client_identity
     expected_bundle = acquisition.bundle_id
+    await lock_queue_intents(session, acquisition.client_config_id)
     claimed = await session.scalar(
         update(AirDcppAcquisition)
         .where(
@@ -237,6 +243,30 @@ async def act_on_queue_recovery(
             if bundle_id is not None
             else None
         )
+        shared_bundle = owner_id is not None
+        if action == "cancel" and bundle_id is not None:
+            # Intents admitted before our claim may still be merging remotely.
+            # Later admissions are blocked by the durable claim above.
+            shared_bundle = (
+                await session.scalar(
+                    select(AirDcppAcquisition.id)
+                    .join(DownloadHistory)
+                    .where(
+                        AirDcppAcquisition.client_identity == client_identity,
+                        AirDcppAcquisition.id != acquisition_id,
+                        or_(
+                            AirDcppAcquisition.bundle_id == bundle_id,
+                            and_(
+                                AirDcppAcquisition.tth == acquisition.tth,
+                                AirDcppAcquisition.size_bytes == acquisition.size_bytes,
+                                AirDcppAcquisition.client_state.is_distinct_from("cancelled"),
+                                DownloadHistory.imported_at.is_(None),
+                            ),
+                        ),
+                    )
+                    .limit(1)
+                )
+            ) is not None
         issue = await session.get(Issue, history.issue_id)
         another_active = await session.scalar(
             select(DownloadHistory.id)
@@ -270,6 +300,9 @@ async def act_on_queue_recovery(
             raise ValueError(
                 "This request changed while it was being checked. Refresh before retrying."
             )
+        if action == "cancel" and shared_bundle and expected_bundle == bundle_id:
+            code = "queue_bundle_shared"
+            raise ValueError(RECOVERY_MESSAGES[code])
         added = None
         if not files and action == "retry":
             if issue is None or issue.status is IssueStatus.OWNED or another_active is not None:
@@ -286,7 +319,7 @@ async def act_on_queue_recovery(
             )
             bundle_id = added.id
             created_bundle = None if added.merged else added.id
-        elif action == "cancel" and bundle_id is not None and owner_id is None:
+        elif action == "cancel" and bundle_id is not None and not shared_bundle:
             with suppress(AirDcppEntityNotFoundError):
                 await api.remove_queue_bundle(bundle_id)
 
@@ -336,6 +369,8 @@ async def act_on_queue_recovery(
             ):
                 issue.status = IssueStatus.WANTED
             message = "AirDC++ request cancelled. No library files were deleted."
+            if shared_bundle:
+                message += " The shared AirDC++ bundle was kept for another request."
         elif bundle_id is not None:
             owner_id = await session.scalar(
                 select(AirDcppAcquisition.id).where(

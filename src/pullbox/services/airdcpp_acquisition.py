@@ -12,6 +12,7 @@ from sqlalchemy import select, update
 
 from pullbox.core.acquisition import AcquisitionProtocol
 from pullbox.models.airdcpp import AirDcppAcquisition
+from pullbox.models.client import DownloadClientConfig
 from pullbox.models.download import DownloadClientType, DownloadHistory, DownloadState
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.providers.airdcpp.errors import (
@@ -72,6 +73,18 @@ class AirDcppQueueAcquisitionResult:
     state: DownloadState
 
 
+async def lock_queue_intents(session: AsyncSession, client_config_id: int | None) -> None:
+    """Serialize short intent/claim transactions, never remote queue operations."""
+    client_id = await session.scalar(
+        update(DownloadClientConfig)
+        .where(DownloadClientConfig.id == client_config_id)
+        .values(updated_at=DownloadClientConfig.updated_at)
+        .returning(DownloadClientConfig.id)
+    )
+    if client_id is None:
+        raise ValueError("The AirDC++ client is no longer configured. Refresh before retrying.")
+
+
 class AirDcppQueueAcquisitionService:
     """Create one idempotent intent and reconcile ambiguous mutation outcomes."""
 
@@ -89,6 +102,23 @@ class AirDcppQueueAcquisitionService:
     ) -> AirDcppQueueAcquisitionResult:
         if not request_key or len(request_key) > 255:
             raise ValueError("Invalid Direct Connect request identity")
+        await lock_queue_intents(session, candidate.route.client_config_id)
+        recovery_claim = await session.scalar(
+            select(AirDcppAcquisition.id)
+            .where(
+                AirDcppAcquisition.client_identity == candidate.route.client_identity,
+                AirDcppAcquisition.tth == candidate.route.tth,
+                AirDcppAcquisition.size_bytes == candidate.route.size_bytes,
+                AirDcppAcquisition.client_state == "recovery_check_pending",
+            )
+            .limit(1)
+        )
+        if recovery_claim is not None:
+            await session.commit()
+            raise ValueError(
+                "This AirDC++ file is being checked or cancelled. Wait for recovery to finish, "
+                "then retry. No new request was sent."
+            )
         existing = (
             await session.execute(
                 select(AirDcppAcquisition).where(AirDcppAcquisition.request_key == request_key)
