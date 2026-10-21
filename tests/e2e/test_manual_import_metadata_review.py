@@ -1,43 +1,45 @@
 """Manual import offers choices before starting background file work."""
 
-import os
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 from playwright.sync_api import expect
 
 from tests.e2e.accessibility import assert_no_axe_violations
-from tests.e2e.conftest import _run_async_blocking, _running_live_server
+from tests.e2e.conftest import _run_async_blocking
 
 pytestmark = pytest.mark.e2e
 
 
-@pytest.fixture(scope="session")
-def live_server():
-    with (
-        patch.dict(os.environ, {"PULLBOX_METADATA_PAIRED_IMPORT_WRITER_ENABLED": "true"}),
-        _running_live_server() as server,
-    ):
-        yield server
-
-
 @pytest.fixture(autouse=True)
-def enable_manual_metadata(seeded_server):
+def enable_manual_metadata(seeded_server, monkeypatch):
+    from pullbox.config import get_settings
     from pullbox.database import get_session_factory
     from pullbox.models.config import SystemConfig
 
-    async def configure():
-        async with get_session_factory().begin() as session:
-            await session.merge(
-                SystemConfig(
-                    key="update_embedded_comicinfo_from_match_on_import",
-                    value="true",
-                    value_type="bool",
-                )
-            )
+    # A second in-process server would replace the shared database engine.
+    settings = get_settings().model_copy(update={"metadata_paired_import_writer_enabled": True})
+    monkeypatch.setattr("pullbox.ui.series_detail_routes.get_settings", lambda: settings)
 
-    _run_async_blocking(configure())
+    async def configure(value):
+        async with get_session_factory().begin() as session:
+            key = "update_embedded_comicinfo_from_match_on_import"
+            row = await session.get(SystemConfig, key)
+            previous = row.value if row is not None else None
+            if value is None:
+                if row is not None:
+                    await session.delete(row)
+            elif row is not None:
+                row.value = value
+            else:
+                session.add(SystemConfig(key=key, value=value, value_type="bool"))
+            return previous
+
+    previous = _run_async_blocking(configure("true"))
+    try:
+        yield
+    finally:
+        _run_async_blocking(configure(previous))
 
 
 @pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 390), ("dark", 1280)])
