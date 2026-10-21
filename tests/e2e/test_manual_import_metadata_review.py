@@ -1,7 +1,5 @@
 """Manual import offers choices before starting background file work."""
 
-from pathlib import Path
-
 import pytest
 from playwright.sync_api import expect
 
@@ -43,7 +41,9 @@ def enable_manual_metadata(seeded_server, monkeypatch):
 
 
 @pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 390), ("dark", 1280)])
-def test_manual_import_reviews_fields_before_start(authed_page, seeded_server, theme, width):
+def test_manual_import_reviews_fields_before_start(
+    authed_page, seeded_server, theme, width, tmp_path
+):
     page = authed_page
     page.set_viewport_size({"width": width, "height": 1000})
     starts = []
@@ -105,7 +105,7 @@ def test_manual_import_reviews_fields_before_start(authed_page, seeded_server, t
     assert_no_axe_violations(
         page, name=f"manual-import-review-{theme}", include=['[data-testid="issue-import-modal"]']
     )
-    page.screenshot(path=str(Path("/private/tmp") / f"bug8-review-{theme}-{width}.png"))
+    page.screenshot(path=tmp_path / f"bug8-review-{theme}-{width}.png")
     button.click()
     expect(dialog.get_by_role("progressbar")).to_have_attribute("aria-valuenow", "40")
     assert starts == [
@@ -125,7 +125,7 @@ def test_manual_import_reviews_fields_before_start(authed_page, seeded_server, t
     "theme,width,height", [("light", 1280, 720), ("dark", 390, 844), ("light", 844, 390)]
 )
 def test_long_manual_review_scrolls_between_visible_header_and_actions(
-    authed_page, seeded_server, theme, width, height
+    authed_page, seeded_server, theme, width, height, tmp_path
 ):
     page = authed_page
     page.set_viewport_size({"width": width, "height": height})
@@ -196,6 +196,6 @@ def test_long_manual_review_scrolls_between_visible_header_and_actions(
     button = footer.get_by_role("button", name="Import reviewed file", exact=True)
     expect(button).to_be_enabled()
     expect(button).to_be_in_viewport(ratio=1)
-    page.screenshot(path=f"/private/tmp/bug8-scroll-{theme}-{width}x{height}.png")
+    page.screenshot(path=tmp_path / f"bug8-scroll-{theme}-{width}x{height}.png")
     footer.get_by_role("button", name="Close", exact=True).click()
     expect(modal).not_to_be_visible()

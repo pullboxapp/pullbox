@@ -125,7 +125,7 @@ def test_completion_expires_before_next_regular_poll(activity_page):
 
 
 @pytest.mark.parametrize("theme", ["light", "dark", "system"])
-def test_open_refreshes_and_pagination_exposes_all_jobs(activity_page, theme):
+def test_open_refreshes_and_pagination_exposes_all_jobs(activity_page, theme, tmp_path):
     page = activity_page
     page.evaluate("theme => applyTheme(theme)", theme)
     page.set_viewport_size({"width": 390, "height": 568})
@@ -145,7 +145,7 @@ def test_open_refreshes_and_pagination_exposes_all_jobs(activity_page, theme):
     expect(panel).to_contain_text("21-27 of 27")
     expect(panel).to_contain_text("27 active")
     expect(panel.get_by_test_id("header-activity-operation")).to_have_count(7)
-    page.screenshot(path=f"/private/tmp/pullbox-bug3-activity-{theme}.png")
+    page.screenshot(path=tmp_path / f"pullbox-bug3-activity-{theme}.png")
 
 
 def test_failed_fetch_retries_without_blanking(activity_page):
