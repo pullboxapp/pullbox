@@ -9,7 +9,10 @@ ComicInfo.xml spec: https://anansi-project.github.io/docs/comicinfo/schemas/v2.1
 
 from __future__ import annotations
 
+import contextlib
+import os
 import shutil
+import stat
 import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
@@ -278,6 +281,26 @@ def _find_comicinfo_member(source: zipfile.ZipFile) -> zipfile.ZipInfo | None:
     return None
 
 
+def _copy_permission_bits(reference: Path, target: Path) -> None:
+    """Give a rewritten archive the permission bits of the file it stands in for.
+
+    Rewrites go through ``tempfile.mkstemp``, which creates the file as 0600. Left
+    alone, an archive that was readable by a media server before the rewrite is
+    owner-only afterwards. Best effort: filesystems that reject chmod, such as some
+    SMB/CIFS mounts, must not fail the rewrite, but the failure is logged so an
+    owner-only archive can be traced back to it.
+    """
+    try:
+        os.chmod(target, stat.S_IMODE(reference.stat().st_mode))
+    except OSError as exc:
+        logger.warning(
+            "comicinfo_permission_bits_not_restored",
+            reference=str(reference),
+            target=str(target),
+            error=str(exc),
+        )
+
+
 def embed_comicinfo_in_cbz(
     cbz_path: Path,
     data: dict[str, Any],
@@ -371,6 +394,7 @@ def embed_comicinfo_in_cbz(
             )
 
         # Atomic replace
+        _copy_permission_bits(cbz_path, tmp_path)
         shutil.move(str(tmp_path), str(cbz_path))
 
         logger.info(
@@ -388,9 +412,6 @@ def embed_comicinfo_in_cbz(
             tmp_path.unlink()
         raise
     finally:
-        import contextlib
-        import os
-
         # Close the file descriptor if still open
         if tmp_fd >= 0:
             with contextlib.suppress(OSError):
@@ -481,6 +502,8 @@ def materialize_cbz_with_comicinfo(
                     "entries",
                 )
 
+        # A plain move or copy would carry the source's mode to the target.
+        _copy_permission_bits(source_path, temp_output_path)
         shutil.move(str(temp_output_path), str(target_path))
         if transfer_method == "move" and source_path.resolve(strict=False) != target_path.resolve(
             strict=False
@@ -516,9 +539,6 @@ def materialize_cbz_with_comicinfo(
             temp_output_path.unlink()
         raise
     finally:
-        import contextlib
-        import os
-
         if tmp_fd >= 0:
             with contextlib.suppress(OSError):
                 os.close(tmp_fd)
