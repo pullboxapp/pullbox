@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from pullbox.core.exceptions import ImportProviderDegradedError, JobPausedError
 from pullbox.core.issue_numbers import normalize_issue_number_text
+from pullbox.core.metadata_identity import IdentityNamespace
 from pullbox.core.release_parser import parse_release_title
 from pullbox.models.import_job import (
     ImportedFile,
@@ -34,6 +35,7 @@ from pullbox.models.import_job import (
 )
 from pullbox.models.issue import Issue
 from pullbox.models.library import LibraryFile
+from pullbox.models.metadata_identity import IssueExternalIdentity
 from pullbox.models.series import IssueCatalogState, Series
 from pullbox.schemas.import_job import ImportProgressEvent
 from pullbox.services.import_duplicates import DuplicateMergeProfile
@@ -69,6 +71,11 @@ from pullbox.services.import_file_split_series import (
     split_explicit_issue_series_mismatches as _split_explicit_issue_series_mismatches,
 )
 from pullbox.services.import_known_annuals import reassign_to_known_annual_series
+from pullbox.services.import_metron_matching import (
+    file_metron_evidence,
+    load_metron_issue_targets,
+    metron_file_candidate,
+)
 from pullbox.services.import_progress_runtime import (
     ScanReviewFileMatchProfile,
     ScanReviewProgressPlan,
@@ -1030,6 +1037,22 @@ async def _load_existing_series_page_target_index(
         identity_filters.append(Issue.comicvine_id.in_(sorted(requested_cv_ids)))
     if requested_issue_numbers:
         identity_filters.append(Issue.issue_number.in_(sorted(requested_issue_numbers)))
+    if imp_series.cv_match_method == "metron_id":
+        metron_ids = {
+            ref["id"]
+            for file in files
+            for ref in (file_metron_evidence(file) or {}).get("identities", [])
+            if ref.get("namespace") == "metron" and ref.get("kind") == "issue"
+        }
+        if metron_ids:
+            identity_filters.append(
+                Issue.id.in_(
+                    sa_select(IssueExternalIdentity.issue_id).where(
+                        IssueExternalIdentity.identity_namespace == IdentityNamespace.METRON,
+                        IssueExternalIdentity.external_id.in_(metron_ids),
+                    )
+                )
+            )
     if not identity_filters:
         return target_index
 
@@ -1052,6 +1075,8 @@ async def _load_existing_series_page_target_index(
 
     ambiguous_issue_numbers: set[float] = set()
     for issue, owned in target_rows:
+        if imp_series.cv_match_method == "metron_id":
+            target_index.issue_entries.append((issue, bool(owned)))
         entry = (issue.id, issue.comicvine_id, bool(owned), issue, issue.title)
         if issue.comicvine_id is not None:
             target_index.cv_id_map[issue.comicvine_id] = entry
@@ -1063,6 +1088,8 @@ async def _load_existing_series_page_target_index(
             ambiguous_issue_numbers.add(issue.issue_number)
             continue
         target_index.number_map[issue.issue_number] = entry
+    if imp_series.cv_match_method == "metron_id":
+        await load_metron_issue_targets(session, target_index, files)
     return target_index
 
 
@@ -2069,6 +2096,11 @@ def _evaluate_file_match_candidate(
     build_import_metadata_conflict: BuildImportMetadataConflictFunc,
     series_high_confidence: bool,
 ) -> tuple[FileMatchCandidate | None, dict[str, Any] | None]:
+    if (
+        imp_series.cv_match_method == "metron_id"
+        or (imp_series.diagnostics or {}).get("metron_import") is not None
+    ):
+        return metron_file_candidate(imp_file, target_index)
     match_candidate = select_file_match_candidate(
         imp_file,
         target_index,

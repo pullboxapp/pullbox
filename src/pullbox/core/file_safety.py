@@ -28,6 +28,8 @@ from pullbox.core.page_sources.base import canonical_page_names
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from pullbox.core.archive_metadata import ArchiveMetadataFiles
+
 logger = structlog.get_logger(__name__)
 
 # ── Defaults ──────────────────────────────────────────────────
@@ -132,6 +134,7 @@ class ZipArchiveSafetyReport:
     comicinfo_entry_count: int
     comicinfo_error: str | None
     page_count: int | None = None
+    metadata_files: ArchiveMetadataFiles | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -464,6 +467,14 @@ def inspect_zip_archive_safety(
             comicinfo: ComicInfoData | None = None
             comicinfo_entry = comicinfo_entries[0].filename if comicinfo_entries else None
             comicinfo_error: str | None = None
+            metadata_files = None
+            if any(
+                PurePosixPath(entry.filename.replace("\\", "/")).name.casefold() == "metroninfo.xml"
+                for entry in entries
+            ):
+                from pullbox.core.archive_metadata import read_open_metadata_members
+
+                metadata_files = read_open_metadata_members(entries, lambda member: zf.open(member))
             if comicinfo_entries:
                 comicinfo_member = comicinfo_entries[0]
                 if comicinfo_member.file_size > _MAX_COMICINFO_XML_BYTES:
@@ -504,6 +515,7 @@ def inspect_zip_archive_safety(
         comicinfo_entry=comicinfo_entry,
         comicinfo_entry_count=len(comicinfo_entries),
         comicinfo_error=comicinfo_error,
+        metadata_files=metadata_files,
         page_count=len(
             canonical_page_names(
                 [

@@ -384,6 +384,9 @@ class SourceMetadataExtractor:
                     archive_member_evidence.get("comicinfo_entry_count") or 0
                 ),
             }
+            metron = archive_member_evidence.get("metron_import")
+            if isinstance(metron, dict):
+                evidence_diagnostics["metron_import"] = metron
             comicinfo_error = archive_member_evidence.get("comicinfo_error")
             if isinstance(comicinfo_error, str):
                 evidence_diagnostics["comicinfo_error"] = comicinfo_error

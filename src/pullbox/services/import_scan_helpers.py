@@ -28,6 +28,7 @@ from pullbox.core.source_metadata import archive_entry_issue_hint_from_names
 from pullbox.models.import_job import ImportedFile, ImportedSeries, ImportJob
 from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
 from pullbox.services.import_content_inspection import inspect_import_content
+from pullbox.services.import_metron_matching import metron_import_evidence
 from pullbox.services.import_safety_diagnostics import build_import_safety_diagnostics
 from pullbox.services.import_scan_reconciliation import reconcile_discovered_mylar_paths
 
@@ -243,8 +244,15 @@ async def validate_discovered_files_safety(
                 )
                 if archive_report is None:
                     continue
+                metron_evidence = (
+                    await asyncio.to_thread(metron_import_evidence, archive_report.metadata_files)
+                    if archive_report.metadata_files is not None
+                    else None
+                )
                 for discovered_file in discovered_files:
                     metadata_diagnostics = dict(discovered_file.metadata_diagnostics)
+                    if metron_evidence is not None:
+                        metadata_diagnostics["metron_import"] = metron_evidence
                     if archive_report.comicinfo_entry_count == 0:
                         async with bounded_thread_map(
                             partial(
@@ -271,6 +279,8 @@ async def validate_discovered_files_safety(
                         "member_index_scanned": True,
                         "comicinfo_entry_count": archive_report.comicinfo_entry_count,
                     }
+                    if "metron_import" in metadata_diagnostics:
+                        archive_evidence["metron_import"] = metadata_diagnostics["metron_import"]
                     if archive_report.comicinfo_entry is not None:
                         archive_evidence["comicinfo_entry"] = archive_report.comicinfo_entry
                     if archive_report.comicinfo is not None:

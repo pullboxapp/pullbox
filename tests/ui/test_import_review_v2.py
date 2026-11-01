@@ -221,7 +221,7 @@ async def test_v2_ready_table_and_gate_preserve_file_selection(authenticated_cli
         "Select all on this page",
         "Series",
         "Files",
-        "ComicVine match",
+        "Series match",
         "Confidence",
         "Actions",
     ]
@@ -231,6 +231,45 @@ async def test_v2_ready_table_and_gate_preserve_file_selection(authenticated_cli
     assert "Imports now" in gate
     assert "Stays behind" in gate
     assert "Follow-up" in gate
+
+
+@pytest.mark.parametrize("series_id", ["21", "999"])
+async def test_metron_folder_review_is_selectable_without_comicvine_controls(
+    authenticated_client, sec_db, tmp_path, series_id
+):
+    from pullbox.schemas.import_job import ImportJobCreate
+    from tests.integration.test_metron_folder_import import _archive, _service, _setup
+
+    async with sec_db() as session:
+        root, _, _ = await _setup(session, tmp_path)
+        source = tmp_path / "source"
+        _archive(source / "Unsorted" / "unidentified.cbz", series_id=series_id)
+        service = _service()
+        job = await service.create_job(
+            session,
+            ImportJobCreate(
+                source_path=str(source), source_type="filesystem", target_library_root_id=root.id
+            ),
+        )
+        await service.start_scan(session, job.id)
+        await session.commit()
+        job_id = job.id
+    lane = "ready" if series_id == "21" else "decide"
+    response = await authenticated_client.get(f"/import/{job_id}/review-partial?status={lane}")
+    assert response.status_code == 200
+    workspace = response.text.split('id="import-review-workspace"', 1)[1]
+    assert "Search ComicVine" not in workspace
+    assert "Change ComicVine match" not in workspace
+    assert 'data-testid="import-review-cv-id-link"' not in workspace
+    if series_id == "21":
+        assert "Metron identity" in workspace
+        assert "data-import-review-duplicate-selectable" in workspace
+        assert 'data-testid="import-review-file-select"' in workspace
+        assert "1 ready" in workspace
+        assert "Harbor Lights" in workspace
+    else:
+        assert "Skip series" in workspace
+        assert "scan this folder again" in workspace
 
 
 def _headers(html):

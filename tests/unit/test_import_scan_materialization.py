@@ -125,6 +125,36 @@ async def test_materialization_batches_file_inserts_without_losing_review_rows(d
     )
 
 
+async def test_mylar_keeps_existing_identity_path_with_metron_archive_evidence(db_session):
+    job = await _create_job(db_session)
+    job.source_type = ImportSourceType.MYLAR3
+    file = _discovered_file()
+    file.metadata_diagnostics["metron_import"] = {
+        "primary_source": "metron",
+        "number": "13a",
+        "identities": [{"namespace": "metron", "kind": "series", "id": "21"}],
+        "problems": [],
+    }
+    discovered = DiscoveredSeries(
+        raw_series_name="Absolute Wonder Woman",
+        raw_year=2024,
+        raw_publisher="DC",
+        file_count=1,
+        sample_paths=[file.file_path],
+        source_folder="/tmp/comics",
+        source_folder_relative=".",
+        files=[file],
+        mylar3_cv_id=111,
+    )
+    pairs = await materialize_discovered_scan_results(db_session, job, [discovered])
+    assert pairs[0][1].cv_id == 111
+    assert pairs[0][1].cv_match_method == "mylar3_cv_id"
+    assert "metron_import" not in pairs[0][1].diagnostics
+    row = (await db_session.scalars(select(ImportedFile))).one()
+    assert row.parsed_issue_number == 19
+    assert row.issue_number_raw == "019"
+
+
 def _discovered_file(
     *,
     name: str = "Absolute Wonder Woman 019.cbz",

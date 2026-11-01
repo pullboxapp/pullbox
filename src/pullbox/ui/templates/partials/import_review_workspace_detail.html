@@ -16,17 +16,21 @@
       <dl class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-xs">
         <dt class="text-pb-text-dim">Title</dt><dd class="text-pb-text">{{ item.raw_series_name }}</dd>
         <dt class="text-pb-text-dim">Year</dt><dd>{{ item.raw_year or 'Unknown' }}</dd>
-        <dt class="text-pb-text-dim">Threshold</dt><dd>{{ (job.cv_match_threshold * 100)|round|int }}%</dd>
+        {% if not metron_row %}<dt class="text-pb-text-dim">Threshold</dt><dd>{{ (job.cv_match_threshold * 100)|round|int }}%</dd>{% endif %}
         {% if known_cv_id %}<dt class="text-pb-text-dim">ComicVine</dt><dd><a data-testid="import-review-cv-id-link" class="text-pb-interactive hover:underline" href="{{ item.cv_url or ('https://comicvine.gamespot.com/volume/4050-' ~ known_cv_id ~ '/') }}" target="_blank" rel="noopener noreferrer">{{ item.cv_title or item.raw_series_name }} &middot; {{ known_cv_id }}</a></dd>{% elif known_series_target %}<dt class="text-pb-text-dim">Series</dt><dd>{{ item.cv_title or item.raw_series_name }}</dd>{% endif %}
         <dt class="text-pb-text-dim">Result</dt><dd class="leading-5">{{ series_diagnostics.get('rejection_reason') or review_reasons[reason_key][0] }}</dd>
       </dl>
-      {% if reason_key != 'needs_series' %}<div class="flex flex-wrap gap-2">
+      {% if not metron_row and reason_key != 'needs_series' %}<div class="flex flex-wrap gap-2">
         <button type="button" class="btn-ghost btn-sm" data-testid="import-review-search-cv-action" onclick='return openImportCvSearchModal({jobId: {{ job.id }}, seriesId: {{ item.id }}, query: {{ item.raw_series_name|tojson|forceescape }} })'>{{ 'Change ComicVine match' if known_series_target else 'Search ComicVine' }}</button>
         {% if known_series_target %}<button type="button" class="btn-ghost btn-sm" @click="{{ 'unmatchDuplicateSeries' if item.status.value == 'duplicate' else 'unmatchSeriesMatch' }}({{ item.id }})">Not this series</button>{% endif %}
       </div>{% endif %}
     </section>
     <section class="min-w-0 space-y-3">
-      {% if reason_key in ('needs_series', 'series_conflict') %}
+      {% if metron_row and reason_key in ('needs_series', 'series_conflict') %}
+      <h3 class="text-[11px] font-semibold uppercase tracking-wider text-pb-text-dim">Metron identity</h3>
+      <p class="text-xs text-pb-text-sec">This import uses exact identities already verified in your library. Add the series through Metron, or review the Metron link on its series page, then scan this folder again. Titles alone cannot replace conflicting identities.</p>
+      <a class="btn-ghost btn-sm" href="/series/add" target="_blank" rel="noopener noreferrer">Add series</a>
+      {% elif reason_key in ('needs_series', 'series_conflict') %}
       <h3 class="text-[11px] font-semibold uppercase tracking-wider text-pb-text-dim">ComicVine candidates</h3>
       {% set candidates = series_diagnostics.get('top_candidates', []) %}
       {% if candidates %}<div class="overflow-x-auto rounded-lg border border-pb-border"><table class="downloads-table text-xs"><thead><tr><th>Candidate</th><th>Publisher</th><th>Score</th><th>Reason</th><th><span class="sr-only">Action</span></th></tr></thead><tbody>
@@ -42,13 +46,17 @@
       {% for file in group.rows %}<div class="rounded-lg border border-pb-border bg-pb-card/70 p-3">
         <div class="flex flex-wrap items-center justify-between gap-2"><span class="font-mono text-xs text-pb-text [overflow-wrap:anywhere]">{{ file.file_name }}</span><span class="text-xs text-pb-text-dim">{{ file.file_size|filesize }}</span></div>
         {% if file.status == 'skipped' %}<span class="pill pill-neutral" data-import-review-file-outcome="{{ file.id }}">Skipped</span>{% else %}
+        {% if metron_row %}
+        <p class="mt-2 text-xs text-pb-text-sec">Review this file's embedded Metron series and issue identity and the linked library metadata, then scan this folder again. You can also skip it for now.</p>
+        <div class="mt-2 flex flex-wrap gap-2">{% if item.series_id %}<a class="btn-ghost btn-sm" href="/series/{{ item.series_id }}" target="_blank" rel="noopener noreferrer">Review linked metadata</a>{% endif %}<button type="button" class="btn-ghost btn-sm" :disabled="reviewActionPending" @click="skipReviewFile({{ item.id }}, {{ file.id }}, $event.currentTarget)">Skip this file</button></div>
+        {% else %}
         {% set issue_choices_url = ('/import/' ~ job.id ~ '/files/' ~ file.id ~ '/assign?cv_id=' ~ known_cv_id ~ '&inline=true') if known_cv_id else none %}
         <div class="mt-2 flex flex-wrap gap-2"><button type="button" class="btn-primary btn-sm" data-testid="import-review-choose-issue"
           {% if issue_choices_url %}aria-expanded="false" aria-controls="import-review-issue-choices-{{ file.id }}" @click='toggleReviewIssueChoices({{ file.id }}, {{ issue_choices_url|tojson|forceescape }}, $event.currentTarget)'
           {% else %}hx-get="/import/{{ job.id }}/series/{{ item.id }}/cv-search?file_id={{ file.id }}" hx-target="#cv-search-modal" hx-swap="innerHTML"{% endif %}>Choose issue</button><button type="button" class="btn-ghost btn-sm" data-testid="import-review-reassign-file" hx-get="/import/{{ job.id }}/series/{{ item.id }}/cv-search?file_id={{ file.id }}" hx-target="#cv-search-modal" hx-swap="innerHTML">Different series</button><button type="button" class="btn-ghost btn-sm" :disabled="reviewActionPending" @click="skipReviewFile({{ item.id }}, {{ file.id }}, $event.currentTarget)">Skip this file</button></div>
-        {% if issue_choices_url %}<div id="import-review-issue-choices-{{ file.id }}" hidden></div>{% endif %}{% endif %}
+        {% if issue_choices_url %}<div id="import-review-issue-choices-{{ file.id }}" hidden></div>{% endif %}{% endif %}{% endif %}
       </div>{% endfor %}{% endfor %}
-      <button type="button" class="btn-ghost btn-sm" data-testid="import-review-reconcile-action" hx-get="/import/{{ job.id }}/series/{{ item.id }}/reconcile" hx-target="#cv-search-modal" hx-swap="innerHTML">Review all issue decisions</button>
+      {% if not metron_row %}<button type="button" class="btn-ghost btn-sm" data-testid="import-review-reconcile-action" hx-get="/import/{{ job.id }}/series/{{ item.id }}/reconcile" hx-target="#cv-search-modal" hx-swap="innerHTML">Review all issue decisions</button>{% endif %}
       {% endif %}
     </section>
   </div>
@@ -139,7 +147,12 @@
         {% if file.status in ('matched', 'confirmed', 'skipped') %}<span class="pill {{ 'pill-neutral' if file.status == 'skipped' else 'pill-success' }}" data-import-review-file-outcome="{{ file.id }}">{{ 'Skipped' if file.status == 'skipped' else 'Matched' }}</span>{% endif %}
         {% if file.get('archive_format', {}).get('mismatch') %}<span class="text-xs text-pb-text-dim">Detected {{ {'cbz': 'ZIP', 'cbr': 'RAR', 'cb7': '7z', 'cbt': 'TAR'}.get(file.archive_format.detected, file.archive_format.detected|upper) }} content; .{{ file.archive_format.declared }} filename</span>{% endif %}
         {% if file.status in ('matched', 'confirmed', 'no_match') %}
+        {% if metron_row %}
+        {% if item.series_id %}<a class="btn-ghost btn-sm" href="/series/{{ item.series_id }}" target="_blank" rel="noopener noreferrer">Review linked metadata</a>{% endif %}
+        {% if file.status == 'no_match' %}<button type="button" class="btn-ghost btn-sm" :disabled="reviewActionPending" @click="skipReviewFile({{ item.id }}, {{ file.id }}, $event.currentTarget)">Skip this file</button>{% endif %}
+        {% else %}
         <button type="button" class="btn-ghost btn-sm" hx-get="/import/{{ job.id }}/series/{{ item.id }}/cv-search?file_id={{ file.id }}" hx-target="#cv-search-modal" hx-swap="innerHTML">Change issue</button>
+        {% endif %}
         {% endif %}
       </li>
       {% endfor %}

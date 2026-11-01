@@ -62,6 +62,7 @@ from pullbox.services.import_file_resolution import (
 )
 from pullbox.services.import_folder_adoption import apply_import_series_folder_adoption
 from pullbox.services.import_job_actions import seed_action_sequence_cache
+from pullbox.services.import_metron_matching import revalidate_metron_import_target
 from pullbox.services.import_placement_recovery import (
     has_completed_direct_move_placement_record,
 )
@@ -1198,6 +1199,8 @@ async def process_import_series_files(
                 await session.commit()
                 placeholder_progress_live_only = False
                 continue
+
+            await revalidate_metron_import_target(session, imp_file, resolved_issue)
 
             confidence = _MATCH_CONFIDENCE_MAP.get(
                 imp_file.match_confidence or "", MatchConfidence.MEDIUM

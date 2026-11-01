@@ -31,6 +31,7 @@ from pullbox.services.import_matching import (
     is_same_series,
     series_type_from_import_diagnostics,
 )
+from pullbox.services.import_metron_matching import match_local_metron_series
 from pullbox.services.import_progress_runtime import (
     ScanReviewFileMatchProfile,
     ScanReviewProgressPlan,
@@ -151,6 +152,10 @@ async def deduplicate_import_series(
         )
         matched_item_ids: set[int] = set()
         for item in items:
+            if await match_local_metron_series(session, item):
+                duplicate_count += int(item.status == ImportSeriesStatus.DUPLICATE)
+                matched_item_ids.add(item.id)
+                continue
             if await _mark_cv_id_duplicate(
                 session,
                 item,

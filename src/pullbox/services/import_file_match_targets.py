@@ -52,6 +52,8 @@ class FileMatchTargetIndex:
     """Issue lookup maps used while matching imported files."""
 
     cv_id_map: dict[int, FileMatchTargetEntry] = field(default_factory=dict)
+    provider_id_map: dict[tuple[str, str], FileMatchTargetEntry] = field(default_factory=dict)
+    series_provider_ids: set[tuple[str, str]] = field(default_factory=set)
     exact_number_map: dict[str, FileMatchTargetEntry] = field(default_factory=dict)
     number_map: dict[float, FileMatchTargetEntry] = field(default_factory=dict)
     synthetic_issue_types: dict[float, IssueType] = field(default_factory=dict)

@@ -7,12 +7,15 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import insert
 
+from pullbox.core.issue_numbers import parse_issue_number_text
 from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
     ImportedSeries,
     ImportSeriesStatus,
+    ImportSourceType,
 )
+from pullbox.services.import_metron_matching import series_evidence, uses_metron_identity
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -79,6 +82,15 @@ async def materialize_discovered_scan_results(
             discovered.files
         )
         series_diagnostics = dict(discovered.diagnostics)
+        if job.source_type == ImportSourceType.FILESYSTEM:
+            metron_files = [
+                evidence
+                for file in discovered.files
+                if isinstance(evidence := file.metadata_diagnostics.get("metron_import"), dict)
+                and uses_metron_identity(evidence)
+            ]
+            if metron_files:
+                series_diagnostics["metron_import"] = series_evidence(metron_files)
         volume_leaf = series_diagnostics.get("volume_leaf")
         release_review = (
             isinstance(volume_leaf, dict)
@@ -205,6 +217,16 @@ async def materialize_discovered_scan_results(
                     }
                 )
             error_message = safety_block.get("reason") if isinstance(safety_block, dict) else None
+            parsed_number = df.parsed_issue_number
+            raw_number = df.issue_number_raw
+            metron = metadata_diagnostics.get("metron_import")
+            if (
+                job.source_type == ImportSourceType.FILESYSTEM
+                and isinstance(metron, dict)
+                and uses_metron_identity(metron)
+                and isinstance(metron.get("number"), str)
+            ):
+                parsed_number, raw_number = parse_issue_number_text(metron["number"])
             file_item = dict(
                 import_job_id=job.id,
                 import_series_id=series_item.id,
@@ -213,11 +235,11 @@ async def materialize_discovered_scan_results(
                 file_size=df.file_size,
                 file_format=df.file_format,
                 parsed_series=df.parsed_series,
-                parsed_issue_number=df.parsed_issue_number,
+                parsed_issue_number=parsed_number,
                 parsed_year=df.parsed_year,
                 has_comicinfo=df.has_comicinfo,
                 comicvine_issue_id=df.comicvine_issue_id,
-                issue_number_raw=df.issue_number_raw,
+                issue_number_raw=raw_number,
                 source_folder_cohort_key=df.source_folder_cohort_key,
                 source_ordinal=df.source_ordinal,
                 source_signature=dict(df.source_signature),
