@@ -79,7 +79,7 @@ e2e = [
     "pytest-playwright~=0.6",
 ]
 prod = [
-    "gunicorn>=25.3,<27.0",
+    "gunicorn>=25.3,<28.0",
 ]
 
 [tool.setuptools.dynamic]
