@@ -1328,6 +1328,11 @@ async def process_import_series_files(
                         )
                         comicinfo_payload_cache[comicinfo_payload_cache_key] = comicinfo_payload
 
+                issue_status_before_registration = {
+                    "issue_id": resolved_issue.id,
+                    "status": resolved_issue.status.value,
+                    "manual_skip": bool(resolved_issue.manual_skip),
+                }
                 registration_result = await register_file(
                     session,
                     Path(prepared.registration_source),
@@ -1486,6 +1491,7 @@ async def process_import_series_files(
                 payload={
                     "imported_file_id": imp_file.id,
                     "library_file_id": library_file.id,
+                    "issue_status_before_registration": issue_status_before_registration,
                     "destination_path": library_file.file_path,
                     "destination_signature": dict(library_file.source_signature or {}),
                     "original_source_path": str(prepared.original_source),

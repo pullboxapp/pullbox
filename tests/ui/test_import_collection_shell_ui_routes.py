@@ -702,6 +702,22 @@ class TestImportShellRouteContracts:
         assert '"/api/v1/import/" + this.jobId + "/story-arc-placements/retry"' in controller
         assert 'headers: { "X-CSRF-Token": readCsrfTokenFromBody() }' in controller
 
+    async def test_step_four_counters_separate_files_from_new_series(self) -> None:
+        template = Path("src/pullbox/ui/templates/partials/import_step_progress.html").read_text()
+        for label, field in (
+            ("Files imported", "total_files_imported"),
+            ("Files failed", "total_files_failed"),
+            ("Series added", "series_imported"),
+            ("Series failed", "series_failed"),
+        ):
+            assert re.search(
+                rf">{label}</p>\s*<p[^\n]*x-text="
+                rf'"stats\.{field} \|\| 0"',
+                template,
+            )
+        assert 'x-text="remaining"' not in template
+        assert "completed ? 'Follow-up' : 'Remaining'" not in template
+
     async def test_import_footer_pagination_has_delegated_click_handler(self) -> None:
         script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
 

@@ -144,9 +144,11 @@ async def test_record_action_persists_completed_action_with_next_sequence(
     assert await service._next_action_sequence(db_session, job.id) == 2
 
 
+@pytest.mark.parametrize("has_status_snapshot", [True, False])
 async def test_rollback_action_removes_copied_library_file_and_journal_row(
     db_session: AsyncSession,
     tmp_path: Path,
+    has_status_snapshot: bool,
 ) -> None:
     service = _make_service()
     job = await _create_job_row(db_session)
@@ -155,7 +157,11 @@ async def test_rollback_action_removes_copied_library_file_and_journal_row(
     destination_path.write_text("comic", encoding="utf-8")
     original_path = tmp_path / "incoming" / "Absolute Wonder Woman 019.cbz"
     root = LibraryRoot(name="Library", path=str(tmp_path / "library"))
-    db_session.add(root)
+    series = Series(title="Absolute Wonder Woman", sort_title="absolute wonder woman")
+    db_session.add_all([root, series])
+    await db_session.flush()
+    issue = Issue(series_id=series.id, issue_number=19, status=IssueStatus.OWNED)
+    db_session.add(issue)
     await db_session.flush()
     library_file = LibraryFile(
         file_path=str(destination_path),
@@ -165,7 +171,7 @@ async def test_rollback_action_removes_copied_library_file_and_journal_row(
         file_hash=None,
         file_modified_at=datetime.now(tz=UTC),
         match_confidence=MatchConfidence.HIGH,
-        issue_id=None,
+        issue_id=issue.id,
         library_root_id=root.id,
     )
     db_session.add(library_file)
@@ -184,6 +190,12 @@ async def test_rollback_action_removes_copied_library_file_and_journal_row(
             "transfer_method": "copy",
         },
     )
+    if has_status_snapshot:
+        action.payload["issue_status_before_registration"] = {
+            "issue_id": issue.id,
+            "status": "skipped",
+            "manual_skip": False,
+        }
     db_session.add(action)
     await db_session.flush()
 
@@ -193,6 +205,8 @@ async def test_rollback_action_removes_copied_library_file_and_journal_row(
     assert not destination_path.exists()
     assert action.status == ImportJobActionStatus.ROLLED_BACK
     assert action.rolled_back_at is not None
+    await db_session.refresh(issue)
+    assert issue.status == (IssueStatus.SKIPPED if has_status_snapshot else IssueStatus.OWNED)
 
 
 async def test_rollback_clean_library_adoption_restores_original_reference(
@@ -364,7 +378,11 @@ async def test_rollback_action_preserves_managed_file_changed_after_registration
     creation_stat = destination_path.stat()
     original_path = tmp_path / "incoming" / destination_path.name
     root = LibraryRoot(name="Library", path=str(destination_path.parent))
-    db_session.add(root)
+    series = Series(title="Absolute Wonder Woman", sort_title="absolute wonder woman")
+    db_session.add_all([root, series])
+    await db_session.flush()
+    issue = Issue(series_id=series.id, issue_number=19, status=IssueStatus.OWNED)
+    db_session.add(issue)
     await db_session.flush()
     library_file = LibraryFile(
         file_path=str(destination_path),
@@ -374,7 +392,7 @@ async def test_rollback_action_preserves_managed_file_changed_after_registration
         file_hash=None,
         file_modified_at=datetime.now(tz=UTC),
         match_confidence=MatchConfidence.HIGH,
-        issue_id=None,
+        issue_id=issue.id,
         library_root_id=root.id,
         source_signature=creation_signature,
     )
@@ -393,6 +411,11 @@ async def test_rollback_action_preserves_managed_file_changed_after_registration
             "original_source_path": str(original_path),
             "transfer_method": "copy",
             "storage_mode": "managed",
+            "issue_status_before_registration": {
+                "issue_id": issue.id,
+                "status": "skipped",
+                "manual_skip": False,
+            },
         },
     )
     db_session.add(action)
@@ -411,6 +434,8 @@ async def test_rollback_action_preserves_managed_file_changed_after_registration
     assert action.status == ImportJobActionStatus.ROLLBACK_FAILED
     assert action.rolled_back_at is None
     assert "changed after import" in (action.error_message or "")
+    await db_session.refresh(issue)
+    assert issue.status == IssueStatus.OWNED
 
 
 async def test_rollback_action_detaches_referenced_file_without_touching_source(
@@ -424,7 +449,11 @@ async def test_rollback_action_detaches_referenced_file_without_touching_source(
     source_path.write_text("user-owned comic", encoding="utf-8")
     stale_original_path = tmp_path / "incoming" / source_path.name
     root = LibraryRoot(name="Library", path=str(tmp_path / "library"))
-    db_session.add(root)
+    series = Series(title="Existing Series", sort_title="existing series")
+    db_session.add_all([root, series])
+    await db_session.flush()
+    issue = Issue(series_id=series.id, issue_number=1, status=IssueStatus.OWNED)
+    db_session.add(issue)
     await db_session.flush()
     library_file = LibraryFile(
         file_path=str(source_path),
@@ -434,6 +463,7 @@ async def test_rollback_action_detaches_referenced_file_without_touching_source(
         file_modified_at=datetime.now(tz=UTC),
         match_confidence=MatchConfidence.HIGH,
         library_root_id=root.id,
+        issue_id=issue.id,
     )
     db_session.add(library_file)
     await db_session.flush()
@@ -449,6 +479,11 @@ async def test_rollback_action_detaches_referenced_file_without_touching_source(
             "original_source_path": str(stale_original_path),
             "transfer_method": "leave_in_place",
             "storage_mode": "referenced",
+            "issue_status_before_registration": {
+                "issue_id": issue.id,
+                "status": "wanted",
+                "manual_skip": False,
+            },
         },
     )
     db_session.add(action)
@@ -460,6 +495,8 @@ async def test_rollback_action_detaches_referenced_file_without_touching_source(
     assert source_path.read_text(encoding="utf-8") == "user-owned comic"
     assert not stale_original_path.exists()
     assert action.status == ImportJobActionStatus.ROLLED_BACK
+    await db_session.refresh(issue)
+    assert issue.status == IssueStatus.WANTED
 
 
 async def test_rollback_action_deletes_created_series_without_files(
@@ -863,8 +900,10 @@ async def test_rollback_action_preserves_created_series_with_later_issue_state(
     assert "issue" in (action.error_message or "")
 
 
+@pytest.mark.parametrize("restoration", ["owned", "restored", "unproven", "later_choice"])
 async def test_rollback_action_allows_issue_state_owned_by_same_import(
     db_session: AsyncSession,
+    restoration: str,
 ) -> None:
     service = _make_service()
     job = await _create_job_row(db_session)
@@ -916,10 +955,34 @@ async def test_rollback_action_allows_issue_state_owned_by_same_import(
     db_session.add(action)
     issue.status = IssueStatus.OWNED
     imported_file.status = ImportedFileStatus.IMPORTED
+    if restoration != "owned":
+        issue.status = IssueStatus.WANTED if restoration == "later_choice" else IssueStatus.SKIPPED
+        db_session.add(
+            ImportJobAction(
+                import_job_id=job.id,
+                sequence_no=2,
+                phase="import",
+                action_type="library_file_registered",
+                status=ImportJobActionStatus.ROLLED_BACK,
+                payload={
+                    "imported_file_id": imported_file.id,
+                    "issue_status_before_registration": {
+                        "issue_id": issue.id,
+                        "status": "skipped",
+                        "manual_skip": False,
+                    },
+                    "issue_status_restored": restoration != "unproven",
+                },
+            )
+        )
     await db_session.flush()
 
     await service._rollback_action(db_session, _rollback_plan(action))
 
+    if restoration in {"unproven", "later_choice"}:
+        service._series_service.delete.assert_not_awaited()
+        assert action.status == ImportJobActionStatus.ROLLBACK_FAILED
+        return
     service._series_service.delete.assert_awaited_once_with(
         db_session,
         series.id,
@@ -929,8 +992,10 @@ async def test_rollback_action_allows_issue_state_owned_by_same_import(
     assert action.status == ImportJobActionStatus.ROLLED_BACK
 
 
+@pytest.mark.parametrize("restored", [False, True])
 async def test_rollback_action_allows_later_issue_owned_by_same_import(
     db_session: AsyncSession,
+    restored: bool,
 ) -> None:
     """Targeted hydration may add import-owned issues after the series action seal."""
     service = _make_service()
@@ -989,6 +1054,27 @@ async def test_rollback_action_allows_later_issue_owned_by_same_import(
     )
     db_session.add_all([imported_file, action])
     await db_session.flush()
+    if restored:
+        later_issue.status = IssueStatus.SKIPPED
+        db_session.add(
+            ImportJobAction(
+                import_job_id=job.id,
+                sequence_no=2,
+                phase="import",
+                action_type="library_file_registered",
+                status=ImportJobActionStatus.ROLLED_BACK,
+                payload={
+                    "imported_file_id": imported_file.id,
+                    "issue_status_before_registration": {
+                        "issue_id": later_issue.id,
+                        "status": "skipped",
+                        "manual_skip": False,
+                    },
+                    "issue_status_restored": True,
+                },
+            )
+        )
+        await db_session.flush()
 
     await service._rollback_action(db_session, _rollback_plan(action))
 

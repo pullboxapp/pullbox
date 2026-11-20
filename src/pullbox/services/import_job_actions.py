@@ -772,6 +772,33 @@ async def _restore_adopted_reference(
     adopted.series.preferred_library_root_id = adopted.previous_series_preferred_library_root_id
 
 
+async def _restore_registered_issue_status(session: AsyncSession, payload: dict[str, Any]) -> bool:
+    """Undo only this registration's ownership transition, never a later choice."""
+    snapshot = payload.get("issue_status_before_registration")
+    # Older journals do not prove the previous status; do not invent one.
+    if not isinstance(snapshot, dict):
+        return False
+    issue_id = _positive_int(snapshot.get("issue_id"), "issue_id")
+    prior_status = IssueStatus(snapshot["status"])
+    prior_manual_skip = snapshot.get("manual_skip")
+    if not isinstance(prior_manual_skip, bool):
+        raise ValueError("Invalid manual_skip in import issue status snapshot")
+    await session.flush()
+    # A conditional update also protects against a concurrent status change.
+    restored_issue_id = await session.scalar(
+        sa_update(Issue)
+        .where(
+            Issue.id == issue_id,
+            Issue.status == IssueStatus.OWNED,
+            Issue.manual_skip == prior_manual_skip,
+            ~sa_select(LibraryFile.id).where(LibraryFile.issue_id == Issue.id).exists(),
+        )
+        .values(status=prior_status)
+        .returning(Issue.id)
+    )
+    return restored_issue_id is not None
+
+
 async def rollback_action(
     session: AsyncSession,
     *,
@@ -942,6 +969,8 @@ async def rollback_action(
                 adopted_reference,
                 reusable_library_file=reusable_adopted_file,
             )
+        if await _restore_registered_issue_status(session, payload):
+            action.payload = {**payload, "issue_status_restored": True}
 
     elif action_type == "library_file_placement_started":
         destination_path_raw = str(payload.get("destination_path") or "")
@@ -1863,6 +1892,28 @@ async def _created_series_issue_state_changed(
             )
         ).all()
     )
+    restored_issue_states: dict[int, object] = dict(
+        (
+            await session.execute(
+                sa_select(
+                    ImportedFile.matched_issue_id,
+                    ImportJobAction.payload["issue_status_before_registration"],
+                )
+                .join(
+                    ImportedFile,
+                    ImportedFile.id == ImportJobAction.payload["imported_file_id"].as_integer(),
+                )
+                .where(
+                    ImportJobAction.import_job_id == action.import_job_id,
+                    ImportJobAction.action_type == "library_file_registered",
+                    ImportJobAction.status == ImportJobActionStatus.ROLLED_BACK,
+                    ImportJobAction.payload["issue_status_restored"].as_boolean().is_(True),
+                    ImportedFile.import_job_id == action.import_job_id,
+                    ImportedFile.import_series_id == import_series_id,
+                )
+            )
+        ).all()
+    )
     current_rows = (
         await session.execute(
             sa_select(Issue.id, Issue.status, Issue.manual_skip)
@@ -1876,10 +1927,18 @@ async def _created_series_issue_state_changed(
 
     default_status = IssueStatus.WANTED if monitored else IssueStatus.SKIPPED
     for issue_id, status, manual_skip in current_rows:
+        restored_by_import = restored_issue_states.get(issue_id) == {
+            "issue_id": issue_id,
+            "status": status.value,
+            "manual_skip": bool(manual_skip),
+        }
         expected = expected_snapshot.get(str(issue_id))
         if expected is None:
             if issue_id in imported_issue_ids:
-                if bool(manual_skip) or status != IssueStatus.OWNED:
+                if bool(manual_skip) or (
+                    status != IssueStatus.OWNED
+                    and not (restored_by_import and status == default_status)
+                ):
                     return True
             elif bool(manual_skip) or status != default_status:
                 return True
@@ -1893,7 +1952,9 @@ async def _created_series_issue_state_changed(
         if bool(manual_skip) != expected_manual_skip:
             return True
         if issue_id in imported_issue_ids:
-            if status != IssueStatus.OWNED:
+            if status != IssueStatus.OWNED and not (
+                restored_by_import and status.value == expected_status
+            ):
                 return True
         elif status.value != expected_status:
             return True

@@ -1194,12 +1194,13 @@ class TestImportLeaveInPlace:
         assert issues[0].status == IssueStatus.OWNED
         assert issues[1].status == IssueStatus.OWNED
 
+    @pytest.mark.parametrize("create_during_import", [False, True])
     async def test_rc_wizard_import_copies_files_to_library(
-        self, db_session: AsyncSession, tmp_path: Path
+        self, db_session: AsyncSession, tmp_path: Path, create_during_import: bool
     ) -> None:
         """Wizard import materializes files in library while preserving source files."""
         comics_dir = tmp_path / "library"
-        await _setup_comics_directory(db_session, comics_dir)
+        root = await _setup_comics_directory(db_session, comics_dir)
 
         source = tmp_path / "import"
         _make_comic_dirs(
@@ -1232,15 +1233,24 @@ class TestImportLeaveInPlace:
         confirm_req = ConfirmImportRequest(series_ids=[s.id for s in imp_series])
         await svc.confirm_import(db_session, job.id, confirm_req)
 
-        cv_to_series[97508] = (
-            await _create_series_with_issues(
-                db_session,
-                "Batman",
-                2016,
-                97508,
-                [(1.0, 100001)],
+        async def add_series(*_args: object, **_kwargs: object) -> object:
+            series, _ = await _create_series_with_issues(
+                db_session, "Batman", 2016, 97508, [(1.0, 100001)]
             )
-        )[0]
+            if create_during_import:
+                # Real series creation selects its folder before the ownership snapshot.
+                folder = comics_dir / "Batman (2016)"
+                folder.mkdir()
+                series.path = str(folder)
+                series.library_root_id = root.id
+                series.preferred_library_root_id = root.id
+            cv_to_series[97508] = series
+            return series
+
+        if create_during_import:
+            mock_series_svc.add_from_comicvine.side_effect = add_series
+        else:
+            await add_series()
 
         await svc.run_import(db_session, job.id)
         await db_session.refresh(job)
@@ -1279,6 +1289,25 @@ class TestImportLeaveInPlace:
         # Source file preserved for source-safe collection imports
         source_files = list((source / "Batman (2016)").glob("*.cbz"))
         assert len(source_files) == 1
+        assert source_files[0].exists()
+
+        imported_issue = await db_session.get(Issue, lf.issue_id)
+        assert imported_issue.status == IssueStatus.OWNED
+        assert await svc.rollback_import(db_session, job.id)
+        await db_session.refresh(registered_action)
+        assert registered_action.payload["issue_status_restored"] is True
+        await db_session.refresh(imported_issue)
+        assert imported_issue.status == IssueStatus.WANTED
+        if create_during_import:
+            mock_series_svc.delete.assert_awaited_once_with(
+                db_session,
+                imported_issue.series_id,
+                delete_files=False,
+                delete_folder=False,
+            )
+        else:
+            mock_series_svc.delete.assert_not_awaited()
+        assert not Path(lf.file_path).exists()
         assert source_files[0].exists()
 
     @pytest.mark.parametrize(

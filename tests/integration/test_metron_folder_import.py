@@ -14,12 +14,13 @@ from pullbox.core.events import EventBus
 from pullbox.core.metadata_identity import IdentityEvidenceKind, IdentityNamespace
 from pullbox.core.metadata_identity_state import IdentityVerificationState
 from pullbox.models.import_job import ImportedFile, ImportedFileStatus, ImportedSeries
-from pullbox.models.issue import Issue
+from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.library import LibraryFile, LibraryRoot
 from pullbox.models.metadata_identity import IssueExternalIdentity, SeriesExternalIdentity
 from pullbox.models.series import Series
 from pullbox.schemas.import_job import ConfirmImportRequest, ImportJobCreate
 from pullbox.services.import_service import ImportService
+from pullbox.services.issue_service import IssueService
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -200,6 +201,99 @@ async def test_comicvine_primary_paired_archive_keeps_existing_import_path(
     assert row.matched_issue_id == issue.id
     assert row.match_method != "metron_id"
     assert "metron_import" not in group.diagnostics
+    issue.status = IssueStatus.WANTED
+    await db_session.commit()
+    await service.update_file_selection(db_session, job.id, row.id, include_in_import=True)
+    await service.confirm_import(db_session, job.id, ConfirmImportRequest(series_ids=[group.id]))
+    await service.run_import(db_session, job.id)
+    await db_session.refresh(issue)
+    assert issue.status == IssueStatus.OWNED
+    assert await service.rollback_import(db_session, job.id)
+    await db_session.refresh(issue)
+    assert issue.status == IssueStatus.WANTED
+
+
+@pytest.mark.parametrize("prior_status", [IssueStatus.WANTED, IssueStatus.SKIPPED])
+@pytest.mark.parametrize("manual_skip", [False, True])
+@pytest.mark.parametrize("later_change", [None, "wanted", "skipped", "manual_skip", "replacement"])
+async def test_metron_import_rollback_restores_only_import_owned_issue_status(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    prior_status: IssueStatus,
+    manual_skip: bool,
+    later_change: str | None,
+) -> None:
+    root, _, issue = await _setup(db_session, tmp_path)
+    issue.status = prior_status
+    issue.manual_skip = manual_skip
+    await db_session.commit()
+    source = tmp_path / "source"
+    comic = source / "Unsorted" / "unidentified.cbz"
+    original = _archive(comic)
+    service = _service()
+    job = await service.create_job(
+        db_session,
+        ImportJobCreate(
+            source_path=str(source), source_type="filesystem", target_library_root_id=root.id
+        ),
+    )
+    await service.start_scan(db_session, job.id)
+    row = (await db_session.scalars(select(ImportedFile))).one()
+    await service.update_file_selection(db_session, job.id, row.id, include_in_import=True)
+    await service.confirm_import(
+        db_session, job.id, ConfirmImportRequest(series_ids=[row.import_series_id])
+    )
+    await service.run_import(db_session, job.id)
+    await db_session.refresh(issue)
+    assert row.status == ImportedFileStatus.IMPORTED
+    assert issue.status == IssueStatus.OWNED
+    placed = (await db_session.scalars(select(LibraryFile))).one()
+    destination = Path(placed.file_path)
+    expected_status = prior_status
+    expected_manual_skip = manual_skip
+    if later_change in {"wanted", "skipped"}:
+        expected_status = IssueStatus(later_change)
+        await IssueService.mark_status(db_session, issue.id, expected_status)
+    elif later_change == "manual_skip":
+        expected_manual_skip = not manual_skip
+        issue.manual_skip = expected_manual_skip
+        expected_status = IssueStatus.OWNED
+    elif later_change == "replacement":
+        # A later registered file must keep ownership even if this import is undone.
+        replacement = tmp_path / "library" / "replacement.cbz"
+        replacement.write_bytes(original)
+        db_session.add(
+            LibraryFile(
+                file_path=str(replacement),
+                file_name=replacement.name,
+                file_size=placed.file_size,
+                file_format=placed.file_format,
+                file_modified_at=placed.file_modified_at,
+                match_confidence=placed.match_confidence,
+                library_root_id=root.id,
+                issue_id=issue.id,
+            )
+        )
+        expected_status = IssueStatus.OWNED
+    await db_session.commit()
+
+    assert await service.rollback_import(db_session, job.id)
+    await db_session.refresh(issue)
+    assert issue.status == expected_status
+    assert issue.manual_skip is expected_manual_skip
+    assert not destination.exists()
+    assert comic.read_bytes() == original
+    remaining = (await db_session.scalars(select(LibraryFile))).all()
+    assert len(remaining) == (1 if later_change == "replacement" else 0)
+    if remaining:
+        assert Path(remaining[0].file_path).read_bytes() == original
+
+    # Replaying a completed rollback cannot overwrite a subsequent user choice.
+    await IssueService.mark_status(db_session, issue.id, IssueStatus.UNKNOWN)
+    await db_session.commit()
+    assert await service.rollback_import(db_session, job.id)
+    await db_session.refresh(issue)
+    assert issue.status == IssueStatus.UNKNOWN
 
 
 @pytest.mark.parametrize(

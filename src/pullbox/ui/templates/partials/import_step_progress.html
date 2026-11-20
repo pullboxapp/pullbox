@@ -389,23 +389,20 @@
 
       <div x-show="(isImportMode() || isRollbackMode()) && !failed" x-cloak class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <div class="rounded-lg border border-pb-border bg-pb-card px-3 py-3">
-          <p class="text-[10px] font-medium uppercase tracking-[0.12em] text-pb-text-dim">Imported</p>
+          <p class="text-[10px] font-medium uppercase tracking-[0.12em] text-pb-text-dim">Files imported</p>
+          <p class="mt-1 text-lg font-semibold text-pb-success" x-text="stats.total_files_imported || 0"></p>
+        </div>
+        <div class="rounded-lg border border-pb-border bg-pb-card px-3 py-3">
+          <p class="text-[10px] font-medium uppercase tracking-[0.12em] text-pb-text-dim">Files failed</p>
+          <p class="mt-1 text-lg font-semibold" :class="(stats.total_files_failed || 0) > 0 ? 'text-pb-error' : 'text-pb-text'" x-text="stats.total_files_failed || 0"></p>
+        </div>
+        <div class="rounded-lg border border-pb-border bg-pb-card px-3 py-3">
+          <p class="text-[10px] font-medium uppercase tracking-[0.12em] text-pb-text-dim">Series added</p>
           <p class="mt-1 text-lg font-semibold text-pb-success" x-text="stats.series_imported || 0"></p>
         </div>
         <div class="rounded-lg border border-pb-border bg-pb-card px-3 py-3">
-          <p
-            class="text-[10px] font-medium uppercase tracking-[0.12em] text-pb-text-dim"
-            x-text="completed ? 'Follow-up' : 'Remaining'"
-          >Remaining</p>
-          <p class="mt-1 text-lg font-semibold text-pb-text" x-text="remaining"></p>
-        </div>
-        <div class="rounded-lg border border-pb-border bg-pb-card px-3 py-3">
-          <p class="text-[10px] font-medium uppercase tracking-[0.12em] text-pb-text-dim">Failed</p>
+          <p class="text-[10px] font-medium uppercase tracking-[0.12em] text-pb-text-dim">Series failed</p>
           <p class="mt-1 text-lg font-semibold" :class="(stats.series_failed || 0) > 0 ? 'text-pb-error' : 'text-pb-text'" x-text="stats.series_failed || 0"></p>
-        </div>
-        <div class="rounded-lg border border-pb-border bg-pb-card px-3 py-3">
-          <p class="text-[10px] font-medium uppercase tracking-[0.12em] text-pb-text-dim">Discovered</p>
-          <p class="mt-1 text-lg font-semibold text-pb-text" x-text="totalSelected"></p>
         </div>
       </div>
 

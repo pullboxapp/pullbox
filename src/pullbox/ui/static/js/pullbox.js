@@ -3050,7 +3050,8 @@ function importCollectionFooterData(config) {
       Number(snapshotReviewSummary.series_in_library) || 0,
       Number(snapshot.series_duplicate) || 0,
     ),
-    imported: Number(snapshot.series_imported) || 0,
+    filesImported: Number(snapshot.total_files_imported) || 0,
+    filesFailed: Number(snapshot.total_files_failed) || 0,
     failedCount: Number(snapshot.series_failed) || 0,
     selected: Math.max(
       Number(snapshotReviewSummary.series_total) || 0,
@@ -3100,16 +3101,19 @@ function importCollectionFooterData(config) {
         return [
           { label: "phase", value: this.footerPhaseLabel() },
           { label: "progress", value: String(Math.max(0, Math.round(this.progress || 0))) + "%" },
-          { label: "imported", value: String(this.imported) },
-          { label: "failed", value: String(this.failedCount) },
+          { label: "files imported", value: String(this.filesImported) },
+          { label: "files failed", value: String(this.filesFailed) },
         ];
       }
 
       if (this.step >= 5) {
         return [
-          { label: "status", value: this.failedCount > 0 ? "Follow-up" : "Complete" },
-          { label: "imported", value: String(this.imported) },
-          { label: "failed", value: String(this.failedCount) },
+          {
+            label: "status",
+            value: this.failedCount > 0 || this.filesFailed > 0 ? "Follow-up" : "Complete",
+          },
+          { label: "files imported", value: String(this.filesImported) },
+          { label: "files failed", value: String(this.filesFailed) },
           { label: "selected", value: String(this.selected) },
         ];
       }
@@ -3201,8 +3205,11 @@ function importCollectionFooterData(config) {
         if (!hasReviewSummary && payload.stats.series_duplicate != null) {
           this.duplicates = Number(payload.stats.series_duplicate) || 0;
         }
-        if (payload.stats.series_imported != null) {
-          this.imported = Number(payload.stats.series_imported) || 0;
+        if (payload.stats.total_files_imported != null) {
+          this.filesImported = Number(payload.stats.total_files_imported) || 0;
+        }
+        if (payload.stats.total_files_failed != null) {
+          this.filesFailed = Number(payload.stats.total_files_failed) || 0;
         }
         if (payload.stats.series_failed != null) {
           this.failedCount = Number(payload.stats.series_failed) || 0;
@@ -6315,11 +6322,6 @@ function importProgressData(jobId, nextStep, sourceType) {
       return this.formatEtaLabel();
     },
 
-    get remaining() {
-      var done = (this.stats.series_imported || 0) + (this.stats.series_failed || 0);
-      return Math.max(0, this.totalSelected - done);
-    },
-
     emitFooterState: function () {
       window.dispatchEvent(
         new CustomEvent("import:collection-footer", {
@@ -6351,6 +6353,8 @@ function importProgressData(jobId, nextStep, sourceType) {
               series_no_match: this.stats.series_no_match || 0,
               series_imported: this.stats.series_imported || 0,
               series_failed: this.stats.series_failed || 0,
+              total_files_imported: this.stats.total_files_imported || 0,
+              total_files_failed: this.stats.total_files_failed || 0,
             },
           },
         })
