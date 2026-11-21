@@ -12,7 +12,7 @@
           <button type="button" class="btn-primary btn-sm" x-ref="chooseAdded" @click="chooseAddedSeries()" :disabled="selecting">Choose added series</button>
         </div>
         <form hx-get="{{ search_url }}" hx-target="#cv-search-modal" hx-swap="innerHTML" hx-boost="false" hx-disabled-elt="find button" hx-indicator="#import-library-search-progress" class="flex flex-wrap gap-2">
-          <input type="search" name="q" value="{{ search.search_query }}" minlength="2" required class="input-pb min-w-0 flex-1" aria-label="Search Metron or GCD series" placeholder="Series title">
+          <input type="search" name="q" value="{{ search.search_query }}" minlength="2" required class="input-pb w-full min-w-0 sm:w-auto sm:flex-1" aria-label="Search Metron or GCD series" placeholder="Series title">
           <label for="import-library-source-trigger" class="sr-only">Metadata source</label>
           {{ dropdown_select(name="source", value=search.search_source, options=search.search_source_options, trigger_id="import-library-source-trigger", root_testid="import-library-search-source", size="sm") }}
           <button type="submit" class="btn-primary btn-sm">Search sources</button>

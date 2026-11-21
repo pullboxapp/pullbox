@@ -73,25 +73,30 @@ def test_search_preview_add_and_explicit_choices(
     search_modal.get_by_role("button", name="Search sources", exact=True).click()
     trigger = search_modal.get_by_role("button", name="Preview & add", exact=True)
     expect(trigger).to_be_visible()
+    expect(search_modal.locator("#import-library-search-progress")).to_have_css("opacity", "0")
     assert search_calls[-1].sources == [source]
     assert_no_axe_violations(page, name=f"native-import-search-{namespace}-{theme}")
     screenshots = Path(__file__).resolve().parents[2] / "test-results/library-search"
     screenshots.mkdir(parents=True, exist_ok=True)
     page.screenshot(path=str(screenshots / f"{browser_name}-{namespace}-{theme}-search.png"))
-    trigger.click()
     dialog = search_modal.get_by_test_id("add-series-dialog")
-    expect(dialog).to_be_visible()
-    expect(dialog.get_by_test_id("add-series-preview-status")).to_be_visible()
-    expect(dialog.get_by_role("button", name="Add series", exact=True)).to_be_disabled()
-    expect(dialog).to_contain_text("will not remove the added series")
-    dialog.get_by_role("button", name="Cancel", exact=True).click()
-    expect(dialog).to_be_hidden()
-    expect(trigger).to_be_focused()
-    for route in held:
-        route.fulfill(json=preview(source.value, identifier=identifier))
-    held.clear()
-    expect(page.get_by_test_id("import-review-lane-ready")).to_contain_text("(0)")
-    assert not adds
+    for cancel in ("button", "escape"):
+        trigger.click()
+        expect(dialog).to_be_visible()
+        expect(dialog.get_by_test_id("add-series-preview-status")).to_be_visible()
+        expect(dialog.get_by_role("button", name="Add series", exact=True)).to_be_disabled()
+        expect(dialog).to_contain_text("will not remove the added series")
+        if cancel == "button":
+            dialog.get_by_role("button", name="Cancel", exact=True).click()
+        else:
+            dialog.press("Escape")
+        expect(dialog).to_be_hidden()
+        expect(trigger).to_be_focused()
+        for route in held:
+            route.fulfill(json=preview(source.value, identifier=identifier))
+        held.clear()
+        expect(page.get_by_test_id("import-review-lane-ready")).to_contain_text("(0)")
+        assert not adds
     with page.expect_request("**/api/v1/metadata/series/preview"):
         trigger.click()
     expect(dialog.get_by_test_id("add-series-preview-status")).to_be_visible()
@@ -163,3 +168,26 @@ def test_cancel_search_aborts_late_response(authed_page, seeded_server, tmp_path
     held[0].fulfill(body='<div id="late-search">Late search</div>', content_type="text/html")
     expect(page.locator("#late-search")).to_have_count(0)
     expect(page.get_by_test_id("import-review-lane-ready")).to_contain_text("(0)")
+
+
+def test_mobile_search_keeps_title_field_and_actions_usable(
+    authed_page, seeded_server, tmp_path, browser_name
+):
+    page = authed_page
+    job_id, _ = _run_async_blocking(_seed(tmp_path, "metron", "light", offset=200000))
+    page.set_viewport_size({"width": 390, "height": 844})
+    page.goto(f"{seeded_server}/import?tab=collection&resume_job_id={job_id}&resume_step=3")
+    page.get_by_test_id("import-review-choose-library").click()
+    page.get_by_role("button", name="Search Metron / GCD", exact=True).click()
+    modal = page.get_by_test_id("import-library-series-search")
+    field = modal.get_by_role("searchbox")
+    field.fill("Superman: Red Son")
+    screenshots = Path(__file__).resolve().parents[2] / "test-results/library-search"
+    screenshots.mkdir(parents=True, exist_ok=True)
+    page.screenshot(path=str(screenshots / f"{browser_name}-mobile-search.png"))
+    assert field.bounding_box()["width"] >= 180
+    expect(modal.get_by_role("button", name="Search sources", exact=True)).to_be_in_viewport()
+    expect(modal.get_by_role("button", name="Cancel", exact=True)).to_be_in_viewport()
+    assert_no_axe_violations(page, name="native-import-search-mobile")
+    modal.get_by_role("button", name="Cancel", exact=True).click()
+    expect(modal).to_have_count(0)

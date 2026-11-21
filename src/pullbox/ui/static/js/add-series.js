@@ -366,12 +366,13 @@ function importLibrarySeriesSearch(config) {
       review.close.call(this, force);
     },
     closeModal() {
-      if (this.adding) return;
+      if (!this.showModal || this.adding) return;
       shared.closeModal.call(this);
-      this.$nextTick(() => {
+      // The search panel must be visible again before Firefox can accept focus.
+      this.$nextTick(() => requestAnimationFrame(() => {
         const target = this.addedSeries ? this.$refs.chooseAdded : this.trigger;
-        if (!this.disposed && target?.isConnected) target.focus({ preventScroll: true });
-      });
+        if (!this.showModal && !this.disposed && target?.isConnected) target.focus({ preventScroll: true });
+      }));
     },
     previewResult(button) {
       selectResult({

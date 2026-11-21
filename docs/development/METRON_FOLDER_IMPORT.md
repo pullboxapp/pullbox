@@ -168,7 +168,10 @@ not a title search that could select a different same-name series.
 
 Search results are paginated, both chooser bodies stay within the viewport,
 and cancelled searches cannot reopen the dialog with a late response. Cancelling
-preview returns focus to its result. The review shell remains mounted, and
+preview by button or Escape returns focus to its result after the search panel
+becomes visible, including in Firefox. On mobile, the title input occupies its
+own full-width row instead of shrinking beside the source selector.
+The review shell remains mounted, and
 ready counts remain unchanged until a file receives an explicit issue decision.
 Source and issue proofs are still revalidated through the existing import and
 rollback services; no archive-writing or recovery rules changed.
@@ -181,15 +184,17 @@ Live provider acceptance on local 8585 remains separate from these deterministic
 tests. This checkpoint does not complete broader Mylar/native, sidecar or
 PostgreSQL qualification.
 
-Checkpoint validation: the new search/add flow and existing native identity
-review regressions pass together in Chromium (16 tests), including accessibility
-checks. The combined run uses separate provider fixture IDs so the search tests
-cannot pre-create the catalog expected to be missing by the recheck tests.
-Full qualification remains pending: the initial `make validate` run reported
-the now-corrected dropdown contract violation and a reader RSS-bound failure;
-the reader module and dropdown contracts subsequently passed together (74 tests).
-A fresh full validation run, Firefox coverage and live provider acceptance are
-still required before treating this checkpoint as release-qualified.
+Checkpoint validation passed `make validate`: 16,634 passed, 1,778 skipped and
+one expected failure. The combined search/add, library selection, native issue
+choice, shared review workspace and Add Series browser suite passed 57 checks
+in each of Chromium and Firefox, including accessibility and mobile layout.
+Browsers ran separately and serially with the broader validation gate. Provider
+fixture IDs do not pre-create catalogs expected to be missing by other tests.
+
+The earlier dropdown contract violation is corrected. An initial reader
+RSS-bound failure did not recur in either subsequent full validation run; its
+limit was not changed, and no reader fix is claimed. Live provider acceptance
+for this dialog and PostgreSQL qualification remain pending.
 
 ## Rollback Status
 

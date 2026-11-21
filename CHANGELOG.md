@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added folder-import matching for CBZ files with exact Metron identities already
   verified in the library. These files can import without a ComicVine identity;
   conflicting or unlinked identities stay in review and originals remain intact.
+- Added Metron/GCD library-series and issue choices in import review, with
+  search, preview and Add for missing series. Adding a series leaves file choices
+  explicit, and import rollback preserves independently added series.
 - Added opt-in Metron API and read-only GCD Local series search, provider linking,
   and reviewed metadata refresh alongside the existing ComicVine sources.
 - Added explicit existing-CBZ metadata review and coordinated ComicInfo.xml and
