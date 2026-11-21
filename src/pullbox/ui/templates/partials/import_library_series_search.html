@@ -1,5 +1,6 @@
 {% from "components/dropdown_select.html" import dropdown_select %}
 {% set search_url = '/import/' ~ job.id ~ '/series/' ~ series.id ~ '/review-library-search' %}
+{% set follow_params = '&follow_up=true' if follow_up else '' %}
 <div x-data='importLibrarySeriesSearch({{ search_config|tojson }})' hx-sync="#cv-search-modal:replace" x-init="$nextTick(() => $refs.searchDialog.focus())" data-testid="import-library-series-search">
   <div class="modal-shell" x-show="open && !showModal" @keydown.escape.window="close()" @keydown.tab="trapImportReviewDialog($event, $refs.searchDialog)">
     <div class="modal-backdrop" @click="close()"></div>
@@ -12,6 +13,7 @@
           <button type="button" class="btn-primary btn-sm" x-ref="chooseAdded" @click="chooseAddedSeries()" :disabled="selecting">Choose added series</button>
         </div>
         <form hx-get="{{ search_url }}" hx-target="#cv-search-modal" hx-swap="innerHTML" hx-boost="false" hx-disabled-elt="find button" hx-indicator="#import-library-search-progress" class="flex flex-wrap gap-2">
+          {% if follow_up %}<input type="hidden" name="follow_up" value="true">{% endif %}
           <input type="search" name="q" value="{{ search.search_query }}" minlength="2" required class="input-pb w-full min-w-0 sm:w-auto sm:flex-1" aria-label="Search Metron or GCD series" placeholder="Series title">
           <label for="import-library-source-trigger" class="sr-only">Metadata source</label>
           {{ dropdown_select(name="source", value=search.search_source, options=search.search_source_options, trigger_id="import-library-source-trigger", root_testid="import-library-search-source", size="sm") }}
@@ -29,13 +31,13 @@
         </tbody></table></div>
         {% elif search.search_query|length >= 2 and not search.search_error %}<p class="text-sm text-pb-text-sec">No matching series returned. Try another title or check source availability in Metadata settings.</p>{% endif %}
         {% if search.search_total_pages > 1 %}<nav class="flex items-center justify-end gap-3 text-xs" aria-label="Metadata search pages">
-          {% if search.search_page > 1 %}<button type="button" class="btn-ghost btn-sm" hx-get="{{ search_url }}?page={{ search.search_page - 1 }}&q={{ search.search_query|urlencode }}&source={{ search.search_source }}" hx-target="#cv-search-modal" hx-swap="innerHTML">Previous</button>{% endif %}
+          {% if search.search_page > 1 %}<button type="button" class="btn-ghost btn-sm" hx-get="{{ search_url }}?page={{ search.search_page - 1 }}&q={{ search.search_query|urlencode }}&source={{ search.search_source }}{{ follow_params }}" hx-target="#cv-search-modal" hx-swap="innerHTML">Previous</button>{% endif %}
           <span>{{ search.search_page }} of {{ search.search_total_pages }}</span>
-          {% if search.search_page < search.search_total_pages %}<button type="button" class="btn-ghost btn-sm" hx-get="{{ search_url }}?page={{ search.search_page + 1 }}&q={{ search.search_query|urlencode }}&source={{ search.search_source }}" hx-target="#cv-search-modal" hx-swap="innerHTML">Next</button>{% endif %}
+          {% if search.search_page < search.search_total_pages %}<button type="button" class="btn-ghost btn-sm" hx-get="{{ search_url }}?page={{ search.search_page + 1 }}&q={{ search.search_query|urlencode }}&source={{ search.search_source }}{{ follow_params }}" hx-target="#cv-search-modal" hx-swap="innerHTML">Next</button>{% endif %}
         </nav>{% endif %}
         <p role="alert" x-show="error" x-cloak x-text="error" class="text-sm text-pb-error"></p>
       </div>
-      <div class="modal-footer"><button type="button" class="btn-ghost btn-sm" hx-get="/import/{{ job.id }}/series/{{ series.id }}/review-library" hx-target="#cv-search-modal" hx-swap="innerHTML" :disabled="selecting">Back to library choices</button><button type="button" class="btn-ghost btn-sm" @click="close()" :disabled="selecting">Cancel</button></div>
+      <div class="modal-footer"><button type="button" class="btn-ghost btn-sm" hx-get="/import/{{ job.id }}/series/{{ series.id }}/review-library{{ '?follow_up=true' if follow_up else '' }}" hx-target="#cv-search-modal" hx-swap="innerHTML" :disabled="selecting">Back to library choices</button><button type="button" class="btn-ghost btn-sm" @click="close()" :disabled="selecting">Cancel</button></div>
     </div>
   </div>
   {% with import_library_preview=true, preview_id_prefix='import-library-add' %}{% include "partials/add_series_preview_dialog.html" %}{% endwith %}

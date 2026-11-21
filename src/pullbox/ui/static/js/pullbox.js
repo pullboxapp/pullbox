@@ -2727,11 +2727,20 @@ function importReviewFileActionData(config) {
       var url = config.seriesChoice
         ? "/import/" + config.jobId + "/series/" + config.seriesId + "/review-" + config.action
         : "/import/" + config.jobId + "/files/" + config.fileId + "/" + config.action;
+      if (config.followUp) url += "?follow_up=true";
       var response = await fetch(url, {
         method: "POST", headers: { "X-CSRF-Token": readCsrfTokenFromBody() }, body: new FormData(form),
       });
       var result = await response.json();
       if (!response.ok) throw new Error(typeof result.detail === "string" ? result.detail : (result.error && result.error.message) || "The file changed. Reopen this action and try again.");
+      if (config.followUp) {
+        window.dispatchEvent(new CustomEvent("import:orphaned-refresh-results"));
+        await performHtmxSwap("GET", "/import/orphaned/" + config.seriesId + "/recovery", {
+          target: "#cv-search-modal", swap: "innerHTML",
+        });
+        showToast({ message: result.message, level: "success" });
+        return;
+      }
       await this.refreshReview();
       var review = this.reviewPanelData();
       if (review && review.refreshReviewSummary) await review.refreshReviewSummary();
@@ -2745,7 +2754,17 @@ function importReviewFileActionData(config) {
 }
 
 function importReviewSeriesChoiceData(config) {
-  return importReviewFileActionData(Object.assign({}, config, { seriesChoice: true }));
+  var state = importReviewFileActionData(Object.assign({}, config, { seriesChoice: true }));
+  if (config.followUp) {
+    var close = state.close;
+    state.close = function (force) {
+      if (this.selecting && !force) return;
+      close.call(this, force);
+      var opener = document.querySelector('[data-testid="import-orphaned-search-' + config.seriesId + '"]');
+      if (opener) opener.focus({ preventScroll: true });
+    };
+  }
+  return state;
 }
 
 function importReviewFilesData(config) {

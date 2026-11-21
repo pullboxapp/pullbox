@@ -47,8 +47,15 @@ def test_library_series_and_issue_choices(
     expect(page.get_by_test_id("import-review-lane-ready")).to_contain_text("(0)")
     page.get_by_test_id("import-review-choose-library").click()
     modal.get_by_role("searchbox").fill("Harbor")
-    modal.get_by_role("button", name="Search library", exact=True).click()
+    with page.expect_response(lambda response: "/review-library?" in response.url):
+        modal.get_by_role("button", name="Search library", exact=True).click()
     selected = modal.locator(f'form:has(input[name="library_series_id"][value="{series_id}"])')
+    # The shared browser database can contain more than one page of native catalogs.
+    for _ in range(10):
+        if selected.count():
+            break
+        with page.expect_response(lambda response: "/review-library?" in response.url):
+            modal.get_by_role("button", name="Next", exact=True).click()
     expect(selected).to_be_visible()
     assert_no_axe_violations(page, name=f"library-series-{namespace}-{theme}")
     screenshots = Path(__file__).resolve().parents[2] / "test-results/library-selection"

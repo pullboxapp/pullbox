@@ -9,7 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import Response
 
-from pullbox.api.deps import AuthenticatedUser, DbSession
+from pullbox.api.deps import AuthenticatedUser, DbSession, InteractiveOperatorUser
 from pullbox.models.import_job import ImportedSeries, ImportJob, ImportJobStatus, ImportSeriesStatus
 from pullbox.ui.comicvine_series_search import (
     COMICVINE_SERIES_SEARCH_LIMIT,
@@ -30,6 +30,35 @@ _BuildContext = Callable[..., dict[str, object]]
 
 _get_templates: _GetTemplates | None = None
 _build_context: _BuildContext | None = None
+
+
+@router.get("/import/orphaned/{imported_series_id}/find-series", include_in_schema=False)
+async def find_orphaned_series(
+    imported_series_id: int,
+    request: Request,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+) -> Response:
+    from pullbox.models.import_job import ImportSourceType
+    from pullbox.services.import_orphan_recovery_context import load_orphan_recovery_item
+    from pullbox.ui.import_review_file_routes import preview_library_series
+
+    job, item = await load_orphan_recovery_item(session, imported_series_id)
+    if job.source_type == ImportSourceType.FILESYSTEM:
+        return await preview_library_series(
+            job.id,
+            item.id,
+            request,
+            user,
+            session,
+            q="",
+            page=1,
+            library_series_id=None,
+            follow_up=True,
+        )
+    return await import_orphaned_cv_search(
+        item.id, request, user, session, q=item.cv_title or item.raw_series_name
+    )
 
 
 def configure_import_orphaned_routes(

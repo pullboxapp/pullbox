@@ -110,6 +110,48 @@ these local results.
 
 ## Explicit Library Selection
 
+### Completed-Import Follow-up
+
+For completed folder imports, **Find series** now opens the same saved-library
+chooser used in Step 3. Select an existing verified Metron/GCD series, or use
+**Search Metron / GCD** to preview and add a missing one. Provider calls happen
+only on explicit search/preview/add, not when opening the library chooser.
+Adding a series remains independent of import rollback.
+
+Selecting the series opens its existing recovery dialog without reloading the
+page. Choose each issue explicitly, or skip it, then **Save recovery choices**.
+Selection alone does not match, select, import, or modify any comic. The group
+stays in Follow-up until its files are addressed. Cancel preserves its current
+decisions and returns focus to the row's Find series control.
+
+Series choices bind the actor, source evidence, verified catalog links and import
+revision. Archived, busy, rolled-back or changed groups cannot use an old choice.
+Groups with existing file decisions cannot be reassigned. An exact embedded
+native identity may only select its verified owner, not an unrelated search hit.
+The existing signed issue choices, owned-file protection, competing-copy review,
+source signature checks, and rollback behavior still apply at recovery.
+
+Untagged groups retain **Search ComicVine**. Switching an undecided group between
+a native library selection and ComicVine clears the previous selection rather
+than mixing their catalogs. The transition rechecks durable state after provider
+I/O and refuses a group changed by another request. Embedded native claims cannot
+be overridden through the legacy ComicVine assignment API. Mylar continues to use
+its existing ComicVine recovery route; this is not native Mylar matching.
+
+To test: finish a folder import with an unidentified group left for Follow-up,
+open Find series, search/add or choose its native library series, and confirm
+individual issue choices. Cancel must import nothing. Successful recovery must
+preserve source bytes; rolling it back must preserve independently added series.
+
+Checkpoint validation: 144 focused native and legacy import checks passed.
+Chromium and Firefox each passed 37 browser checks with one existing
+fixture-dependent skip. The new Follow-up checks cover both native catalogs,
+existing-series selection, search/add, cancellation, focus, accessibility, and
+recovery without a page reload. Provider responses are controlled test fixtures;
+these results do not qualify live provider availability or PostgreSQL.
+
+### Step 3 Selection
+
 An unmatched folder group without native series evidence now offers **Choose
 library series** next to the existing ComicVine search. The dialog searches
 already-added series with verified Metron or GCD links, in pages of 25. It does

@@ -22,19 +22,28 @@ async def series_choice_scope(
     series_id: int,
     action: str,
     actor_id: int,
+    *,
+    follow_up: bool = False,
 ) -> tuple[ImportJob, ImportedSeries, dict[str, object]]:
-    job = await session.get(ImportJob, job_id)
-    series = await session.get(ImportedSeries, series_id)
+    job = await session.get(ImportJob, job_id, populate_existing=follow_up)
+    series = await session.get(ImportedSeries, series_id, populate_existing=follow_up)
     if job is None or series is None or series.import_job_id != job_id:
         raise NotFoundError("ImportedSeries", series_id)
     if (
-        job.status != ImportJobStatus.REVIEW
+        job.status != (ImportJobStatus.COMPLETED if follow_up else ImportJobStatus.REVIEW)
         or job.control_request != ImportControlRequest.NONE
         or (series.diagnostics or {}).get("rematch_pending")
+        or (follow_up and job.archived_at is not None)
     ):
         raise ValidationError("This import is busy or no longer ready for review.")
     prior = (series.diagnostics or {}).get("review_series_skip")
-    if action == "restore":
+    if follow_up:
+        if action != "library" or series.status not in {
+            ImportSeriesStatus.NO_MATCH,
+            ImportSeriesStatus.RECOVERY_PENDING,
+        }:
+            raise ValidationError("This series is no longer waiting for a follow-up match.")
+    elif action == "restore":
         if series.status != ImportSeriesStatus.SKIPPED or not isinstance(prior, dict):
             raise ValidationError("This series has no review skip to undo.")
     elif action != "skip" or series.status in {
@@ -51,6 +60,7 @@ async def series_choice_scope(
                 ImportedFile.import_series_id == series_id,
             )
             .order_by(ImportedFile.id)
+            .execution_options(populate_existing=follow_up)
         )
     ).all()
     if any(
@@ -66,6 +76,7 @@ async def series_choice_scope(
             "action": "review-series-" + action,
             "actor": actor_id,
             "job": job_id,
+            "revision": job.progress_revision,
             "series": series_id,
             "status": series.status.value,
             "selected": series.selected_for_import,

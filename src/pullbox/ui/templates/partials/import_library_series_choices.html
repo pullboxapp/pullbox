@@ -1,23 +1,29 @@
-<div class="modal-shell" x-data='importReviewSeriesChoiceData({jobId: {{ job.id }}, seriesId: {{ series.id }}, action: "library"})' x-show="open" x-init="$nextTick(() => $refs.choiceDialog.focus())" @keydown.escape.window="close()" @keydown.tab="trapImportReviewDialog($event, $refs.choiceDialog)" data-testid="import-library-series-choices">
+{% set follow_query = '?follow_up=true' if follow_up else '' %}
+{% set follow_params = '&follow_up=true' if follow_up else '' %}
+<div class="modal-shell" x-data='importReviewSeriesChoiceData({jobId: {{ job.id }}, seriesId: {{ series.id }}, action: "library", followUp: {{ follow_up|default(false)|tojson }}})' x-show="open" x-init="$nextTick(() => $refs.choiceDialog.focus())" @keydown.escape.window="close()" @keydown.tab="trapImportReviewDialog($event, $refs.choiceDialog)" data-testid="import-library-series-choices">
   <div class="modal-backdrop" @click="close()"></div>
   <div class="modal-panel max-w-3xl max-h-[calc(100dvh-5rem)]" x-ref="choiceDialog" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="library-series-choice-title">
     <div class="modal-header shrink-0"><h2 class="modal-title" id="library-series-choice-title">Choose a library series</h2></div>
     <div class="modal-body min-h-0 space-y-3 p-5">
       <p class="text-sm text-pb-text-sec">Choose the series already in your library through Metron or GCD, then match each file to an issue. This does not select files for import or override conflicting embedded metadata.</p>
       <form hx-get="/import/{{ job.id }}/series/{{ series.id }}/review-library" hx-target="#cv-search-modal" hx-swap="innerHTML" hx-boost="false" class="flex gap-2">
+        {% if follow_up %}<input type="hidden" name="follow_up" value="true">{% endif %}
         <input type="search" name="q" value="{{ query }}" class="input-pb min-w-0 flex-1" aria-label="Search library series" placeholder="Series title">
         <button type="submit" class="btn-ghost btn-sm">Search library</button>
       </form>
-      <button type="button" class="btn-ghost btn-sm" hx-get="/import/{{ job.id }}/series/{{ series.id }}/review-library-search" hx-target="#cv-search-modal" hx-swap="innerHTML">Search Metron / GCD</button>
+      <div class="flex flex-wrap gap-2">
+        <button type="button" class="btn-ghost btn-sm" hx-get="/import/{{ job.id }}/series/{{ series.id }}/review-library-search{{ follow_query }}" hx-target="#cv-search-modal" hx-swap="innerHTML">Search Metron / GCD</button>
+        {% if follow_up and not series.diagnostics.get('metron_import') %}<button type="button" class="btn-ghost btn-sm" hx-get="/import/orphaned/{{ series.id }}/cv-search" hx-target="#cv-search-modal" hx-swap="innerHTML">Search ComicVine</button>{% endif %}
+      </div>
       <div class="table-shell overflow-x-auto"><table class="downloads-table text-sm"><thead><tr><th>Series</th><th>Year</th><th>Provider</th><th><span class="sr-only">Action</span></th></tr></thead><tbody>
       {% for choice in choices %}<tr><td>{{ choice.series.title }}</td><td>{{ choice.series.year_start or 'Unknown' }}</td><td>{{ 'GCD' if choice.identity.namespace == 'gcd' else 'Metron' }}</td><td>
         <form hx-boost="false" @submit.prevent="submit($el)"><input type="hidden" name="token" value="{{ choice.token }}"><input type="hidden" name="library_series_id" value="{{ choice.series.id }}"><button type="submit" class="btn-primary btn-sm whitespace-nowrap" :disabled="selecting" data-testid="import-library-series-use">Use series</button></form>
       </td></tr>{% else %}<tr><td colspan="4">No verified Metron or GCD series found. Search Metron / GCD to preview and add a missing series, or link an existing series in your library.</td></tr>{% endfor %}
       </tbody></table></div>
       {% if pages > 1 %}<nav class="flex items-center justify-end gap-3 text-xs" aria-label="Library series pages">
-        {% if page > 1 %}<button type="button" class="btn-ghost btn-sm" hx-get="/import/{{ job.id }}/series/{{ series.id }}/review-library?page={{ page - 1 }}&q={{ query|urlencode }}" hx-target="#cv-search-modal" hx-swap="innerHTML">Previous</button>{% endif %}
+        {% if page > 1 %}<button type="button" class="btn-ghost btn-sm" hx-get="/import/{{ job.id }}/series/{{ series.id }}/review-library?page={{ page - 1 }}&q={{ query|urlencode }}{{ follow_params }}" hx-target="#cv-search-modal" hx-swap="innerHTML">Previous</button>{% endif %}
         <span>{{ page }} of {{ pages }}</span>
-        {% if page < pages %}<button type="button" class="btn-ghost btn-sm" hx-get="/import/{{ job.id }}/series/{{ series.id }}/review-library?page={{ page + 1 }}&q={{ query|urlencode }}" hx-target="#cv-search-modal" hx-swap="innerHTML">Next</button>{% endif %}
+        {% if page < pages %}<button type="button" class="btn-ghost btn-sm" hx-get="/import/{{ job.id }}/series/{{ series.id }}/review-library?page={{ page + 1 }}&q={{ query|urlencode }}{{ follow_params }}" hx-target="#cv-search-modal" hx-swap="innerHTML">Next</button>{% endif %}
       </nav>{% endif %}
       <p role="alert" x-show="error" x-cloak x-text="error" class="text-sm text-pb-error"></p>
     </div>

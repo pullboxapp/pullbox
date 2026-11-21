@@ -62,13 +62,28 @@ async def library_series_identity(session: AsyncSession, series: Series) -> dict
 
 
 async def library_selection_context(
-    session: AsyncSession, job_id: int, series_id: int, actor_id: int
+    session: AsyncSession,
+    job_id: int,
+    series_id: int,
+    actor_id: int,
+    *,
+    follow_up: bool = False,
 ) -> tuple[ImportJob, ImportedSeries, dict[str, Any]]:
-    job, parent, scope = await series_choice_scope(session, job_id, series_id, "skip", actor_id)
+    job, parent, scope = await series_choice_scope(
+        session,
+        job_id,
+        series_id,
+        "library" if follow_up else "skip",
+        actor_id,
+        follow_up=follow_up,
+    )
+    allowed = {ImportSeriesStatus.NO_MATCH, ImportSeriesStatus.DUPLICATE}
+    if follow_up:
+        allowed = {ImportSeriesStatus.NO_MATCH, ImportSeriesStatus.RECOVERY_PENDING}
     if (
         job.source_type != ImportSourceType.FILESYSTEM
-        or parent.status not in {ImportSeriesStatus.NO_MATCH, ImportSeriesStatus.DUPLICATE}
-        or parent.diagnostics.get("metron_import")
+        or parent.status not in allowed
+        or (parent.diagnostics.get("metron_import") and not follow_up)
         or (
             parent.status == ImportSeriesStatus.DUPLICATE
             and not parent.diagnostics.get("manual_library_series")
@@ -127,13 +142,31 @@ async def library_series_page(
 
 
 async def choose_library_series(
-    session: AsyncSession, job_id: int, parent_id: int, series_id: int, actor_id: int, token: str
+    session: AsyncSession,
+    job_id: int,
+    parent_id: int,
+    series_id: int,
+    actor_id: int,
+    token: str,
+    *,
+    follow_up: bool = False,
 ) -> None:
-    job, parent, scope = await library_selection_context(session, job_id, parent_id, actor_id)
+    job, parent, scope = await library_selection_context(
+        session, job_id, parent_id, actor_id, follow_up=follow_up
+    )
     series = await session.get(Series, series_id)
     if series is None:
         raise ValidationError("This library series no longer exists.")
     identity = await library_series_identity(session, series)
+    if parent.diagnostics.get("metron_import"):
+        from pullbox.services.import_metron_matching import verified_native_import_series
+
+        verified = await verified_native_import_series(session, parent)
+        if verified is None or verified.id != series.id:
+            raise ValidationError(
+                "This series disagrees with the source identity. Add or link the exact "
+                "provider series, or correct the source metadata before retrying."
+            )
     await verify_review_scope(
         session,
         token,
@@ -143,8 +176,11 @@ async def choose_library_series(
         update(ImportJob)
         .where(
             ImportJob.id == job_id,
-            ImportJob.status == ImportJobStatus.REVIEW,
+            ImportJob.status
+            == (ImportJobStatus.COMPLETED if follow_up else ImportJobStatus.REVIEW),
             ImportJob.control_request == ImportControlRequest.NONE,
+            ImportJob.progress_revision == job.progress_revision,
+            ImportJob.archived_at.is_(None),
         )
         .values(progress_revision=ImportJob.progress_revision + 1)
         .returning(ImportJob.id)
@@ -153,6 +189,8 @@ async def choose_library_series(
         raise ValidationError("This import is no longer available for review.")
     parent.series_id = series.id
     parent.cv_id = series.comicvine_id
+    parent.user_selected_cv_id = None
+    parent.cv_url = None
     parent.cv_title = series.title
     parent.cv_year = series.year_start
     from pullbox.models.publisher import Publisher
@@ -162,7 +200,9 @@ async def choose_library_series(
     parent.cv_issue_count = series.issue_count
     parent.cv_match_method = "library_review"
     parent.cv_match_score = None
-    parent.status = ImportSeriesStatus.DUPLICATE
+    parent.status = (
+        ImportSeriesStatus.RECOVERY_PENDING if follow_up else ImportSeriesStatus.DUPLICATE
+    )
     parent.selected_for_import = False
     parent.diagnostics = {
         **parent.diagnostics,

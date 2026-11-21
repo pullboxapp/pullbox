@@ -171,6 +171,7 @@ async def preview_library_series(
     q: str = Query("", max_length=200),
     page: int = Query(1, ge=1),
     library_series_id: int | None = Query(None, gt=0),
+    follow_up: bool = False,
 ) -> Response:
     from pullbox.services.import_library_selection import (
         library_selection_context,
@@ -179,7 +180,9 @@ async def preview_library_series(
     )
     from pullbox.ui.import_routes import _ctx, _templates
 
-    job, parent, scope = await library_selection_context(session, job_id, series_id, user.id)
+    job, parent, scope = await library_selection_context(
+        session, job_id, series_id, user.id, follow_up=follow_up
+    )
     series, page, pages = await library_series_page(session, q, page, series_id=library_series_id)
     choices = []
     for item in series:
@@ -200,6 +203,7 @@ async def preview_library_series(
             query=q,
             page=page,
             pages=pages,
+            follow_up=follow_up,
         ),
     )
 
@@ -212,10 +216,13 @@ async def apply_library_series(
     session: DbSession,
     library_series_id: Annotated[int, Form(gt=0)],
     token: Annotated[str, Form()],
+    follow_up: bool = False,
 ) -> Response:
     from pullbox.services.import_library_selection import choose_library_series
 
-    await choose_library_series(session, job_id, series_id, library_series_id, user.id, token)
+    await choose_library_series(
+        session, job_id, series_id, library_series_id, user.id, token, follow_up=follow_up
+    )
     await session.commit()
     return JSONResponse(
         {
@@ -237,6 +244,7 @@ async def search_library_series(
     q: str = Query("", max_length=200),
     page: int = Query(1, ge=1),
     source: Annotated[Literal["all", "metron_api", "gcd_local", "gcd_api_v2"], Query()] = "all",
+    follow_up: bool = False,
 ) -> Response:
     from pullbox.core.metadata_identity import MetadataSource
     from pullbox.models.series import Series
@@ -249,7 +257,7 @@ async def search_library_series(
     from pullbox.ui.series_routes import _request_search_cache, load_add_series_search_context
 
     actor_id = user.id
-    await library_selection_context(session, job_id, series_id, actor_id)
+    await library_selection_context(session, job_id, series_id, actor_id, follow_up=follow_up)
     search = await load_add_series_search_context(
         session,
         q,
@@ -264,7 +272,9 @@ async def search_library_series(
         cache=_request_search_cache(request),
     )
     # Provider I/O ends the prior transaction. Revalidate the review before offering choices.
-    job, parent, scope = await library_selection_context(session, job_id, series_id, actor_id)
+    job, parent, scope = await library_selection_context(
+        session, job_id, series_id, actor_id, follow_up=follow_up
+    )
     await session.refresh(user)
     rows = search["search_results"]
     if isinstance(rows, list):
@@ -298,10 +308,12 @@ async def search_library_series(
             job=job,
             series=parent,
             search=search,
+            follow_up=follow_up,
             search_config={
                 "jobId": job_id,
                 "seriesId": series_id,
                 "action": "library",
+                "followUp": follow_up,
                 "libraryRootId": root["id"] if root else None,
                 "rootLabel": f"{root['path']} - {root['name']}" if root else "",
             },

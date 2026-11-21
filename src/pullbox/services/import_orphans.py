@@ -5,13 +5,14 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, or_, update
 from sqlalchemy import func as sa_func
 from sqlalchemy import select as sa_select
 
 from pullbox.core.exceptions import NotFoundError, ValidationError
 from pullbox.core.release_parser import parse_release_title
 from pullbox.models.import_job import (
+    ImportControlRequest,
     ImportedFile,
     ImportedFileStatus,
     ImportedSeries,
@@ -675,8 +676,51 @@ async def assign_cv_to_orphan(
             "This unmatched group already imported files and cannot change series matches."
         )
 
+    if isinstance(item.diagnostics.get("metron_import"), dict):
+        raise ValidationError(
+            "This group has an embedded native identity. Choose its verified library series "
+            "or correct the source metadata instead of replacing it with a ComicVine match."
+        )
+    native_choice = None
+    if item.diagnostics.get("manual_library_series"):
+        from pullbox.services.import_library_selection import library_selection_context
+
+        job, _, scope = await library_selection_context(
+            session, item.import_job_id, item.id, 0, follow_up=True
+        )
+        native_choice = (scope, job.progress_revision)
+
     try:
         metadata = await metadata_service.get_series_metadata(cv_id)
+        if native_choice is not None:
+            job, _, current = await library_selection_context(
+                session, item.import_job_id, item.id, 0, follow_up=True
+            )
+            if current != native_choice[0]:
+                raise ValidationError("This group changed during search. Reopen Find series.")
+            claimed = await session.scalar(
+                update(ImportJob)
+                .where(
+                    ImportJob.id == job.id,
+                    ImportJob.status == ImportJobStatus.COMPLETED,
+                    ImportJob.control_request == ImportControlRequest.NONE,
+                    ImportJob.archived_at.is_(None),
+                    ImportJob.progress_revision == native_choice[1],
+                )
+                .values(progress_revision=ImportJob.progress_revision + 1)
+                .returning(ImportJob.id)
+            )
+            if claimed is None:
+                raise ValidationError("This group changed during search. Reopen Find series.")
+            item.series_id = None
+            item.cv_match_method = "user_override"
+            item.cv_match_score = None
+            item.diagnostics = {
+                key: value
+                for key, value in item.diagnostics.items()
+                if key not in {"manual_library_series", "existing_series_id", "duplicate_reason"}
+            }
+            item.diagnostics = {**item.diagnostics, "kind": "orphan_recovery"}
         item.status = ImportSeriesStatus.RECOVERY_PENDING
         item.cv_id = cv_id
         item.cv_title = metadata.title

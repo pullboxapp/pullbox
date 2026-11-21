@@ -247,7 +247,7 @@
                         {% endif %}
                       {% else %}
                         <span
-                          class="pill"
+                          class="pill text-pb-text"
                           x-bind:class="isFileSkipped({{ file.imported_file_id }}) ? 'pill-neutral' : 'pill-info'"
                           x-text="isFileSkipped({{ file.imported_file_id }}) ? 'Will skip' : 'Needs decision'"
                         >Needs decision</span>

@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added searched, paginated Metron/GCD issue choices to completed-import Follow-up
   for identified library series. Choices remain local until saved; stale links,
   competing copies, and changed sources cannot silently replace owned files.
+- Added library selection and Metron/GCD search, preview and Add to **Find series**
+  in folder-import Follow-up. Users can finish deferred files without rescanning;
+  series selection still requires explicit issue choices before recovery.
 - Added opt-in Metron API and read-only GCD Local series search, provider linking,
   and reviewed metadata refresh alongside the existing ComicVine sources.
 - Added explicit existing-CBZ metadata review and coordinated ComicInfo.xml and

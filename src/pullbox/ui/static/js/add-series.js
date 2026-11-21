@@ -387,7 +387,7 @@ function importLibrarySeriesSearch(config) {
       if (!Number.isSafeInteger(this.addedSeries?.id) || this.addedSeries.id < 1 || this.selecting) return;
       this.selecting = true;
       this.error = '';
-      performHtmxSwap('GET', `/import/${config.jobId}/series/${config.seriesId}/review-library?library_series_id=${this.addedSeries.id}`, {
+      performHtmxSwap('GET', `/import/${config.jobId}/series/${config.seriesId}/review-library?library_series_id=${this.addedSeries.id}${config.followUp ? '&follow_up=true' : ''}`, {
         target: '#cv-search-modal', swap: 'innerHTML',
       }).catch(() => {
         this.error = 'The series was added, but this review could not reload. Reopen Choose library series; no files were selected.';

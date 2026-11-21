@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from playwright.sync_api import expect
 
 from tests.e2e.pages.import_page import ImportPage
 
@@ -66,6 +67,10 @@ class TestImportUnmatchedTab:
 
         import_page.search_button_for_row("Batman and Robin Eternal").click()
         import_page.wait_for_htmx()
+        choices = authed_page.get_by_test_id("import-library-series-choices")
+        expect(choices).to_be_visible()
+        choices.get_by_role("button", name="Search ComicVine", exact=True).click()
+        expect(authed_page.get_by_test_id("import-orphaned-cv-search-modal")).to_be_visible()
 
         assert import_page.workspace_root.is_visible()
         assert import_page.unmatched_panel.is_visible()
@@ -104,7 +109,7 @@ class TestImportUnmatchedTab:
         )
 
         assert action_state is not None
-        assert action_state["searchTip"] == "Search ComicVine"
+        assert action_state["searchTip"] == "Find series"
         assert action_state["dismissTip"] == "Dismiss"
         assert action_state["searchText"] == "Find series"
         assert action_state["dismissText"] == ""

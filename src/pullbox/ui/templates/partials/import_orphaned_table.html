@@ -122,12 +122,12 @@
                     type="button"
                     data-testid="import-orphaned-search-{{ item.id }}"
                     class="btn-ghost btn-sm"
-                    hx-get="/import/orphaned/{{ item.id }}/cv-search?q={{ item.raw_series_name|urlencode }}"
+                    hx-get="/import/orphaned/{{ item.id }}/find-series"
                     hx-target="#cv-search-modal"
                     hx-swap="innerHTML"
-                    data-tip="Search ComicVine"
+                    data-tip="Find series"
                     data-tip-pos="left"
-        aria-label="Search ComicVine for {{ item.raw_series_name }}"
+        aria-label="Find series for {{ item.raw_series_name }}"
       ><span>Find series</span>
                     <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                       <path stroke-linecap="round" stroke-linejoin="round" d="m21 21-4.35-4.35m1.85-5.15a7 7 0 11-14 0 7 7 0 0114 0z"/>
@@ -167,12 +167,12 @@
                     type="button"
                     data-testid="import-orphaned-search-{{ item.id }}"
                     class="btn-ghost btn-sm"
-                    hx-get="/import/orphaned/{{ item.id }}/cv-search?q={{ (item.cv_title or item.raw_series_name)|urlencode }}"
+                    hx-get="/import/orphaned/{{ item.id }}/find-series"
                     hx-target="#cv-search-modal"
                     hx-swap="innerHTML"
-                    data-tip="Change ComicVine match"
+                    data-tip="Change series"
                     data-tip-pos="left"
-        aria-label="Change ComicVine match for {{ item.raw_series_name }}"
+        aria-label="Change series for {{ item.raw_series_name }}"
       ><span>Change series</span>
                     <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                       <path stroke-linecap="round" stroke-linejoin="round" d="m21 21-4.35-4.35m1.85-5.15a7 7 0 11-14 0 7 7 0 0114 0z"/>
