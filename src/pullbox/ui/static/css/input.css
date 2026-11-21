@@ -8381,6 +8381,10 @@ input[type="range"].range-pb::-moz-range-thumb {
   background: var(--pb-interactive);
   color: var(--pb-text-inverse);
 }
+#import-review-lanes .downloads-tab-btn {
+  /* Keep contrast intact while review updates switch both colors together. */
+  transition: none;
+}
 .downloads-panel-stack {
   display: grid;
   gap: 1.25rem;

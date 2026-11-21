@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from tests.e2e.accessibility import assert_no_axe_violations
 from tests.e2e.conftest import _run_async_blocking
+from tests.e2e.pages.import_page import ImportPage
 from tests.e2e.test_source_series_add import preview
 from tests.integration.test_metron_folder_import import _archive, _service
 
@@ -119,7 +120,9 @@ def test_metron_preview_cancel_add_and_recheck_stay_in_review(
     page.route("**/api/v1/series", add)
     page.goto(f"{seeded_server}/import?tab=collection&resume_job_id={job_id}&resume_step=3")
     expect(page.locator("html")).to_have_attribute("data-theme", theme)
-    page.get_by_test_id("import-review-lane-decide").click()
+    ImportPage(page, seeded_server).click_review_control(
+        page.get_by_test_id("import-review-lane-decide")
+    )
     page.get_by_role("button", name="Review identity", exact=True).click()
     trigger = page.get_by_test_id(f"import-review-{namespace}-preview")
     expect(trigger).to_be_visible()

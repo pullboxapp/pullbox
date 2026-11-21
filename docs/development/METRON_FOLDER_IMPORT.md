@@ -196,6 +196,59 @@ RSS-bound failure did not recur in either subsequent full validation run; its
 limit was not changed, and no reader fix is claimed. Live provider acceptance
 for this dialog and PostgreSQL qualification remain pending.
 
+## Compiled Series Sidecars
+
+Folder scans now read the version-1 compiled block produced by Pullbox's
+`series.json` writer. Its Metron/GCD series claims must resolve to existing,
+verified local identities, including every additional exact series identity
+in the sidecar or file. Copied links, provenance, and observed identities do not
+create verified library links. Reads are bounded to 1 MiB; malformed, oversized,
+unsupported, or contradictory evidence remains in review with rescan/skip guidance.
+
+A sidecar identifies the series, not every issue in its folder. A file with
+its own exact issue identity may match automatically, including an issue linked
+through another provider when local verified records prove the same target.
+The legacy ComicVine issue column is supported. Conflicting embedded issue
+numbers remain blocked; absent numbers require exact identity evidence.
+
+Files without a proven issue offer **Choose issue** against the saved native
+catalog. Only an explicit choice makes that file ready. Unchosen neighbors stay
+unresolved even if their filenames resemble an issue. Ready rows identify
+`series.json (Metron)` or `series.json (GCD)` as the series evidence. Rechecks and
+issue choices make no provider requests; execution revalidates the reviewed
+evidence and verified links before the usual file-safety and ownership checks.
+
+This extends filesystem imports, not the trusted Mylar path. The compatibility
+suite retains Mylar in-place, split-series, source-provenance and legacy metadata
+tests. Qualification covers both native series providers, cross-provider exact
+issue IDs, lettered/missing numbers, mixed-folder conflicts, stale links before
+and after confirmation, owned-file rescans, preserved sources and rollback.
+PostgreSQL parity and broader Mylar/native recovery remain separate requirements.
+
+The local lab has three separate synthetic scenarios under `sources/compiled-sidecar`:
+series-only Metron evidence needing per-file choice, exact GCD issue evidence
+with its series supplied by the sidecar, and a conflicting issue number. They
+do not alter the existing review job. Finish or cancel that review before
+starting a new scenario, and roll back successful synthetic imports afterward.
+
+The combined review, native search/add and series-choice browser suite passed
+55 checks in each of Chromium and Firefox, including all three themes and
+accessibility. The tab color fade briefly dropped label contrast below 4.5:1;
+review tabs now switch foreground and background together. A controlled pending
+review refresh also preserved an expanded row. Older browser tests now wait for
+the actual lane response before operating its controls, rather than racing the
+previous lane's DOM. The focused sidecar safety suite passed 54 cases.
+
+The first broad validation run passed 16,687 tests but failed the existing reader
+RSS limit (41 MiB growth against the unchanged 32 MiB bound). Its other resource
+bounds held; the complete reader-content suite then passed 11 checks alone with
+144 KiB RSS growth. This intermittent full-suite failure remains unresolved;
+neither a raised limit nor a reader fix is part of this checkpoint.
+The subsequent unchanged `make validate` run passed CSS build, lint, formatting,
+strict typing and 16,688 tests, with 1,778 skipped and one expected failure.
+Both runs are retained in the local evidence directory; this does not qualify
+PostgreSQL or replace live acceptance of the staged fixtures.
+
 ## Rollback Status
 
 New file-registration journal entries record the issue's status and manual-skip

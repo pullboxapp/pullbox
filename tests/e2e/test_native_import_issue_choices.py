@@ -5,6 +5,7 @@ from playwright.sync_api import expect
 
 from tests.e2e.accessibility import assert_no_axe_violations
 from tests.e2e.conftest import _run_async_blocking
+from tests.e2e.pages.import_page import ImportPage
 from tests.ui.test_native_import_issue_assignment import seed_native_choices
 
 pytestmark = pytest.mark.e2e
@@ -36,7 +37,9 @@ def test_native_issue_picker_selection_preserves_review(
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.goto(f"{seeded_server}/import?tab=collection&resume_job_id={job_id}&resume_step=3")
-    page.get_by_test_id("import-review-lane-decide").click()
+    ImportPage(page, seeded_server).click_review_control(
+        page.get_by_test_id("import-review-lane-decide")
+    )
     page.locator(
         '[data-testid="import-review-workspace-table"] button[aria-expanded="false"]'
     ).first.click()

@@ -7,6 +7,7 @@ from playwright.sync_api import expect
 
 from tests.e2e.accessibility import assert_no_axe_violations
 from tests.e2e.conftest import _run_async_blocking
+from tests.e2e.pages.import_page import ImportPage
 from tests.integration.test_compiled_sidecar_import import _comic, _sidecar
 from tests.integration.test_metron_folder_import import _service, _setup
 
@@ -60,7 +61,8 @@ def test_sidecar_issue_choice_preserves_neighbors_and_review_shell(
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.goto(f"{seeded_server}/import?tab=collection&resume_job_id={job_id}&resume_step=3")
-    page.get_by_test_id("import-review-lane-decide").click()
+    review = ImportPage(page, seeded_server)
+    review.click_review_control(page.get_by_test_id("import-review-lane-decide"))
     page.locator(
         '[data-testid="import-review-workspace-table"] button[aria-expanded="false"]'
     ).first.click()
@@ -80,11 +82,19 @@ def test_sidecar_issue_choice_preserves_neighbors_and_review_shell(
     assert page.locator("#import-step-review-shell").evaluate(
         "el => el === window.sidecarReviewShell"
     )
-    page.get_by_test_id("import-review-lane-ready").click()
+    review.click_review_control(page.get_by_test_id("import-review-lane-ready"))
+    ready_tab = page.get_by_test_id("import-review-lane-ready")
+    expect(ready_tab).to_have_attribute("aria-selected", "true")
+    assert ready_tab.evaluate("el => getComputedStyle(el).transitionDuration") == "0s"
+    assert ready_tab.evaluate(
+        "el => getComputedStyle(el).color === getComputedStyle(el.querySelector('span')).color"
+    )
     label = "Metron" if namespace == "metron" else "GCD"
-    expect(page.get_by_test_id("import-review-workspace-table")).to_contain_text(
+    identity = page.get_by_test_id("import-review-workspace-table").get_by_text(
         f"series.json ({label})"
     )
+    identity.scroll_into_view_if_needed()
+    expect(identity).to_be_visible()
     assert_no_axe_violations(page, name=f"sidecar-ready-{namespace}-{theme}")
     page.screenshot(path=str(screenshots / f"{browser_name}-{namespace}-{theme}-ready.png"))
     assert not errors

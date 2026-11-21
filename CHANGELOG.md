@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added Metron/GCD library-series and issue choices in import review, with
   search, preview and Add for missing series. Adding a series leaves file choices
   explicit, and import rollback preserves independently added series.
+- Added folder-import recognition of compiled `series.json` provider identities.
+  Exact file identities can match verified local issues across linked providers;
+  a series-only sidecar still requires an explicit issue choice for each file.
 - Added opt-in Metron API and read-only GCD Local series search, provider linking,
   and reviewed metadata refresh alongside the existing ComicVine sources.
 - Added explicit existing-CBZ metadata review and coordinated ComicInfo.xml and
@@ -36,6 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Kept import-review tab labels and counts readable during lane changes by
+  switching their theme colors together without an intermediate color fade.
 - Reconciled stale provider catalog counts and safely extended linked issue
   catalogs without replacing existing matches or owned files. Repeated Metron
   searches now respect provider cooldowns and distinguish timeouts from empty results.

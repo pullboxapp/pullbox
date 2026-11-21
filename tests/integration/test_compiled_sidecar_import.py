@@ -108,6 +108,21 @@ async def test_compiled_series_imports_from_verified_issue_identity(
     await db_session.refresh(row)
     assert row.status == ImportedFileStatus.IMPORTED
     assert (await db_session.scalars(select(LibraryFile))).one().issue_id == issue.id
+    repeat = await service.create_job(
+        db_session,
+        ImportJobCreate(
+            source_path=str(source), source_type="filesystem", target_library_root_id=root.id
+        ),
+    )
+    await service.start_scan(db_session, repeat.id)
+    repeated_file = (
+        await db_session.scalars(
+            select(ImportedFile).where(ImportedFile.import_job_id == repeat.id)
+        )
+    ).one()
+    assert repeated_file.status == ImportedFileStatus.ALREADY_OWNED
+    assert not repeated_file.include_in_import
+    assert len((await db_session.scalars(select(LibraryFile))).all()) == 1
     assert await service.rollback_import(db_session, job.id)
     assert not (await db_session.scalars(select(LibraryFile))).all()
     assert comic.read_bytes() == original

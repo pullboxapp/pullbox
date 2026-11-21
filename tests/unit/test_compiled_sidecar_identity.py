@@ -11,7 +11,13 @@ from tests.integration.test_compiled_sidecar_import import _sidecar
 
 @pytest.mark.parametrize("namespace", [IdentityNamespace.METRON, IdentityNamespace.GCD])
 def test_writer_sidecar_keeps_only_series_identity_evidence(tmp_path, namespace):
-    _sidecar(tmp_path, namespace)
+    data = json.loads(_sidecar(tmp_path, namespace))
+    other = "gcd" if namespace == IdentityNamespace.METRON else "metron"
+    data["pullbox"]["snapshot"]["observed_identities"] = [
+        {"namespace": other, "entity_kind": "series", "external_id": "999"}
+    ]
+    data["pullbox"]["links"] = {other: {"id": "999", "verification_state": "verified"}}
+    (tmp_path / "series.json").write_text(json.dumps(data))
     metadata = SourceMetadataExtractor().from_path(
         tmp_path / "untagged.cbz", include_archive_comicinfo=False
     )

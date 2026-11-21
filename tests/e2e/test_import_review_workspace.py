@@ -115,6 +115,37 @@ def test_choose_issue_button_toggles_the_inline_issue_list(
     assert errors == []
 
 
+def test_review_expansion_survives_an_inflight_same_lane_refresh(
+    authed_page, seeded_server, copy_review_job
+):
+    page = authed_page
+    page.goto(
+        f"{seeded_server}/import?tab=collection&resume_job_id={copy_review_job}&resume_step=3"
+    )
+    lane = page.get_by_test_id("import-review-lane-decide")
+    ImportPage(page, seeded_server).click_review_control(lane)
+    row = page.locator("[data-import-review-series-row]").filter(has_text="Review Series 10")
+    expander = row.locator("td:last-child > [data-import-review-expand-action]")
+    page.evaluate("""() => {
+        const original = window.fetch;
+        window.fetch = async (...args) => {
+            const response = await original(...args);
+            if (String(args[0]).includes('/review-partial?')) {
+                await new Promise(resolve => { window.releaseReviewResponse = resolve; });
+            }
+            return response;
+        };
+    }""")
+    lane.click()
+    page.wait_for_function("typeof window.releaseReviewResponse === 'function'")
+    expander.click()
+    expect(row.get_by_test_id("import-review-choose-issue")).to_be_visible()
+    page.evaluate("window.releaseReviewResponse()")
+    page.wait_for_function("!window.__pbImportReviewNavPending")
+    expect(expander).to_have_attribute("aria-expanded", "true")
+    expect(row.get_by_test_id("import-review-choose-issue")).to_be_visible()
+
+
 def test_missing_reference_series_preserves_review_focus(authed_page, seeded_server, browser_name):
     from pullbox.database import get_session_factory
     from tests.e2e.conftest import _run_async_blocking
