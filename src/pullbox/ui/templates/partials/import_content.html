@@ -1,6 +1,7 @@
 <div
   id="import-content"
   data-testid="import-content"
+  hx-history="false"
   {% if oob|default(false) %}hx-swap-oob="outerHTML"{% endif %}
   class="pt-1"
 >

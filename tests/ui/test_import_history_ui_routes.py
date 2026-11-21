@@ -48,6 +48,34 @@ async def _seed_import_history_job(
 class TestImportHistoryTabRouteContracts:
     """Verify history is mounted under the unified Import workspace."""
 
+    @pytest.mark.parametrize(
+        "tab,target",
+        [
+            ("collection", "import-content"),
+            ("follow-up", "import-orphaned-results"),
+            ("history", "import-history-results"),
+        ],
+    )
+    @pytest.mark.parametrize("include_target", [False, True])
+    async def test_history_restore_returns_full_shell_not_a_partial(
+        self, authenticated_client, tab, target, include_target
+    ) -> None:  # type: ignore[no-untyped-def]
+        headers = {"HX-Request": "true", "HX-History-Restore-Request": "true"}
+        if include_target:
+            headers["HX-Target"] = target
+
+        response = await authenticated_client.get(f"/import?tab={tab}", headers=headers)
+
+        assert response.status_code == 200
+        assert "<!doctype html>" in response.text.lower()
+        assert 'aria-label="Sidebar"' in response.text
+        assert 'id="content"' in response.text
+        assert response.text.count('id="pb-confirm-dialog"') == 1
+        assert 'data-testid="import-page"' in response.text
+        assert 'hx-history="false"' in response.text
+        assert '<script src="/static/js/pullbox.js' not in response.text
+        assert '<script src="/static/js/alpine.min.js' not in response.text
+
     async def test_legacy_import_history_route_redirects_to_unified_import_page(
         self,
         authenticated_client,
@@ -76,6 +104,8 @@ class TestImportHistoryTabRouteContracts:
         assert 'data-testid="import-history-results"' in response.text
         assert 'data-testid="import-history-table-shell"' in response.text
         assert 'data-testid="import-history-delete-modal"' in response.text
+        assert '<script src="/static/js/pullbox.js' in response.text
+        assert '<script src="/static/js/alpine.min.js' in response.text
 
     async def test_archived_imports_are_hidden_by_default_and_can_be_shown(
         self,

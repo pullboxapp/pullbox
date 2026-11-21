@@ -54,6 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserved the import page shell and working follow-up and rollback controls
+  when using browser Back after reviewing an issue. History restoration reloads
+  current import state without duplicating the application's script runtime.
 - Required the patched Brotli decoder used by archive and HTTP decompression.
 - Retained Metron/GCD issue identities when scanning and rechecking CBR, CB7,
   and CBT imports. Recorded Mylar matches still accept unknown native IDs;

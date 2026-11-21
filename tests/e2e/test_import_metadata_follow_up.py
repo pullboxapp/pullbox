@@ -32,12 +32,19 @@ def metadata_follow_up_job(seeded_server, tmp_path, monkeypatch):
 
     async def seed():
         async with get_session_factory().begin() as session:
-            issue = await session.scalar(select(Issue).order_by(Issue.id).limit(1))
+            issue = await session.scalar(
+                select(Issue)
+                .outerjoin(LibraryFile, LibraryFile.issue_id == Issue.id)
+                .where(LibraryFile.id.is_(None))
+                .order_by(Issue.id)
+                .limit(1)
+            )
             root = await session.scalar(select(LibraryRoot).order_by(LibraryRoot.id).limit(1))
             job = ImportJob(
                 source_path="/tmp/metadata-follow-up-test",
                 source_type=ImportSourceType.FILESYSTEM,
                 status=ImportJobStatus.COMPLETED,
+                import_started_at=datetime.now(UTC),
             )
             session.add(job)
             await session.flush()
@@ -94,6 +101,48 @@ def metadata_follow_up_job(seeded_server, tmp_path, monkeypatch):
             await session.execute(delete(LibraryFile).where(LibraryFile.id == library_id))
 
     _run_async_blocking(cleanup())
+
+
+@pytest.mark.parametrize("evict_history", [False, True])
+def test_back_from_issue_preserves_follow_up_and_results_actions(
+    authed_page, seeded_server, metadata_follow_up_job, evict_history
+):
+    job_id, calls = metadata_follow_up_job
+    page = authed_page
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    results_url = f"{seeded_server}/import?tab=collection&resume_job_id={job_id}&resume_step=5"
+    page.goto(results_url)
+    page.get_by_role("link", name="Review follow-up", exact=True).click()
+    card = page.get_by_test_id("import-follow-up-archive-metadata")
+    card.get_by_role("button", name="Review files", exact=True).click()
+    card.get_by_role("link", name="Open issue", exact=True).first.click()
+    expect(page.get_by_test_id("issue-detail-actions-title")).to_be_visible()
+    page.evaluate("window.importHistoryProbe = 'same document'")
+    if evict_history:
+        page.evaluate("localStorage.removeItem('htmx-history-cache')")
+
+    page.go_back()
+    expect(card).to_be_visible()
+    expect(page.get_by_role("complementary", name="Sidebar")).to_be_visible()
+    expect(page.locator("#content")).to_have_count(1)
+    expect(page.locator("#pb-confirm-dialog")).to_have_count(1)
+    card.get_by_role("button", name="Review files", exact=True).click()
+    expect(card.get_by_role("button", name="Retry metadata", exact=True).first).to_be_visible()
+    if evict_history:
+        page.evaluate("localStorage.removeItem('htmx-history-cache')")
+
+    page.go_back()
+    expect(page).to_have_url(results_url)
+    expect(page.get_by_role("complementary", name="Sidebar")).to_be_visible()
+    page.get_by_role("button", name="Rollback import", exact=True).click()
+    expect(page.get_by_role("button", name="Start rollback", exact=True)).to_be_visible()
+    page.get_by_role("button", name="Cancel", exact=True).click()
+    expect(page.get_by_role("button", name="Start rollback", exact=True)).not_to_be_visible()
+    assert page.evaluate("window.importHistoryProbe") == "same document"
+    assert calls == []
+    assert errors == []
+    page.screenshot(path=f"test-results/import-history-restore-{evict_history}.png")
 
 
 def test_metadata_follow_up_paginates_and_retries_without_navigation(

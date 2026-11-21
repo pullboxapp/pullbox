@@ -497,7 +497,9 @@ async def import_page(
     )
 
     hx_target = request.headers.get("HX-Target")
-    if request.headers.get("HX-Request"):
+    # A history cache miss restores the document body, not a workspace partial.
+    history_restore = request.headers.get("HX-History-Restore-Request") == "true"
+    if request.headers.get("HX-Request") and not history_restore:
         if hx_target == "import-history-results" and normalized_tab == "history":
             return _templates().TemplateResponse(
                 request,

@@ -58,10 +58,27 @@ the successful writing path rather than weakening XML validation.
 
 Qualification: 270 focused converter, paired-writer and native/legacy import
 regressions passed, along with focused Ruff and strict mypy. This is not full CI
-or PostgreSQL qualification. A transient browser-history restoration issue seen
-while returning from an issue page to completed-import follow-up remains a
-separate reproduction task; these successful direct import/rollback runs do not
-establish that history navigation is fixed.
+or PostgreSQL qualification.
+
+### Returning From Metadata Follow-Up
+
+The browser qualification also reproduced a history-restoration failure when
+returning from an issue page through completed-import Follow-up to Results.
+A history cache miss received a workspace fragment instead of the page shell,
+removing the sidebar and global confirmation dialog. Restoring cached dynamic
+controls could also retain stale loop markup.
+
+Import pages now request fresh history state, return the full shell on history
+restoration, and reuse the existing script runtime instead of loading it again.
+Ordinary tab updates remain partial responses. Import decisions, matching,
+metadata retries and rollback behavior are unchanged.
+
+Qualification: 143 import route tests and eight Chromium/Firefox browser cases
+passed, including ordinary Back navigation, explicit history-cache eviction,
+usable metadata review and rollback controls, and no JavaScript errors. Local
+job #64 reproduced the original failure and its generated copy was rolled back
+through the restored controls. The original library records and source hashes
+still match the pre-test baseline. This is focused UI qualification, not full CI.
 
 Step 3 shows the series under Ready with a Metron identity label. Since this is
 an existing series, use its ready-file selection controls to add missing issues.

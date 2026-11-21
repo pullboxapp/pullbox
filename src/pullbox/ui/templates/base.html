@@ -784,6 +784,7 @@
   </div>
 
   {#- ── Scripts ───────────────────────────────────────────────── -#}
+  {% block bootstrap_scripts %}
   <script src="/static/js/htmx.min.js?v={{ app_shell_asset_version|default('') }}"></script>
   <script>
     /**
@@ -1003,6 +1004,7 @@
   <script src="/static/js/series-sidecar.js?v={{ app_shell_asset_version|default('') }}"></script>
   <script src="/static/js/add-series.js?v={{ app_shell_asset_version|default('') }}"></script>
   <script src="/static/js/whats-new-find-add.js?v={{ app_shell_asset_version|default('') }}"></script>
+  {% endblock %}
 
 </body>
 </html>

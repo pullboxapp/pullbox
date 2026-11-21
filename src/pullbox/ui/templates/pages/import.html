@@ -15,3 +15,10 @@
 {% block footer_dock %}
   {% include "partials/import_footer_dock.html" %}
 {% endblock %}
+
+{% block bootstrap_scripts %}
+  {# History restoration replaces the body but keeps the existing script runtime. #}
+  {% if request.headers.get("HX-History-Restore-Request") != "true" %}
+    {{ super() }}
+  {% endif %}
+{% endblock %}
