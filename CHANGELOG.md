@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added separate Metron/GCD review groups for exact-identity archives found in
   Mylar folders but absent from Mylar's issue records. Recorded Mylar issues and
   untagged neighbors retain their existing matching paths.
+- Added compiled `series.json` matching for unrecorded Mylar files. Verified
+  per-file issue IDs can resolve across linked catalogs; a series-only sidecar
+  offers explicit issue choices without automatically matching its neighbors.
 - Added opt-in Metron API and read-only GCD Local series search, provider linking,
   and reviewed metadata refresh alongside the existing ComicVine sources.
 - Added explicit existing-CBZ metadata review and coordinated ComicInfo.xml and
@@ -48,6 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Included the visible background activity count in its accessible button label.
 - Kept unresolved native files for existing library series visible in completed
   import Follow-up, showing their matched series rather than the source folder's
   title. Recovery retains explicit issue choices and original-file protection.

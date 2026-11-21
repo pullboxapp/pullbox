@@ -155,15 +155,19 @@ these results do not qualify live provider availability or PostgreSQL.
 ### Unrecorded Native Mylar Extras
 
 Mylar imports can stage separate Metron/GCD groups for archives present in a
-source folder but absent from Mylar's issue records. Each archive must carry its
-own exact native identity. Recorded or reconciled Mylar references and untagged
-neighbors remain in the original Mylar group; the source database is not edited.
+source folder but absent from Mylar's issue records. Each automatically matched
+archive must carry its own exact issue identity. A compiled `series.json` can
+supply its series identity; a sidecar without per-file issue evidence requires
+an explicit **Choose issue** decision. Recorded or reconciled Mylar references
+remain in the original Mylar group, as do untagged neighbors without a native
+sidecar. The source database is not edited.
 
 The native groups use the existing local identity checks, review, explicit file
 selection, and import paths in both copy and keep-in-place modes. The original
-Mylar folder's owner does not determine an extra archive's identity. Explicit
-sidecar claims must still agree with its embedded identities. Stale links,
-unknown issue IDs, contradictory numbers, and already-owned issues cannot become
+Mylar folder's owner does not determine an extra archive's identity. Its original
+folder-owner diagnostic is retained, but it does not override a separately proven
+extra. Explicit sidecar claims must still agree with its embedded identities.
+Stale links, unknown issue IDs, contradictory numbers, and already-owned issues cannot become
 ready solely because a filename or neighboring file matches.
 
 Scanning reports the resulting review-group count, which can exceed the number
@@ -175,14 +179,15 @@ eligible, explicit issue choices. Import and rollback preserve the original
 comics and Mylar database.
 
 This checkpoint does not replace recorded Mylar matching or add live provider
-calls during scanning. Broader native Mylar sidecar matching and PostgreSQL
+calls during scanning. The existing bounded sidecar reader is reused once per
+source folder. Recorded Mylar cross-provider reconciliation and PostgreSQL
 qualification remain separate work.
 
-Checkpoint validation: 216 focused import/recovery checks passed. Chromium and
-Firefox each passed six browser checks covering Metron/GCD, all three themes,
-cancellation, accessibility, mobile footer visibility, and recovery without a
-page reload. The tests use synthetic archives and local identities, not live
-provider availability.
+Checkpoint validation: 412 focused import/recovery and shared-shell checks
+passed. Chromium and Firefox each passed 61 browser checks covering native
+Mylar extras, filesystem/Mylar sidecar choices, Metron/GCD, all three themes,
+accessibility, cancellation, recovery, and activity/sidebar behavior. The tests
+use synthetic archives and local identities, not live provider availability.
 
 ### Step 3 Selection
 

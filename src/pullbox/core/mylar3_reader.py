@@ -1455,6 +1455,8 @@ class Mylar3Reader:
                 "has_comicinfo": False,
                 "mylar3_folder_metadata_scanned": True,
             }
+            if isinstance(normalized_sidecar.get("series_sidecar"), dict):
+                metadata_diagnostics["series_sidecar"] = normalized_sidecar["series_sidecar"]
             if issue_record is None:
                 metadata_diagnostics["mylar3_unrecorded_file"] = {
                     "expected_series": series_name,

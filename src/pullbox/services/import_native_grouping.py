@@ -11,7 +11,9 @@ if TYPE_CHECKING:
     from pullbox.core.collection_scanner import DiscoveredFile, DiscoveredSeries
 
 
-def _with_series_sidecar(file: DiscoveredFile) -> dict[str, Any] | None:
+def _with_series_sidecar(
+    file: DiscoveredFile, *, mylar_extra: bool = False
+) -> dict[str, Any] | None:
     """Add folder claims without manufacturing any per-file issue identity."""
     evidence = file.metadata_diagnostics.get("metron_import")
     sidecar = file.metadata_diagnostics.get("series_sidecar")
@@ -30,7 +32,25 @@ def _with_series_sidecar(file: DiscoveredFile) -> dict[str, Any] | None:
     if file.comicvine_series_id is not None:
         refs.add(("comicvine", "series", str(file.comicvine_series_id)))
     problems = set(base.get("problems", [])) | set(sidecar.get("problems", []))
-    if file.metadata_diagnostics.get("identity_conflicts"):
+    raw_conflicts = file.metadata_diagnostics.get("identity_conflicts")
+    conflicts = (
+        raw_conflicts
+        if isinstance(raw_conflicts, list)
+        else [raw_conflicts]
+        if raw_conflicts
+        else []
+    )
+    # The folder's Mylar owner is not an extra file's identity. Actual sidecar
+    # disagreements still block review; retain every conflict in diagnostics.
+    if any(
+        not (
+            mylar_extra
+            and isinstance(conflict, dict)
+            and set(conflict) == {"field", "mylar3", "sidecar"}
+            and conflict["field"] == "comicvine_series_id"
+        )
+        for conflict in conflicts
+    ):
         problems.add("sidecar_identity_conflict")
     native = sorted(
         {
@@ -61,11 +81,13 @@ def _with_series_sidecar(file: DiscoveredFile) -> dict[str, Any] | None:
     return merged
 
 
-def group_native_folder_files(discovered: DiscoveredSeries) -> list[DiscoveredSeries]:
+def group_native_folder_files(
+    discovered: DiscoveredSeries, *, mylar_extras: bool = False
+) -> list[DiscoveredSeries]:
     """Separate exact identity cohorts, without granting identity to their neighbors."""
     groups: dict[tuple[str | None, tuple[tuple[str, str], ...]] | None, list[DiscoveredFile]] = {}
     for file in discovered.files:
-        evidence = _with_series_sidecar(file)
+        evidence = _with_series_sidecar(file, mylar_extra=mylar_extras)
         key = None
         if isinstance(evidence, dict) and uses_metron_identity(evidence):
             namespace = import_identity_namespace(evidence)
@@ -114,16 +136,24 @@ def group_mylar_native_extras(discovered: DiscoveredSeries) -> list[DiscoveredSe
     """Partition unrecorded native archives without moving Mylar-owned references."""
     extras, recorded = [], []
     for file in discovered.files:
-        evidence = file.metadata_diagnostics.get("metron_import")
         eligible = (
             isinstance(file.metadata_diagnostics.get("mylar3_unrecorded_file"), dict)
             and not file.metadata_diagnostics.get("mylar3_issue")
             and not file.metadata_diagnostics.get("mylar3_path_reconciliation")
             and not file.metadata_diagnostics.get("mylar3_cross_folder_reconciliation")
-            and isinstance(evidence, dict)
-            and uses_metron_identity(evidence)
         )
-        if eligible and isinstance(evidence, dict):
+        if not eligible:
+            recorded.append(file)
+            continue
+        original_file = file
+        inherited_owner = file.metadata_signals.get("comicvine_series_id") == "mylar3"
+        file = replace(
+            file,
+            comicvine_series_id=None if inherited_owner else file.comicvine_series_id,
+            metadata_diagnostics=dict(file.metadata_diagnostics),
+        )
+        evidence = _with_series_sidecar(file, mylar_extra=True)
+        if isinstance(evidence, dict) and uses_metron_identity(evidence):
             # A folder's inferred Mylar owner is not evidence for an unrecorded
             # extra. Explicit sidecar claims still must agree with its XML.
             sidecar = file.metadata_diagnostics.get("sidecar_identity")
@@ -143,7 +173,7 @@ def group_mylar_native_extras(discovered: DiscoveredSeries) -> list[DiscoveredSe
                 )
             extras.append(file)
         else:
-            recorded.append(file)
+            recorded.append(original_file)
     if not extras:
         return [discovered]
 
@@ -172,4 +202,4 @@ def group_mylar_native_extras(discovered: DiscoveredSeries) -> list[DiscoveredSe
             },
         },
     )
-    return [original, *group_native_folder_files(native)]
+    return [original, *group_native_folder_files(native, mylar_extras=True)]

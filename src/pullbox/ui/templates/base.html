@@ -307,6 +307,7 @@
           :aria-expanded="activityOpen ? 'true' : 'false'"
           aria-controls="header-activity-popover"
           aria-label="Background activity"
+          :aria-label="activityBadgeCount() > 0 ? 'Background activity: ' + activityButtonLabel() : 'Background activity'"
           :data-tip="activityButtonLabel()"
           data-tip-pos="bottom"
           data-tip-size="narrow"

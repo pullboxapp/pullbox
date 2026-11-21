@@ -130,7 +130,7 @@ def test_open_refreshes_and_pagination_exposes_all_jobs(activity_page, theme, tm
     page.evaluate("theme => applyTheme(theme)", theme)
     page.set_viewport_size({"width": 390, "height": 568})
     resolve(page, 0, payload(count=27, ids=list(range(1, 21))))
-    page.get_by_role("button", name="Background activity", exact=True).click()
+    page.get_by_test_id("header-activity").locator(":scope > button").click()
     page.wait_for_function("activityRequests.length === 2", timeout=2000)
     resolve(page, 1, payload(count=27, ids=list(range(1, 21))))
     panel = page.get_by_test_id("header-activity-popover")
@@ -186,10 +186,17 @@ def test_pagehide_stops_polling_and_bfcache_return_refreshes(activity_page):
     assert page.evaluate("Alpine.$data(document.body).activityBadgeCount()") == 2
 
 
+def test_activity_accessible_name_includes_visible_count(activity_page):
+    page = activity_page
+    resolve(page, 0, payload(count=2, ids=[1, 2]))
+    button = page.get_by_test_id("header-activity").locator("button").first
+    expect(button).to_have_accessible_name("Background activity: 2 background operations active")
+
+
 def test_shrinking_page_clamps_without_blank_flash_or_losing_focus(activity_page):
     page = activity_page
     resolve(page, 0, payload(count=21, ids=list(range(1, 21))))
-    button = page.get_by_role("button", name="Background activity", exact=True)
+    button = page.get_by_test_id("header-activity").locator(":scope > button")
     button.click()
     resolve(page, 1, payload(count=21, ids=list(range(1, 21))))
     page.clock.run_for(200)
@@ -218,7 +225,7 @@ def test_shrinking_page_clamps_without_blank_flash_or_losing_focus(activity_page
 def test_paging_does_not_flash_disabled_during_background_refresh(activity_page):
     page = activity_page
     resolve(page, 0, payload(count=27, ids=list(range(1, 21))))
-    page.get_by_role("button", name="Background activity", exact=True).click()
+    page.get_by_test_id("header-activity").locator(":scope > button").click()
     resolve(page, 1, payload(count=27, ids=list(range(1, 21))))
     page.clock.run_for(200)
     page.clock.run_for(3001)
@@ -248,7 +255,7 @@ def test_recovery_notification_can_be_dismissed_without_cancel_or_spinner(activi
         detail_url="/intervention?tab=recovery&protocol=dc",
     )
     resolve(page, 0, data)
-    page.get_by_role("button", name="Background activity", exact=True).click()
+    page.get_by_test_id("header-activity").locator(":scope > button").click()
     resolve(page, 1, data)
     page.clock.run_for(200)
     panel = page.get_by_test_id("header-activity-popover")

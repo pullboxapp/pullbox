@@ -74,7 +74,7 @@ class TestSidebarShell:
             hamburger = authed_page.get_by_role("button", name="Open navigation menu", exact=True)
             add = authed_page.get_by_test_id("header-add-action")
             trigger = authed_page.get_by_test_id("header-add-menu-trigger")
-            activity = authed_page.get_by_role("button", name="Background activity", exact=True)
+            activity = authed_page.get_by_test_id("header-activity").locator(":scope > button")
             user_menu = authed_page.get_by_role(
                 "button", name=f"User menu for {username}", exact=True
             )

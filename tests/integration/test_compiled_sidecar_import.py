@@ -40,7 +40,12 @@ def _sidecar(folder: Path, namespace: IdentityNamespace, identifier: str = "21")
 
 
 def _comic(
-    folder: Path, namespace: IdentityNamespace, *, tagged: bool = True, number: str | None = "13a"
+    folder: Path,
+    namespace: IdentityNamespace,
+    *,
+    tagged: bool = True,
+    number: str | None = "13a",
+    identifier: str = "101",
 ) -> Path:
     path = folder / ("tagged.cbz" if tagged else "untagged.cbz")
     with zipfile.ZipFile(path, "w") as archive:
@@ -54,7 +59,7 @@ def _comic(
             }[namespace]
             archive.writestr(
                 "MetronInfo.xml",
-                f'<MetronInfo><IDS><ID source="{source}" primary="true">101</ID></IDS>'
+                f'<MetronInfo><IDS><ID source="{source}" primary="true">{identifier}</ID></IDS>'
                 "<Series><Name>Harbor Lights</Name></Series>"
                 + (f"<Number>{number}</Number>" if number else "")
                 + "</MetronInfo>",
