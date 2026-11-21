@@ -58,6 +58,28 @@ def _request() -> IdentityEventRequest:
     )
 
 
+@pytest.mark.parametrize(
+    ("kind", "namespace", "evidence", "source_kind", "source_namespace"),
+    [
+        (Kind.ISSUE, Namespace.LOCG, Evidence.PROVIDER_CROSSWALK, Kind.SERIES, Namespace.METRON),
+        (Kind.SERIES, Namespace.GCD, Evidence.PROVIDER_CROSSWALK, Kind.SERIES, Namespace.METRON),
+        (Kind.SERIES, Namespace.LOCG, Evidence.USER_SELECTION, Kind.SERIES, Namespace.METRON),
+        (Kind.SERIES, Namespace.LOCG, Evidence.PROVIDER_CROSSWALK, Kind.ISSUE, Namespace.METRON),
+        (Kind.SERIES, Namespace.LOCG, Evidence.PROVIDER_CROSSWALK, Kind.SERIES, Namespace.LOCG),
+    ],
+)
+def test_watch_provenance_only_records_native_series_to_passive_locg(
+    kind, namespace, evidence, source_kind, source_namespace
+):
+    with pytest.raises(ValueError, match="Watch crosswalk"):
+        IdentityEventEvidence(
+            ExactIdentityEvidence(ExternalIdentityRef(namespace, kind, "19"), evidence),
+            "b" * 64,
+            locator=IdentityEvidenceLocator(Record.RELEASE_WATCH, 12),
+            source_identity=ExternalIdentityRef(source_namespace, source_kind, "87"),
+        )
+
+
 def test_retry_payload_has_explicit_version_and_only_safe_provenance_fields() -> None:
     prepared = prepare_identity_event(_request())
     payload = json.loads(prepared.request_json)

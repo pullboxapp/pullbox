@@ -1,8 +1,9 @@
 """Real Watch save/cancel and explicit completion, without replacing page content."""
 # ruff: noqa: F811 - reuse the owning discovery/browser fixture.
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from threading import Event
 from unittest.mock import AsyncMock
 
 import pytest
@@ -188,6 +189,76 @@ def test_refresh_moves_already_tracked_watch_out_of_pull_list(watch_page, seeded
         )
     finally:
         _run_async_blocking(remove_fixture(owner))
+
+
+def test_refresh_now_adds_published_watched_series(
+    watch_page, seeded_server, monkeypatch, tmp_path
+):
+    from pullbox.core.events import EventBus
+    from pullbox.providers.metadata import sources
+    from pullbox.services.catalog import reader as catalog_reader
+    from pullbox.services.whats_new_data_client import WhatsNewDataClient
+    from tests.unit.test_catalog_reader import installed_reader
+
+    reader = installed_reader(tmp_path)
+    monkeypatch.setattr(catalog_reader, "get_catalog_reader", lambda: reader)
+    monkeypatch.setattr(sources, "get_catalog_reader", lambda: reader)
+    page = watch_page
+    page.goto(f"{seeded_server}/whats-new")
+    row = page.get_by_test_id("whats-new-release-row").filter(has_text="Atlas Deluxe")
+    row.get_by_role("button", name="Watch", exact=True).click()
+    expect(row).to_contain_text("Watching")
+
+    async def published_feed():
+        async with get_session_factory().begin() as session:
+            cached = await session.scalar(select(WhatsNewReleaseCache))
+            cached.cache_key = f"current-week:{cached.store_date.isoformat()}"
+            cached.fetched_at = datetime.now(UTC) - timedelta(days=1)
+            data = {**cached.payload, "issues": [dict(item) for item in cached.payload["issues"]]}
+            release = next(
+                item for item in data["issues"] if item["series"]["title"] == "Atlas Deluxe"
+            )
+            release["series"] = {
+                **release["series"],
+                "comicvine_series_id": 10,
+                "publication_state": "published",
+                "publication_as_of": datetime.now(UTC).date().isoformat(),
+            }
+            return data
+
+    feed = _run_async_blocking(published_feed())
+    monkeypatch.setattr(WhatsNewDataClient, "get_current_week", AsyncMock(return_value=feed))
+    monkeypatch.setattr(WhatsNewDataClient, "get_upcoming", AsyncMock(return_value={"weeks": []}))
+    emitted = Event()
+    added = []
+
+    async def capture(_bus, event):
+        added.append(event.series_id)
+        emitted.set()
+
+    monkeypatch.setattr(EventBus, "emit", capture)
+    page.reload()
+    try:
+        page.get_by_test_id("whats-new-refresh-now").click()
+        assert emitted.wait(10), "refresh did not complete a normal Add"
+        page.reload()
+        expect(row).to_contain_text("Tracked")
+        expect(row.get_by_test_id("whats-new-local-series")).to_have_attribute(
+            "href", f"/series/{added[0]}"
+        )
+        page.goto(f"{seeded_server}/pull-list")
+        expect(
+            page.get_by_test_id("pull-list-watch-row").filter(has_text="Atlas Deluxe")
+        ).to_have_count(0)
+    finally:
+        for series_id in added:
+            path = page.request.get(f"{seeded_server}/api/v1/series/{series_id}").json()["path"]
+            deleted = page.request.delete(
+                f"{seeded_server}/api/v1/series/{series_id}",
+                headers={"X-CSRF-Token": page.evaluate("readCsrfTokenFromBody()")},
+            )
+            assert deleted.status == 204, deleted.text()
+            Path(path).rmdir()
 
 
 @pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 390), ("monitor", 320)])

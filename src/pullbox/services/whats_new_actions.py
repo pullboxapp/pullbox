@@ -190,18 +190,20 @@ def published_watch_evidence(
     evidence: dict[str, dict[IdentityNamespace, str]] = {}
     disputed: set[str] = set()
     issue_owners: dict[str, str] = {}
+    provider_owners: dict[tuple[IdentityNamespace, str], str] = {}
     for payload in payloads:
         for release, _ in _release_rows(payload):
             series = release.get("series")
             direct = positive_id(release.get("locg_series_id"))
-            nested = positive_id(series.get("locg_series_id")) if isinstance(series, dict) else None
-            if (
-                not isinstance(series, dict)
-                or not nested
-                or (release.get("locg_series_id") is not None and direct != nested)
-            ):
-                disputed.update(identity for identity in (direct, nested) if identity)
+            if not isinstance(series, dict):
+                if direct:
+                    disputed.add(direct)
                 continue
+            nested = positive_id(series.get("locg_series_id")) or ""
+            if not nested or (release.get("locg_series_id") is not None and direct != nested):
+                disputed.add(nested)
+                if direct:
+                    disputed.add(direct)
             issue = positive_id(release.get("locg_issue_id"))
             if issue and (other := issue_owners.setdefault(issue, nested)) != nested:
                 disputed.update((other, nested))
@@ -211,7 +213,6 @@ def published_watch_evidence(
                 or series.get("publication_as_of") != as_of.isoformat()
             ):
                 disputed.add(nested)
-                continue
             claims = evidence.setdefault(nested, {})
             for namespace in (
                 IdentityNamespace.COMICVINE,
@@ -225,6 +226,10 @@ def published_watch_evidence(
                     or claims.setdefault(namespace, str(value)) != str(value)
                 ):
                     disputed.add(nested)
+                if type(value) is int and 0 < value < 2**63:
+                    owner = provider_owners.setdefault((namespace, str(value)), nested)
+                    if owner != nested:
+                        disputed.update((owner, nested))
     return {identity: claims for identity, claims in evidence.items() if identity not in disputed}
 
 

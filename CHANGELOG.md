@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - What's New refresh now clears a Watch from the Watching list when fresh
   publication data confirms a series already tracked in the selected library.
   It does not add a second series, change monitoring, or download issues.
+- A Watch can now add a newly published series to its selected library when the
+  release feed identifies it exactly and an enabled provider confirms the full
+  issue catalog. The new series uses normal monitored-series behavior. Temporary
+  provider failures retry on refresh; ambiguous matches still offer Find & Add.
 - Added review of proven Metron/GCD identity disagreements on recorded Mylar
   files, with linked-record details, source recheck and Skip. Unknown native IDs
   do not invalidate a valid Mylar match or create provider links.

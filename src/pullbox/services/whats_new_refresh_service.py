@@ -14,6 +14,7 @@ from pullbox.services.whats_new_actions import (
 )
 from pullbox.services.whats_new_cache_service import WhatsNewCacheService
 from pullbox.services.whats_new_data_client import PullboxDataClientError, WhatsNewDataClient
+from pullbox.services.whats_new_watch_add import WatchAdd, pending_adds
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,6 +36,7 @@ class WhatsNewRefreshResult:
     current_week_count: int
     upcoming_week_count: int
     upcoming_release_count: int
+    watch_adds: tuple[WatchAdd, ...] = ()
 
 
 class WhatsNewRefreshService:
@@ -57,10 +59,9 @@ class WhatsNewRefreshService:
         store_date = _payload_store_date(current_payload)
 
         actions_enabled = get_settings().metadata_whats_new_actions_enabled
+        observed = datetime.now(UTC).date()
         published = (
-            published_watch_evidence(
-                current_payload, upcoming_payload, as_of=datetime.now(UTC).date()
-            )
+            published_watch_evidence(current_payload, upcoming_payload, as_of=observed)
             if actions_enabled
             else {}
         )
@@ -71,16 +72,23 @@ class WhatsNewRefreshService:
             store_date=store_date,
             payload=current_payload,
         )
-        await self.cache.upsert_upcoming(session, payload=upcoming_payload)
+        upcoming = await self.cache.upsert_upcoming(session, payload=upcoming_payload)
+        jobs = (
+            await pending_adds(session, published, observed, upcoming.fetched_at)
+            if published
+            else ()
+        )
 
         if actions_enabled:
             as_of = date.today()
             available = available_release_series_ids(current_payload, as_of=as_of)
             available.update(available_release_series_ids(upcoming_payload, as_of=as_of))
             available.update(published)
+            available.difference_update(job.locg for job in jobs)
             await request_watch_confirmation(session, available)
 
         return WhatsNewRefreshResult(
+            watch_adds=jobs,
             current_week_store_date=store_date,
             current_week_count=_count(current_payload.get("count")),
             upcoming_week_count=len(_weeks(upcoming_payload)),

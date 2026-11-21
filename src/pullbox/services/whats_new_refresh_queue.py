@@ -71,16 +71,18 @@ async def run_whats_new_refresh(
 
     from pullbox.database import get_session_factory
     from pullbox.services.whats_new_refresh_service import WhatsNewRefreshService
+    from pullbox.services.whats_new_watch_add import finish_watch_adds
 
     factory = session_factory or get_session_factory()
     async with factory() as session:
         try:
             service = WhatsNewRefreshService(client=client)
-            await service.refresh(session)
+            result = await service.refresh(session)
             await session.commit()
         except Exception:
             await session.rollback()
             raise
+    await finish_watch_adds(factory, result.watch_adds)
 
 
 async def refresh_whats_new_cache_if_needed(
@@ -90,9 +92,14 @@ async def refresh_whats_new_cache_if_needed(
 ) -> StartupRefreshResult:
     """Refresh the cache at startup when it is missing or stale."""
 
+    from datetime import UTC, datetime
+
+    from pullbox.config import get_settings
     from pullbox.database import get_session_factory
+    from pullbox.services.whats_new_actions import published_watch_evidence
     from pullbox.services.whats_new_cache_service import WhatsNewCacheService
     from pullbox.services.whats_new_refresh_service import WhatsNewRefreshService
+    from pullbox.services.whats_new_watch_add import finish_watch_adds, pending_adds
 
     factory = session_factory or get_session_factory()
     async with factory() as session:
@@ -100,20 +107,35 @@ async def refresh_whats_new_cache_if_needed(
         current = await cache.get_latest_current_week(session)
         upcoming = await cache.get_upcoming(session)
         reason = _startup_refresh_reason(cache, current, upcoming)
+        if (
+            reason is None
+            and current
+            and upcoming
+            and get_settings().metadata_whats_new_actions_enabled
+        ):
+            observed = datetime.now(UTC).date()
+            evidence = published_watch_evidence(current.payload, upcoming.payload, as_of=observed)
+            if await pending_adds(
+                session, evidence, observed, upcoming.fetched_at, interrupted_only=True
+            ):
+                # Cached evidence can request a new observation, never authorize a stale Add.
+                reason = "pending_watch"
         if reason is None:
             return StartupRefreshResult(status=StartupRefreshStatus.SKIPPED, reason="fresh")
 
         try:
+            await session.rollback()  # Do not hold the startup cache read across network I/O.
             service = WhatsNewRefreshService(client=client, cache=cache)
-            await service.refresh(session)
+            result = await service.refresh(session)
             await session.commit()
         except Exception:
             await session.rollback()
             logger.warning("whats_new_startup_refresh_failed", reason=reason, exc_info=True)
             return StartupRefreshResult(status=StartupRefreshStatus.FAILED, reason=reason)
 
-        logger.info("whats_new_startup_refresh_complete", reason=reason)
-        return StartupRefreshResult(status=StartupRefreshStatus.REFRESHED, reason=reason)
+    await finish_watch_adds(factory, result.watch_adds)
+    logger.info("whats_new_startup_refresh_complete", reason=reason)
+    return StartupRefreshResult(status=StartupRefreshStatus.REFRESHED, reason=reason)
 
 
 def _startup_refresh_reason(

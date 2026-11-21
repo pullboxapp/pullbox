@@ -12,6 +12,7 @@ from pullbox.core.metadata_identity import (
     ExactIdentityEvidence,
     ExternalIdentityRef,
     IdentityEvidenceKind,
+    IdentityNamespace,
     MetadataEntityKind,
 )
 from pullbox.core.metadata_identity_state import IdentityVerificationAction
@@ -30,6 +31,7 @@ class IdentityEvidenceRecordKind(enum.StrEnum):
     IMPORTED_STORY_ARC = "imported_story_arc"
     IMPORT_JOB_ACTION = "import_job_action"
     LIBRARY_FILE = "library_file"
+    RELEASE_WATCH = "release_watch"
 
 
 class IdentityEventActor(enum.StrEnum):
@@ -82,6 +84,20 @@ class IdentityEventEvidence:
         }
         source = self.claim.source_instance
         if source is None:
+            if (
+                isinstance(self.locator, IdentityEvidenceLocator)
+                and self.locator.record_kind is IdentityEvidenceRecordKind.RELEASE_WATCH
+            ):
+                if (
+                    self.claim.evidence_kind is IdentityEvidenceKind.PROVIDER_CROSSWALK
+                    and self.claim.identity.namespace is IdentityNamespace.LOCG
+                    and self.claim.identity.entity_kind is MetadataEntityKind.SERIES
+                    and isinstance(self.source_identity, ExternalIdentityRef)
+                    and self.source_identity.entity_kind is MetadataEntityKind.SERIES
+                    and self.source_identity.namespace is not IdentityNamespace.LOCG
+                ):
+                    return
+                raise ValueError("Invalid published Watch crosswalk")
             if (
                 not isinstance(self.locator, IdentityEvidenceLocator)
                 or self.source_identity is not None
@@ -171,6 +187,8 @@ def prepare_identity_event(request: IdentityEventRequest) -> PreparedIdentityEve
             "record_kind": evidence.locator.record_kind.value,
             "record_id": evidence.locator.record_id,
         }
+        if evidence.source_identity is not None:
+            origin["source_identity"] = _identity_payload(evidence.source_identity)
     else:
         assert evidence.claim.source_instance is not None and evidence.source_identity is not None
         origin = {

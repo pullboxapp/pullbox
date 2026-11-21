@@ -1,6 +1,6 @@
 """Transaction-owned Add Series command for a server-fetched source catalog."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import replace
 
@@ -35,6 +35,7 @@ async def source_series_add_transaction(
     library_root_id: int | None,
     search_on_add: bool,
     event_bus: EventBus,
+    before_adopt: Callable[[], Awaitable[None]] | None = None,
 ) -> AsyncIterator[SeriesAdoptionResult]:
     """Own this add transaction, including response construction before commit.
 
@@ -47,6 +48,8 @@ async def source_series_add_transaction(
     folder: SeriesFolderCreationResult | None = None
     try:
         async with session.begin():
+            if before_adopt is not None:
+                await before_adopt()
             result = await adopt_source_series_bundle(session, bundle, monitored=search_on_add)
             if result.created:
                 series = result.series
