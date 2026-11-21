@@ -8391,6 +8391,10 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
       return this.applyReviewAction("/api/v1/import/" + this.jobId + "/series/" + seriesId + "/override", "POST", { cv_id: cvId }, button);
     },
 
+    recheckMetronIdentity: function (seriesId, button) {
+      return this.applyReviewAction("/import/" + this.jobId + "/series/" + seriesId + "/metron-recheck", "POST", {}, button);
+    },
+
     selectReviewPage: async function (checked, checkbox) {
       checkbox.disabled = true;
       try {

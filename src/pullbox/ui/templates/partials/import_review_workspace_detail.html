@@ -28,8 +28,9 @@
     <section class="min-w-0 space-y-3">
       {% if metron_row and reason_key in ('needs_series', 'series_conflict') %}
       <h3 class="text-[11px] font-semibold uppercase tracking-wider text-pb-text-dim">Metron identity</h3>
-      <p class="text-xs text-pb-text-sec">This import uses exact identities already verified in your library. Add the series through Metron, or review the Metron link on its series page, then scan this folder again. Titles alone cannot replace conflicting identities.</p>
+      <p class="text-xs text-pb-text-sec">Add the series through Metron, or correct its linked metadata, then recheck here without starting another import. Titles alone cannot replace conflicting identities. Changed source files still need a source recheck or rescan.</p>
       <a class="btn-ghost btn-sm" href="/series/add" target="_blank" rel="noopener noreferrer">Add series</a>
+      <button type="button" class="btn-primary btn-sm" data-testid="import-review-metron-recheck" :disabled="reviewActionPending || {{ 'true' if row.updating else 'false' }}" @click="recheckMetronIdentity({{ item.id }}, $event.currentTarget)">Recheck linked metadata</button>
       {% elif reason_key in ('needs_series', 'series_conflict') %}
       <h3 class="text-[11px] font-semibold uppercase tracking-wider text-pb-text-dim">ComicVine candidates</h3>
       {% set candidates = series_diagnostics.get('top_candidates', []) %}
@@ -47,7 +48,7 @@
         <div class="flex flex-wrap items-center justify-between gap-2"><span class="font-mono text-xs text-pb-text [overflow-wrap:anywhere]">{{ file.file_name }}</span><span class="text-xs text-pb-text-dim">{{ file.file_size|filesize }}</span></div>
         {% if file.status == 'skipped' %}<span class="pill pill-neutral" data-import-review-file-outcome="{{ file.id }}">Skipped</span>{% else %}
         {% if metron_row %}
-        <p class="mt-2 text-xs text-pb-text-sec">Review this file's embedded Metron series and issue identity and the linked library metadata, then scan this folder again. You can also skip it for now.</p>
+        <p class="mt-2 text-xs text-pb-text-sec">Correct the linked Metron series or issue metadata, then recheck here. If the source file changed, recheck its source or rescan it. You can also skip it for now.</p>
         <div class="mt-2 flex flex-wrap gap-2">{% if item.series_id %}<a class="btn-ghost btn-sm" href="/series/{{ item.series_id }}" target="_blank" rel="noopener noreferrer">Review linked metadata</a>{% endif %}<button type="button" class="btn-ghost btn-sm" :disabled="reviewActionPending" @click="skipReviewFile({{ item.id }}, {{ file.id }}, $event.currentTarget)">Skip this file</button></div>
         {% else %}
         {% set issue_choices_url = ('/import/' ~ job.id ~ '/files/' ~ file.id ~ '/assign?cv_id=' ~ known_cv_id ~ '&inline=true') if known_cv_id else none %}
@@ -56,6 +57,7 @@
           {% else %}hx-get="/import/{{ job.id }}/series/{{ item.id }}/cv-search?file_id={{ file.id }}" hx-target="#cv-search-modal" hx-swap="innerHTML"{% endif %}>Choose issue</button><button type="button" class="btn-ghost btn-sm" data-testid="import-review-reassign-file" hx-get="/import/{{ job.id }}/series/{{ item.id }}/cv-search?file_id={{ file.id }}" hx-target="#cv-search-modal" hx-swap="innerHTML">Different series</button><button type="button" class="btn-ghost btn-sm" :disabled="reviewActionPending" @click="skipReviewFile({{ item.id }}, {{ file.id }}, $event.currentTarget)">Skip this file</button></div>
         {% if issue_choices_url %}<div id="import-review-issue-choices-{{ file.id }}" hidden></div>{% endif %}{% endif %}{% endif %}
       </div>{% endfor %}{% endfor %}
+      {% if metron_row %}<button type="button" class="btn-primary btn-sm" data-testid="import-review-metron-recheck" :disabled="reviewActionPending || {{ 'true' if row.updating else 'false' }}" @click="recheckMetronIdentity({{ item.id }}, $event.currentTarget)">Recheck linked metadata</button>{% endif %}
       {% if not metron_row %}<button type="button" class="btn-ghost btn-sm" data-testid="import-review-reconcile-action" hx-get="/import/{{ job.id }}/series/{{ item.id }}/reconcile" hx-target="#cv-search-modal" hx-swap="innerHTML">Review all issue decisions</button>{% endif %}
       {% endif %}
     </section>

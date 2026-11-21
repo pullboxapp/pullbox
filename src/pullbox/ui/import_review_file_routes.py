@@ -18,6 +18,41 @@ from pullbox.services.import_review_scope import (
 router = APIRouter()
 
 
+@router.post("/import/{job_id}/series/{series_id}/metron-recheck", include_in_schema=False)
+async def recheck_metron_identity(
+    job_id: int,
+    series_id: int,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+) -> Response:
+    from fastapi import HTTPException
+
+    from pullbox.core.exceptions import ValidationError
+    from pullbox.models.import_job import ImportJobLog
+    from pullbox.services.import_metron_matching import prepare_metron_series_recheck
+    from pullbox.tasks.import_task import trigger_import_series_rematch
+
+    try:
+        await prepare_metron_series_recheck(session, job_id, series_id)
+    except ValidationError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail=exc.message) from exc
+    session.add(
+        ImportJobLog(
+            import_job_id=job_id,
+            level="INFO",
+            event="import_metron_identity_recheck_requested",
+            message="Rechecking saved Metron identities against the linked library metadata.",
+            data={"imported_series_id": series_id, "actor_user_id": user.id},
+        )
+    )
+    await session.commit()
+    trigger_import_series_rematch(job_id, series_id)
+    return JSONResponse(
+        {"message": "Rechecking linked metadata. Source files are unchanged."}, status_code=202
+    )
+
+
 @router.get("/import/{job_id}/series/{series_id}/files", include_in_schema=False)
 async def view_series_files(
     job_id: int,

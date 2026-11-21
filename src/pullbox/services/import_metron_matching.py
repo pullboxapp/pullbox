@@ -4,24 +4,34 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 
+from pullbox.core.exceptions import NotFoundError, ValidationError
 from pullbox.core.issue_numbers import normalize_issue_number_text
 from pullbox.core.metadata_identity import IdentityNamespace
 from pullbox.core.metadata_identity_state import IdentityVerificationState
-from pullbox.models.import_job import ImportedFile, ImportedFileStatus, ImportSeriesStatus
+from pullbox.models.import_job import (
+    ImportControlRequest,
+    ImportedFile,
+    ImportedFileStatus,
+    ImportedSeries,
+    ImportJob,
+    ImportJobStatus,
+    ImportSeriesStatus,
+    ImportSourceType,
+)
 from pullbox.models.metadata_identity import IssueExternalIdentity, SeriesExternalIdentity
 from pullbox.models.series import Series
 from pullbox.services.archive_metadata_reconciliation import (
     ArchiveMetadataDiagnostic,
     reconcile_archive_metadata,
 )
+from pullbox.services.import_counters import recompute_file_counters, recompute_series_counters
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from pullbox.core.archive_metadata import ArchiveMetadataFiles
-    from pullbox.models.import_job import ImportedSeries
     from pullbox.models.issue import Issue
     from pullbox.services.import_file_match_candidates import FileMatchCandidate
     from pullbox.services.import_file_match_targets import FileMatchTargetIndex
@@ -100,11 +110,10 @@ def series_evidence(files: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-async def match_local_metron_series(session: AsyncSession, item: ImportedSeries) -> bool:
-    """Handle Metron-bearing groups before legacy name/CV matching can select them."""
+async def _verified_metron_series(session: AsyncSession, item: ImportedSeries) -> Series | None:
     evidence = (item.diagnostics or {}).get("metron_import")
     if not isinstance(evidence, dict):
-        return False
+        return None
     refs = evidence.get("identities", [])
     metron_ids = {ref["id"] for ref in refs if ref["namespace"] == "metron"}
     owner = None
@@ -132,7 +141,15 @@ async def match_local_metron_series(session: AsyncSession, item: ImportedSeries)
             keys.add(("comicvine", str(series.comicvine_id)))
         valid = all((ref["namespace"], ref["id"]) in keys for ref in refs)
         valid = valid and (item.cv_id is None or item.cv_id == series.comicvine_id)
-    if not valid or series is None:
+    return series if valid else None
+
+
+async def match_local_metron_series(session: AsyncSession, item: ImportedSeries) -> bool:
+    """Handle Metron-bearing groups before legacy name/CV matching can select them."""
+    if not isinstance((item.diagnostics or {}).get("metron_import"), dict):
+        return False
+    series = await _verified_metron_series(session, item)
+    if series is None:
         item.status = ImportSeriesStatus.NO_MATCH
         item.diagnostics = {
             **(item.diagnostics or {}),
@@ -140,7 +157,7 @@ async def match_local_metron_series(session: AsyncSession, item: ImportedSeries)
             "reason": "metron_identity_needs_review",
             "rejection_reason": (
                 "The embedded Metron series identity is not linked to one verified library series. "
-                "Add or link the correct series through Metron, then scan this folder again, "
+                "Add or link the correct series through Metron, then recheck its linked metadata, "
                 "or skip it for now."
             ),
         }
@@ -161,8 +178,12 @@ async def match_local_metron_series(session: AsyncSession, item: ImportedSeries)
     item.cv_issue_count = series.issue_count
     item.cv_match_score = 1.0
     item.cv_match_method = "metron_id"
+    diagnostics = dict(item.diagnostics or {})
+    if diagnostics.get("reason") == "metron_identity_needs_review":
+        diagnostics.pop("reason", None)
+        diagnostics.pop("rejection_reason", None)
     item.diagnostics = {
-        **(item.diagnostics or {}),
+        **diagnostics,
         "kind": "duplicate_series",
         "duplicate_reason": "metron_id",
         "existing_series_id": series.id,
@@ -170,6 +191,74 @@ async def match_local_metron_series(session: AsyncSession, item: ImportedSeries)
         "duplicate_match_score": 1.0,
     }
     return True
+
+
+async def prepare_metron_series_recheck(
+    session: AsyncSession, job_id: int, series_id: int
+) -> ImportedSeries:
+    """Prepare an explicit local-identity recheck without rescanning source files."""
+    job = await session.get(ImportJob, job_id)
+    item = await session.get(ImportedSeries, series_id)
+    if job is None or item is None or item.import_job_id != job_id:
+        raise NotFoundError("ImportedSeries", series_id)
+    if (
+        job.status != ImportJobStatus.REVIEW
+        or job.control_request != ImportControlRequest.NONE
+        or job.source_type != ImportSourceType.FILESYSTEM
+        or item.status not in {ImportSeriesStatus.NO_MATCH, ImportSeriesStatus.DUPLICATE}
+        or item.user_selected_cv_id is not None
+        or (item.diagnostics or {}).get("rematch_pending")
+    ):
+        raise ValidationError("This series is busy or no longer available for an identity recheck.")
+    target = await _verified_metron_series(session, item)
+    if target is None:
+        raise ValidationError(
+            "The embedded identities still need one verified library series. "
+            "Add or link the correct Metron series, then recheck linked metadata. "
+            "Conflicting identities must be resolved first."
+        )
+    if item.series_id is not None and item.series_id != target.id:
+        raise ValidationError("The linked series changed. Review its identity before retrying.")
+    eligible = (
+        ImportedFile.import_job_id == job_id,
+        ImportedFile.import_series_id == series_id,
+        ImportedFile.include_in_import.is_(False),
+        ImportedFile.matched_issue_id.is_(None),
+        ImportedFile.matched_issue_cv_id.is_(None),
+        or_(
+            ImportedFile.status == ImportedFileStatus.NO_MATCH,
+            and_(
+                ImportedFile.status == ImportedFileStatus.CONFLICT,
+                ImportedFile.diagnostics["conflict_type"].as_string()
+                == "metron_identity_needs_review",
+            ),
+        ),
+    )
+    if await session.scalar(select(ImportedFile.id).where(*eligible).limit(1)) is None:
+        raise ValidationError("No unresolved files are eligible for this identity recheck.")
+    # Serialize review admission with execution; the worker revalidates each exact identity.
+    claimed = await session.scalar(
+        update(ImportJob)
+        .where(
+            ImportJob.id == job_id,
+            ImportJob.status == ImportJobStatus.REVIEW,
+            ImportJob.control_request == ImportControlRequest.NONE,
+        )
+        .values(progress_revision=ImportJob.progress_revision + 1)
+        .returning(ImportJob.id)
+    )
+    if claimed is None:
+        raise ValidationError("This import is no longer available for review.")
+    await match_local_metron_series(session, item)
+    item.diagnostics = {**item.diagnostics, "rematch_pending": True}
+    await session.execute(
+        update(ImportedFile).where(*eligible).values(status=ImportedFileStatus.PENDING)
+    )
+    await session.flush()
+    await recompute_series_counters(session, job)
+    await recompute_file_counters(session, job, series_ids=[series_id])
+    await session.flush()
+    return item
 
 
 async def load_metron_issue_targets(
@@ -230,7 +319,7 @@ def metron_file_candidate(
         "preserve_series_match": True,
         "rejection_reason": (
             "This file needs its own verified Metron series and issue identity. "
-            "Review the linked series and embedded metadata, then scan this folder again, "
+            "Review the linked metadata and recheck it. If the source file changed, rescan it, "
             "or skip this file for now."
         ),
     }

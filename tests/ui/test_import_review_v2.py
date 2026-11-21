@@ -269,7 +269,61 @@ async def test_metron_folder_review_is_selectable_without_comicvine_controls(
         assert "Harbor Lights" in workspace
     else:
         assert "Skip series" in workspace
-        assert "scan this folder again" in workspace
+        assert "Recheck linked metadata" in workspace
+        assert 'data-testid="import-review-metron-recheck"' in workspace
+
+
+async def test_metron_review_recheck_queues_local_rematch(
+    authenticated_client, sec_db, tmp_path, monkeypatch
+):
+    from unittest.mock import Mock
+
+    from pullbox.core.metadata_identity_state import IdentityVerificationState
+    from pullbox.models.import_job import ImportedFile, ImportedFileStatus
+    from tests.integration.test_metron_import_recheck import _unlinked_scan
+    from tests.ui.test_import_safety_bulk_ui import _csrf_header_for
+
+    trigger = Mock()
+    monkeypatch.setattr("pullbox.tasks.import_task.trigger_import_series_rematch", trigger)
+    async with sec_db() as session:
+        _, job, group, file, link, _, _, _ = await _unlinked_scan(session, tmp_path)
+        job_id, group_id, file_id = job.id, group.id, file.id
+        link.verification_state = IdentityVerificationState.VERIFIED
+        await session.commit()
+    response = await authenticated_client.post(
+        f"/import/{job_id}/series/{group_id}/metron-recheck",
+        headers=_csrf_header_for(authenticated_client),
+    )
+    assert response.status_code == 202
+    trigger.assert_called_once_with(job_id, group_id)
+    async with sec_db() as session:
+        file = await session.get(ImportedFile, file_id)
+        assert file.status == ImportedFileStatus.PENDING
+        assert file.include_in_import is False
+    # A duplicate click cannot start another worker while the first is pending.
+    response = await authenticated_client.post(
+        f"/import/{job_id}/series/{group_id}/metron-recheck",
+        headers=_csrf_header_for(authenticated_client),
+    )
+    assert response.status_code == 409
+    assert trigger.call_count == 1
+
+
+async def test_metron_review_recheck_without_verified_link_is_actionable(
+    authenticated_client, sec_db, tmp_path
+):
+    from tests.integration.test_metron_import_recheck import _unlinked_scan
+    from tests.ui.test_import_safety_bulk_ui import _csrf_header_for
+
+    async with sec_db() as session:
+        _, job, group, _, _, _, _, _ = await _unlinked_scan(session, tmp_path)
+        job_id, group_id = job.id, group.id
+    response = await authenticated_client.post(
+        f"/import/{job_id}/series/{group_id}/metron-recheck",
+        headers=_csrf_header_for(authenticated_client),
+    )
+    assert response.status_code == 409
+    assert "Add or link the correct Metron series" in response.json()["detail"]
 
 
 def _headers(html):
