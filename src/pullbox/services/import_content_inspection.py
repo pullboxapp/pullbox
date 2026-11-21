@@ -12,6 +12,7 @@ from pullbox.core.archive_format import ARCHIVE_SUFFIXES, archive_format
 from pullbox.core.file_safety import FileSafetyError
 from pullbox.core.nested_comics import DEFAULT_LIMIT, inspect_nested_comic
 from pullbox.core.page_sources.base import canonical_page_names
+from pullbox.services.import_metron_matching import metron_import_evidence
 from pullbox.services.import_safety_diagnostics import build_import_safety_diagnostics
 
 if TYPE_CHECKING:
@@ -24,7 +25,7 @@ logger = structlog.get_logger(__name__)
 def inspect_import_content(
     path: Path, inspection: FileSafetyInspection, *, max_archive_size: int = DEFAULT_LIMIT
 ) -> dict[str, object]:
-    """Reuse ZIP inventory; other comic archives need only their member headers.
+    """Reuse ZIP evidence; read bounded paired XML for other comic archives.
 
     PDF and EPUB are not image archives and must not use this page heuristic.
     Call from a worker thread, just like archive safety inspection.
@@ -32,11 +33,19 @@ def inspect_import_content(
     if path.suffix.lower() not in {".cbz", ".cbr", ".cb7", ".cbt"}:
         return {}
     report = next((report for report in inspection.archives if report.archive_path == path), None)
+    metadata_files = None
     if report is not None and report.page_count is not None:
         page_count = report.page_count
     else:
         try:
-            members = ArchiveReader(path).list_members()
+            reader = ArchiveReader(path)
+            members = reader.list_members()
+            if any(
+                Path(member.name.replace("\\", "/")).name.casefold()
+                in {"comicinfo.xml", "metroninfo.xml"}
+                for member in members
+            ):
+                metadata_files = reader.read_metadata_files(max_solid_scan_bytes=max_archive_size)
         except ArchiveError as exc:
             logger.warning(
                 "import_archive_content_inspection_failed",
@@ -62,6 +71,8 @@ def inspect_import_content(
             "mismatch": path.suffix.lower().lstrip(".") != archive_format(path),
         },
     }
+    if metadata_files is not None:
+        diagnostics["metron_import"] = metron_import_evidence(metadata_files)
     # Most imports contain no wrappers. Reuse the existing ZIP inventory rather
     # than opening every ordinary CBZ a second time on a large NAS library.
     nested = (

@@ -54,6 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Retained Metron/GCD issue identities when scanning and rechecking CBR, CB7,
+  and CBT imports. Recorded Mylar matches still accept unknown native IDs;
+  proven conflicts stay in review. Archive limits and original files are preserved.
 - Fixed Step 3 source rechecks for confirmed Mylar copy imports whose paths need
   no translation. Recheck uses the exact saved source path without granting a
   directory root, bypassing archive safety, or changing the original file.

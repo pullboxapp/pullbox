@@ -2,10 +2,36 @@
 
 ## Available Behavior
 
-Folder imports can match a CBZ's primary Metron series and issue IDs to verified
+Folder imports can match a comic archive's primary Metron series and issue IDs to verified
 identities already saved in Pullbox. The local series and issue do not need
 ComicVine IDs. Matching uses saved identities, not title similarity or a live
 provider request, and does not create or attach provider links.
+
+### Non-ZIP Archive Evidence
+
+CBR, CB7, and CBT scans and source rechecks now retain the same normalized
+Metron/GCD evidence as CBZ scans. The import content inspector uses the existing
+bounded paired-XML reader after the ordinary archive safety gate. Metadata member
+limits, the configured solid-archive scan budget, unsafe-member rejection, and
+explicit safety review remain in force. ZIP scans reuse their existing report;
+this does not add a second metadata read to ordinary CBZ imports.
+
+Deferred ComicInfo loading preserves the saved native identity evidence instead
+of discarding it. Recorded Mylar matches remain valid when native IDs are unknown
+or unverified. Only disagreements proven by verified saved identities block the
+file. No provider requests or new links are created by scanning or rechecking.
+
+This is an import-only correction, not an archive backend rewrite. It does not
+change conversion settings, metadata-writing policy, downloads, rollback rules,
+or archive safety limits. Real stored RAR, 7z, and TAR fixtures cover copy and
+keep-in-place import, rollback, Mylar conflicts, fresh source rechecks, ambiguous
+XML, unsafe content, and the configured read budget. Compressed RAR continues to
+require the existing UnRAR runtime backend.
+
+Qualification: 34 initial behavior assertions reproduced missing evidence before
+the correction. The expanded regression set passes 439 cases, including 50
+non-ZIP cases and the existing Mylar/import lifecycle suites. Focused Ruff and
+strict mypy pass. This is not full CI or PostgreSQL release qualification.
 
 Step 3 shows the series under Ready with a Metron identity label. Since this is
 an existing series, use its ready-file selection controls to add missing issues.

@@ -429,6 +429,11 @@ async def load_deferred_source_metadata_for_import_file(
         ]
     reconciliation = base_metadata.diagnostics.get("mylar3_path_reconciliation")
     diagnostics = dict(loaded_metadata.diagnostics)
+    # The legacy ComicInfo loader cannot recreate paired native-ID scan evidence.
+    native_evidence = base_metadata.diagnostics.get("metron_import")
+    if isinstance(native_evidence, dict):
+        diagnostics.setdefault("metron_import", native_evidence)
+        update["diagnostics"] = diagnostics
     if issue_identity_reconciliation is not None:
         diagnostics["mylar3_issue_identity_reconciliation"] = issue_identity_reconciliation
         update["diagnostics"] = diagnostics
