@@ -54,6 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Required the patched Brotli decoder used by archive and HTTP decompression.
 - Retained Metron/GCD issue identities when scanning and rechecking CBR, CB7,
   and CBT imports. Recorded Mylar matches still accept unknown native IDs;
   proven conflicts stay in review. Archive limits and original files are preserved.

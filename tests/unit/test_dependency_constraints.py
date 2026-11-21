@@ -40,6 +40,18 @@ def test_pillow_dependency_requires_patched_13_line() -> None:
     assert "14.0.0" not in pillow.specifier
 
 
+def test_brotli_dependency_excludes_vulnerable_decoder() -> None:
+    project = tomllib.loads(Path("pyproject.toml").read_text())
+    requirements = [Requirement(value) for value in project["project"]["dependencies"]]
+    brotli = next((item for item in requirements if item.name.lower() == "brotli"), None)
+
+    assert brotli is not None, "Require patched Brotli even when py7zr allows older builds"
+    assert "1.1.0" not in brotli.specifier
+    assert "1.2.0" not in brotli.specifier
+    assert "1.2.1" in brotli.specifier
+    assert "1.2.2" in brotli.specifier
+
+
 def test_tailwind_lockfile_uses_patched_source_map_parser() -> None:
     lockfile = json.loads(Path("package-lock.json").read_text())
     parsers = [
