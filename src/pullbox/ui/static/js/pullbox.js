@@ -2732,10 +2732,10 @@ function importReviewFileActionData(config) {
       });
       var result = await response.json();
       if (!response.ok) throw new Error(typeof result.detail === "string" ? result.detail : (result.error && result.error.message) || "The file changed. Reopen this action and try again.");
-      if (!config.inline) this.close(true);
       await this.refreshReview();
       var review = this.reviewPanelData();
       if (review && review.refreshReviewSummary) await review.refreshReviewSummary();
+      if (!config.inline) this.close(true);
       showToast({ message: result.message, level: "success" });
     } catch (error) {
       this.error = error.message || "The action could not be completed.";

@@ -108,6 +108,49 @@ validation hit an intermittent collapsed-row failure in the existing GCD
 preview test. Its cause is not established. PostgreSQL remains unqualified by
 these local results.
 
+## Explicit Library Selection
+
+An unmatched folder group without native series evidence now offers **Choose
+library series** next to the existing ComicVine search. The dialog searches
+already-added series with verified Metron or GCD links, in pages of 25. It does
+not contact a provider or add a series. Stale links and ComicVine-only series
+are not presented as native choices.
+
+Choosing a library series leaves its files unresolved and unselected. Expand
+the row and use **Choose issue** to confirm each file against the saved catalog.
+This supplies missing identity only: conflicting issue numbers, exact provider
+IDs, or malformed identity metadata still block the choice. Selecting a series
+does not rewrite the archive or turn the user's decision into embedded XML
+evidence. Ready rows say **Library selection (Metron)** or **Library selection
+(GCD)** rather than claiming an automatic identity match.
+
+The saved file decision binds the source evidence, issue, and verified links.
+Rematching retains a still-valid explicit decision but does not guess unchosen
+neighbors, even when their issue number agrees. Execution revalidates the
+decision through the existing ownership, collision, safety, and rollback paths.
+Mixed-file issue reassignment across series remains outside this checkpoint.
+
+The series-choice dialog stays open with confirmation disabled until the review
+refresh finishes, so a slower response cannot expose the old row controls. A browser
+regression observes the dialog while that response is pending. The shared
+review shell remains mounted. Other file-action dialogs use the same refresh
+ordering; inline issue choices remain inline.
+
+Coverage includes Metron/GCD catalogs, untagged and ComicInfo-only archives,
+lettered issues, stale/contradictory identities, CSRF, actor-bound previews,
+rematching, unchosen neighbors, source-preserving import and rollback, paged
+library search, all three themes, and automated accessibility checks. Local
+browser acceptance for the generated untagged archive is staged as import #52;
+it is not yet recorded as completed. PostgreSQL and broader provider-aware
+import/recovery qualification remain separate release requirements.
+
+Validation for this checkpoint passed `make validate`: 16,627 tests passed,
+1,778 were skipped, and one was an expected failure. The focused selection
+suite passed 15 cases. The browser suite includes native preview/add, explicit
+library selection, native issue choice, and shared review-workspace regressions;
+all 29 cases passed in each of Chromium and Firefox. The suites ran serially
+after the broader validation run.
+
 ## Rollback Status
 
 New file-registration journal entries record the issue's status and manual-skip

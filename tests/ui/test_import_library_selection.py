@@ -18,7 +18,7 @@ pytest_plugins = ["conftest_security"]
 
 
 async def seed_library_choice(
-    session, root, namespace="metron", identity_base=0, admit=True, xml=None
+    session, root, namespace="metron", identity_base=0, admit=True, xml=None, sibling=False
 ):
     destination, series, issue = await _setup(
         session,
@@ -37,6 +37,8 @@ async def seed_library_choice(
         if xml is not None:
             archive.writestr("ComicInfo.xml", xml)
     original = comic.read_bytes()
+    if sibling:
+        (comic.parent / "Unidentified 13a.cbz").write_bytes(original)
     service = _service()
     request = ImportJobCreate(
         source_path=str(root / "source"),
@@ -57,7 +59,11 @@ async def seed_library_choice(
         await session.commit()
     await service.start_scan(session, job.id)
     file = (
-        await session.scalars(select(ImportedFile).where(ImportedFile.import_job_id == job.id))
+        await session.scalars(
+            select(ImportedFile).where(
+                ImportedFile.import_job_id == job.id, ImportedFile.file_path == str(comic)
+            )
+        )
     ).one()
     return job.id, file.id, series.id, issue.id, comic, original, service
 
@@ -81,7 +87,7 @@ async def test_untagged_file_uses_explicit_library_choices_and_preserves_rollbac
 ):
     async with sec_db() as session:
         job_id, file_id, series_id, issue_id, comic, original, service = await seed_library_choice(
-            session, tmp_path, namespace, xml=xml
+            session, tmp_path, namespace, xml=xml, sibling=True
         )
         file = await session.get(ImportedFile, file_id)
         parent_id = file.import_series_id
@@ -114,6 +120,15 @@ async def test_untagged_file_uses_explicit_library_choices_and_preserves_rollbac
         await session.refresh(file)
         assert file.status == ImportedFileStatus.MATCHED
         assert file.matched_issue_id == issue_id
+        neighbor = await session.scalar(
+            select(ImportedFile).where(
+                ImportedFile.import_series_id == parent_id, ImportedFile.id != file_id
+            )
+        )
+        assert neighbor is not None
+        assert neighbor.status == ImportedFileStatus.NO_MATCH
+        assert neighbor.matched_issue_id is None
+        assert not neighbor.include_in_import
         await service.update_file_selection(session, job_id, file_id, include_in_import=True)
         await service.confirm_import(session, job_id, ConfirmImportRequest(series_ids=[parent_id]))
         await service.run_import(session, job_id)
@@ -121,6 +136,7 @@ async def test_untagged_file_uses_explicit_library_choices_and_preserves_rollbac
         assert file.status == ImportedFileStatus.IMPORTED, file.error_message
         assert await service.rollback_import(session, job_id)
     assert comic.read_bytes() == original
+    assert (comic.parent / "Unidentified 13a.cbz").read_bytes() == original
     service._metadata_service._provider.get_series.assert_not_awaited()
     service._metadata_service._provider.get_issues_for_series.assert_not_awaited()
 
@@ -226,3 +242,50 @@ async def test_changed_native_link_after_manual_choice_blocks_placement(
         assert file.status == ImportedFileStatus.FAILED
         assert "changed" in file.error_message.lower()
     assert comic.read_bytes() == original
+
+
+async def test_library_series_choices_page_only_verified_native_series(
+    authenticated_client, sec_db, tmp_path
+):
+    from pullbox.core.metadata_identity import IdentityEvidenceKind
+    from pullbox.models.metadata_identity import SeriesExternalIdentity
+    from pullbox.models.series import Series
+
+    async with sec_db() as session:
+        job_id, file_id, _, _, _, _, _ = await seed_library_choice(session, tmp_path)
+        parent_id = (await session.get(ImportedFile, file_id)).import_series_id
+        for index in range(28):
+            series = Series(title=f"Catalog {index:02}", sort_title=f"Catalog {index:02}")
+            session.add(series)
+            await session.flush()
+            session.add(
+                SeriesExternalIdentity(
+                    series_id=series.id,
+                    identity_namespace=(
+                        IdentityNamespace.COMICVINE if index == 27 else IdentityNamespace.GCD
+                    ),
+                    external_id=str(500 + index),
+                    verification_state=(
+                        IdentityVerificationState.STALE
+                        if index == 26
+                        else IdentityVerificationState.VERIFIED
+                    ),
+                    evidence_kind=IdentityEvidenceKind.PROVIDER_RESULT,
+                )
+            )
+        await session.commit()
+    url = f"/import/{job_id}/series/{parent_id}/review-library?q=Catalog"
+    first = await authenticated_client.get(url)
+    assert first.status_code == 200
+    assert first.text.count('data-testid="import-library-series-use"') == 25
+    assert "Catalog 00" in first.text and "Catalog 24" in first.text
+    assert "Catalog 25" not in first.text
+    second = await authenticated_client.get(url + "&page=2")
+    assert second.status_code == 200
+    assert second.text.count('data-testid="import-library-series-use"') == 1
+    assert "Catalog 25" in second.text
+    assert "Catalog 26" not in second.text and "Catalog 27" not in second.text
+    clamped = await authenticated_client.get(url + "&page=999")
+    assert clamped.status_code == 200 and "2 of 2" in clamped.text
+    literal = await authenticated_client.get(url + "%25")
+    assert literal.status_code == 200 and "No verified Metron or GCD series found" in literal.text

@@ -54,7 +54,7 @@
         {% if item.files_already_owned %}<p class="mt-1 text-xs text-pb-text-dim">{{ item.files_already_owned }} already owned</p>{% endif %}
       </td>
       {% if ready_table %}
-      <td><p class="text-sm text-pb-text">{{ item.cv_title or 'Known series' }}{% if item.cv_year %} ({{ item.cv_year }}){% endif %}</p><p class="mt-1 text-xs text-pb-text-dim">{{ item.cv_publisher or '' }} {% if metron_row %}{{ identity_label }} identity{% elif item.cv_id or item.user_selected_cv_id %}<a data-testid="import-review-cv-id-link" class="text-pb-interactive hover:underline" href="https://comicvine.gamespot.com/volume/4050-{{ item.user_selected_cv_id or item.cv_id }}/" target="_blank" rel="noopener noreferrer">CV {{ item.user_selected_cv_id or item.cv_id }}</a>{% endif %}</p></td>
+      <td><p class="text-sm text-pb-text">{{ item.cv_title or 'Known series' }}{% if item.cv_year %} ({{ item.cv_year }}){% endif %}</p><p class="mt-1 text-xs text-pb-text-dim">{{ item.cv_publisher or '' }} {% if library_selection %}Library selection ({{ identity_label }}){% elif metron_row %}{{ identity_label }} identity{% elif item.cv_id or item.user_selected_cv_id %}<a data-testid="import-review-cv-id-link" class="text-pb-interactive hover:underline" href="https://comicvine.gamespot.com/volume/4050-{{ item.user_selected_cv_id or item.cv_id }}/" target="_blank" rel="noopener noreferrer">CV {{ item.user_selected_cv_id or item.cv_id }}</a>{% endif %}</p></td>
       <td><span class="font-mono text-xs text-pb-success">{% if item.cv_match_score is not none %}{{ (item.cv_match_score * 100)|round|int }}%{% else %}&mdash;{% endif %}</span></td>
       <td>{% include "partials/import_review_row_menu.html" %}{{ review_expander(item, row, false) }}</td>
       {% else %}
