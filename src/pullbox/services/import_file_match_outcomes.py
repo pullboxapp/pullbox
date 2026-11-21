@@ -337,6 +337,7 @@ def apply_unmatched_file_outcome(
         duplicate_series
         and duplicate_merge_profile is not None
         and duplicate_merge_profile.single_owned_shortcut_issue is not None
+        and (metadata_conflict or {}).get("conflict_type") != "mylar_native_identity_conflict"
     ):
         shortcut_issue = duplicate_merge_profile.single_owned_shortcut_issue
         imp_file.matched_issue_id = shortcut_issue.id

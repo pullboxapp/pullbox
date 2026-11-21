@@ -76,6 +76,10 @@ from pullbox.services.import_metron_matching import (
     load_metron_issue_targets,
     metron_file_candidate,
 )
+from pullbox.services.import_mylar_native_identity import (
+    load_mylar_native_owners,
+    mylar_native_conflict,
+)
 from pullbox.services.import_progress_runtime import (
     ScanReviewFileMatchProfile,
     ScanReviewProgressPlan,
@@ -1191,6 +1195,7 @@ async def _load_file_page_target_index(
             emit_file_matching_progress=emit_file_matching_progress,
             raise_if_cancelled=raise_if_cancelled,
         )
+    target_index.mylar_native_owners = await load_mylar_native_owners(session, files)
     _ensure_bounded_target_index(target_index)
     return target_index
 
@@ -1220,6 +1225,7 @@ async def _reload_file_page_target_index_after_deferred_identity(
             files=files,
             series_file_count=series_file_count,
         )
+    target_index.mylar_native_owners = await load_mylar_native_owners(session, files)
     _ensure_bounded_target_index(target_index)
     return target_index
 
@@ -1598,6 +1604,18 @@ async def run_import_file_matching(
                 file_evaluation_duration_ms += (
                     time.monotonic() - file_evaluation_started_at
                 ) * 1000
+
+            if match_candidate is not None:
+                native_conflict = mylar_native_conflict(
+                    imp_file,
+                    target_index.mylar_native_owners,
+                    series_id=imp_series.series_id,
+                    series_cv_id=imp_series.cv_id,
+                    issue_id=match_candidate.matched_issue_id,
+                    issue_cv_id=match_candidate.matched_issue_cv_id,
+                )
+                if native_conflict is not None:
+                    match_candidate, metadata_conflict = None, native_conflict
 
             await apply_and_log_file_match_outcome(
                 session=session,

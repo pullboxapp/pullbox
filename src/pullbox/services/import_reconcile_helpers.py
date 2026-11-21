@@ -242,6 +242,12 @@ def apply_reconcile_decisions(
             }
             continue
 
+        if imp_file.diagnostics.get("conflict_type") == "mylar_native_identity_conflict":
+            raise ValidationError(
+                "Correct the conflicting provider link or source metadata, then recheck "
+                "this Mylar file before choosing an issue. You can skip it for now."
+            )
+
         if decision.action == "provisional":
             provisional_issue_number = provisional_issue_number_by_file_id.get(imp_file.id)
             if provisional_issue_number is None:

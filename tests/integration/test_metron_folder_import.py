@@ -83,6 +83,7 @@ def _archive(
     series_id: str = "21",
     extra: str = "",
     primary: str = "Metron",
+    extra_ids: str = "",
 ) -> bytes:
     path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(path, "w") as archive:
@@ -91,7 +92,8 @@ def _archive(
         archive.writestr(
             "MetronInfo.xml",
             (
-                f'<MetronInfo><IDS><ID source="{primary}" primary="true">{issue_id}</ID></IDS>'
+                f'<MetronInfo><IDS><ID source="{primary}" primary="true">{issue_id}</ID>'
+                f"{extra_ids}</IDS>"
                 f'<Series id="{series_id}"><Name>Harbor Lights</Name>'
                 "<StartYear>2024</StartYear></Series>"
                 + (f"<Number>{number}</Number>" if number is not None else "")

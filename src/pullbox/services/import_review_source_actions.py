@@ -173,7 +173,14 @@ async def queue_source_action(
     category = normalize_import_safety_diagnostics(
         dict((file.diagnostics or {}).get("safety_block") or {})
     )["category"]
-    if file.status is not ImportedFileStatus.SAFETY_BLOCKED or category not in RECHECK_CATEGORIES:
+    native_conflict = (
+        action == "recheck"
+        and file.status is ImportedFileStatus.NO_MATCH
+        and file.diagnostics.get("conflict_type") == "mylar_native_identity_conflict"
+    )
+    if not native_conflict and (
+        file.status is not ImportedFileStatus.SAFETY_BLOCKED or category not in RECHECK_CATEGORIES
+    ):
         raise ValidationError(
             "This file cannot be rechecked here. Resolve its safety or root setup first."
         )

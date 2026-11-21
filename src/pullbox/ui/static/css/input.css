@@ -8747,6 +8747,9 @@ input[type="range"].range-pb::-moz-range-thumb {
   cursor: pointer;
   transition: background-color 140ms ease, color 140ms ease;
 }
+.import-review-unmatched-count {
+  color: color-mix(in srgb, var(--pb-error) 85%, var(--pb-text-primary));
+}
 .import-review-row-menu-item:hover,
 .import-review-row-menu-item:focus-visible {
   background: var(--pb-interactive-dim);

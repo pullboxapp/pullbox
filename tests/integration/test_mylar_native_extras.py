@@ -32,6 +32,7 @@ async def seed_mylar_native_extra(
     identity_base=0,
     admit=True,
     same_name=False,
+    mapped_source=False,
 ):
     destination, native, native_issue = await _setup(
         session,
@@ -89,7 +90,7 @@ async def seed_mylar_native_extra(
                 "ComicID": str(identity_base + 900),
                 "ComicName": "Old Harbor",
                 "ComicYear": "2020",
-                "ComicLocation": str(folder),
+                "ComicLocation": f"/mylar-comics/{folder.name}" if mapped_source else str(folder),
                 "Total": 1,
             }
         ],
@@ -107,6 +108,7 @@ async def seed_mylar_native_extra(
         source_type="mylar3",
         source_path=str(database),
         mylar3_path_map_confirmed=True,
+        mylar3_path_map={"/mylar-comics": str(source)} if mapped_source else {},
         file_handling_mode="in_place" if in_place else "managed_copy",
         target_library_root_id=None if in_place else destination.id,
     )

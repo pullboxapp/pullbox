@@ -69,8 +69,9 @@ synthetic identities only in a disposable database.
   are equal. A missing Number can match only through verified exact issue IDs.
 - Execution rechecks provider links. Existing source-signature, archive safety,
   ownership, collision, transfer, and rollback handling still applies.
-- Recorded Mylar issues and ComicVine-primary paired archives keep their existing
-  path. Unrecorded native Mylar extras use the bounded workflow below.
+- Recorded Mylar issues keep their existing path, with the proven-conflict guard
+  below also checking supplemental native IDs in ComicVine-primary paired XML.
+  Unrecorded native Mylar extras use the bounded workflow below.
 - There is no database migration or new production default/feature flag.
 
 ## Native Issue Choices
@@ -180,7 +181,7 @@ comics and Mylar database.
 
 This checkpoint does not replace recorded Mylar matching or add live provider
 calls during scanning. The existing bounded sidecar reader is reused once per
-source folder. Recorded Mylar cross-provider reconciliation and PostgreSQL
+source folder. Broader recorded Mylar cross-provider recovery and PostgreSQL
 qualification remain separate work.
 
 Checkpoint validation: 412 focused import/recovery and shared-shell checks
@@ -205,6 +206,44 @@ these Mylar checks and was restored afterward. No overlap validation was
 bypassed, root path rebound, or existing file moved. The standalone exact-GCD
 sidecar and contradictory-number lab fixtures retain automated coverage but
 have not yet been exercised in this live Mylar browser session.
+
+### Recorded Mylar Identity Disagreements
+
+A recorded Mylar file remains in its Mylar group. If an embedded Metron/GCD
+series or issue ID has a verified saved owner that disagrees with its proposed
+target, the file stays unresolved and unselected. This also covers supplemental
+native issue IDs when ComicVine is the primary embedded provider. Unknown or
+stale native links remain diagnostic evidence rather than invalidating an
+otherwise valid Mylar match. No provider links are created and no provider
+requests are made by these checks.
+
+Expand the **Some files need an issue match** row to review the specific saved
+records, correct linked metadata or the source file, and choose **Recheck
+source**. Recheck reads fresh bounded archive evidence and runs the existing
+local matching path. An unchanged contradiction remains unresolved; correcting
+it does not move the file to another series or alter Mylar's database. **Skip
+this file** is always available. The legacy issue-assignment action cannot
+override a recorded conflict without a recheck. Execution checks the saved
+owners again before placement, including links changed after Step 3.
+
+Source rechecks retain existing access boundaries: a keep-in-place source must
+remain under its approved reference root; a copy-mode Mylar source must have a
+saved mapping. An identity-only copy import without such a boundary can still
+import valid matches or skip a conflict, but repairing its source requires a
+new scan. This checkpoint does not grant a broader filesystem boundary to make
+that recheck pass. Improving that admission/recheck case remains separate work.
+
+Tests cover agreeing, unknown, stale and proven conflicting identities, both
+providers, copy/in-place import and rollback, changing links before placement,
+same-job rechecks after file/link correction, and explicit skip. Browser checks
+exercise recheck and skip in Light, Dark and Follow system with the review shell retained.
+The zero-matched count uses a scoped contrast correction for hovered dark rows.
+
+Checkpoint validation: 371 focused integration, route and import/recovery
+regressions passed. Chromium and Firefox each passed 12 browser cases covering
+both providers, those theme preferences, recheck/skip and accessibility. Scoped strict
+typing, repository lint/format checks and the generated CSS build passed.
+This is not full CI or PostgreSQL qualification.
 
 ### Step 3 Selection
 

@@ -369,6 +369,9 @@ def _build_import_review_file_detail_row(
         "status": imp_file.status.value,
         "include_in_import": imp_file.include_in_import,
         "review_selected": dict(imp_file.diagnostics or {}).get("review_selection", True),
+        "mylar_native_conflict": diagnostics
+        if diagnostics.get("conflict_type") == "mylar_native_identity_conflict"
+        else None,
         "archive_format": diagnostics.get("archive_format", source.get("archive_format", {})),
         "page_count": diagnostics.get(
             "content_inspection", source.get("content_inspection", {})

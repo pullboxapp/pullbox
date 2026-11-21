@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 
     from pullbox.models.import_job import ImportedFile, ImportedSeries
     from pullbox.providers.base import IssueMetadata, MetadataProvider
+    from pullbox.services.import_mylar_native_identity import NativeIdentityOwner
 
 
 FileMatchTargetEntry = tuple[int | None, int | None, bool, Issue | None, str | None]
@@ -63,6 +64,9 @@ class FileMatchTargetIndex:
     existing_series: Series | None = None
     issue_entries: list[tuple[Issue, bool]] = field(default_factory=list)
     cached_issue_metadata: dict[int, IssueMetadata] = field(default_factory=dict)
+    mylar_native_owners: dict[tuple[str, str, str], NativeIdentityOwner] = field(
+        default_factory=dict
+    )
 
     @property
     def has_targets(self) -> bool:

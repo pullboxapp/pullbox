@@ -429,7 +429,8 @@ def test_apply_unmatched_file_outcome_marks_duplicate_informational_only() -> No
     assert event.name == "import_duplicate_file_informational_only"
 
 
-def test_apply_unmatched_file_outcome_applies_single_owned_shortcut() -> None:
+@pytest.mark.parametrize("native_conflict", [False, True])
+def test_apply_unmatched_file_outcome_applies_single_owned_shortcut(native_conflict: bool) -> None:
     issue = Issue(
         id=9,
         issue_number=1.0,
@@ -452,8 +453,20 @@ def test_apply_unmatched_file_outcome_applies_single_owned_shortcut() -> None:
         imp_series,
         duplicate_series=True,
         duplicate_merge_profile=profile,
-        metadata_conflict=None,
+        metadata_conflict={
+            "kind": "metadata_conflict",
+            "conflict_type": "mylar_native_identity_conflict",
+        }
+        if native_conflict
+        else None,
     )
+
+    if native_conflict:
+        assert imp_file.status == ImportedFileStatus.NO_MATCH
+        assert not imp_file.include_in_import
+        assert imp_file.matched_issue_id is None
+        assert imp_file.diagnostics["conflict_type"] == "mylar_native_identity_conflict"
+        return
 
     assert imp_file.status == ImportedFileStatus.ALREADY_OWNED
     assert imp_file.include_in_import is False

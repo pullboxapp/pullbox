@@ -274,6 +274,11 @@ async def apply_review_file_assignment(
 
 def require_legacy_assignment(parent: ImportedSeries, file: ImportedFile) -> None:
     """Native identity review must not fall through the ComicVine-only picker."""
+    if file.diagnostics.get("conflict_type") == "mylar_native_identity_conflict":
+        raise ValidationError(
+            "Correct the conflicting provider link or source metadata, then recheck "
+            "this Mylar file before choosing an issue. You can skip it for now."
+        )
     if (
         parent.diagnostics.get("manual_library_series")
         or parent.diagnostics.get("metron_import")

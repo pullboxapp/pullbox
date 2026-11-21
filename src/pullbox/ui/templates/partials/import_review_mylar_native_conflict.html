@@ -1,0 +1,11 @@
+<div class="mt-2 space-y-2" data-testid="import-review-mylar-native-conflict">
+  <p class="text-xs text-pb-text-sec">{{ file.mylar_native_conflict.rejection_reason }}</p>
+  <div class="flex flex-wrap gap-2">
+    {% for ref in file.mylar_native_conflict.conflicting_provider_identities %}
+    <a class="btn-ghost btn-sm" href="{{ '/issues/' ~ ref.saved_issue_id if ref.kind == 'issue' else '/series/' ~ ref.saved_series_id }}" target="_blank" rel="noopener noreferrer">Review saved {{ 'Metron' if ref.namespace == 'metron' else 'GCD' }} {{ ref.kind }} {{ ref.id }}</a>
+    {% endfor %}
+    {% if item.series_id %}<a class="btn-ghost btn-sm" href="/series/{{ item.series_id }}" target="_blank" rel="noopener noreferrer">Review linked metadata</a>{% endif %}
+    <button type="button" class="btn-primary btn-sm" :disabled="reviewActionPending || {{ 'true' if row.updating else 'false' }}" hx-get="/import/{{ job.id }}/files/{{ file.id }}/source" hx-target="#cv-search-modal" hx-swap="innerHTML">Recheck source</button>
+    <button type="button" class="btn-ghost btn-sm" :disabled="reviewActionPending || {{ 'true' if row.updating else 'false' }}" @click="skipReviewFile({{ item.id }}, {{ file.id }}, $event.currentTarget)">Skip this file</button>
+  </div>
+</div>

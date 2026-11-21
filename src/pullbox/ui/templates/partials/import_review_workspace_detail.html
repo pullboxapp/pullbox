@@ -53,7 +53,9 @@
       {% for file in group.rows %}<div class="rounded-lg border border-pb-border bg-pb-card/70 p-3">
         <div class="flex flex-wrap items-center justify-between gap-2"><span class="font-mono text-xs text-pb-text [overflow-wrap:anywhere]">{{ file.file_name }}</span><span class="text-xs text-pb-text-dim">{{ file.file_size|filesize }}</span></div>
         {% if file.status == 'skipped' %}<span class="pill pill-neutral" data-import-review-file-outcome="{{ file.id }}">Skipped</span>{% else %}
-        {% if metron_row %}
+        {% if file.mylar_native_conflict %}
+        {% include "partials/import_review_mylar_native_conflict.html" %}
+        {% elif metron_row %}
         <p class="mt-2 text-xs text-pb-text-sec">{% if library_selection %}Choose from this series' verified linked issue catalogs. Confirm the issue shown in this file; its filename alone is not proof. {% else %}Choose from the verified {{ identity_label }} issue catalog. {% endif %}Conflicting embedded identities still need corrected linked metadata or a source recheck. You can also skip this file for now.</p>
         {% set native_choices_url = '/import/' ~ job.id ~ '/files/' ~ file.id ~ '/assign-native' %}
         <div class="mt-2 flex flex-wrap gap-2">{% if item.series_id %}<button type="button" class="btn-primary btn-sm" data-testid="import-review-choose-issue" aria-expanded="false" aria-controls="import-review-issue-choices-{{ file.id }}" @click='toggleReviewIssueChoices({{ file.id }}, {{ native_choices_url|tojson|forceescape }}, $event.currentTarget)'>Choose issue</button><a class="btn-ghost btn-sm" href="/series/{{ item.series_id }}" target="_blank" rel="noopener noreferrer">Review linked metadata</a>{% endif %}<button type="button" class="btn-ghost btn-sm" :disabled="reviewActionPending" @click="skipReviewFile({{ item.id }}, {{ file.id }}, $event.currentTarget)">Skip this file</button></div>
@@ -157,7 +159,9 @@
         {% if file.status in ('matched', 'confirmed', 'skipped') %}<span class="pill {{ 'pill-neutral' if file.status == 'skipped' else 'pill-success' }}" data-import-review-file-outcome="{{ file.id }}">{{ 'Skipped' if file.status == 'skipped' else 'Matched' }}</span>{% endif %}
         {% if file.get('archive_format', {}).get('mismatch') %}<span class="text-xs text-pb-text-dim">Detected {{ {'cbz': 'ZIP', 'cbr': 'RAR', 'cb7': '7z', 'cbt': 'TAR'}.get(file.archive_format.detected, file.archive_format.detected|upper) }} content; .{{ file.archive_format.declared }} filename</span>{% endif %}
         {% if file.status in ('matched', 'confirmed', 'no_match') %}
-        {% if metron_row %}
+        {% if file.mylar_native_conflict and file.status == 'no_match' %}
+        {% include "partials/import_review_mylar_native_conflict.html" %}
+        {% elif metron_row %}
         {% if item.series_id %}<a class="btn-ghost btn-sm" href="/series/{{ item.series_id }}" target="_blank" rel="noopener noreferrer">Review linked metadata</a>{% endif %}
         {% if file.status == 'no_match' %}<button type="button" class="btn-ghost btn-sm" :disabled="reviewActionPending" @click="skipReviewFile({{ item.id }}, {{ file.id }}, $event.currentTarget)">Skip this file</button>{% endif %}
         {% else %}

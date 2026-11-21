@@ -233,6 +233,10 @@ def inspect_review_source(
         )
         content = inspect_import_content(path, inspection, max_archive_size=max_archive_size)
         report = next((r for r in inspection.archives if r.archive_path == path), None)
+        if report is not None and report.metadata_files is not None:
+            from pullbox.services.import_metron_matching import metron_import_evidence
+
+            content["metron_import"] = metron_import_evidence(report.metadata_files)
         evidence = (
             None
             if report is None
