@@ -106,6 +106,12 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
             "metron_preview_context",
         ),
         (
+            "/import/{job_id}/series/{series_id}/identity-preview",
+            ("GET",),
+            "metron_preview_context",
+            "metron_preview_context",
+        ),
+        (
             "/import/{job_id}/series/{series_id}/metron-recheck",
             ("POST",),
             "recheck_metron_identity",

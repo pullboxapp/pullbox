@@ -279,7 +279,9 @@ async def test_metron_folder_review_is_selectable_without_comicvine_controls(
             assert 'href="/series/add"' not in workspace
         else:
             assert 'data-testid="import-review-metron-preview"' not in workspace
-            assert "Add or link GCD series" in workspace
+            assert 'data-testid="import-review-gcd-preview"' in workspace
+            assert "Preview GCD series" in workspace
+            assert 'href="/series/add"' not in workspace
             assert "Metron identity" not in workspace
         assert f"{'GCD' if namespace == 'gcd' else 'Metron'} identity needs review" in workspace
         assert "More than one series fits" not in workspace

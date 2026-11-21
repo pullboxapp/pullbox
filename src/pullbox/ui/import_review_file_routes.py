@@ -6,7 +6,7 @@ from fastapi import APIRouter, Form, Query, Request
 from fastapi.responses import JSONResponse
 from starlette.responses import Response
 
-from pullbox.api.deps import DbSession, InteractiveOperatorUser
+from pullbox.api.deps import DbSession, InteractiveOperatorUser, Settings
 from pullbox.composition.services import build_metadata_service
 from pullbox.services.import_review_file_assignment import assign_review_file, load_review_file
 from pullbox.services.import_review_scope import (
@@ -18,23 +18,60 @@ from pullbox.services.import_review_scope import (
 router = APIRouter()
 
 
+@router.get("/import/{job_id}/series/{series_id}/identity-preview", include_in_schema=False)
 @router.get("/import/{job_id}/series/{series_id}/metron-preview", include_in_schema=False)
 async def metron_preview_context(
     job_id: int,
     series_id: int,
     user: InteractiveOperatorUser,
     session: DbSession,
+    settings: Settings,
 ) -> Response:
     from fastapi import HTTPException
 
     from pullbox.core.exceptions import ValidationError
-    from pullbox.services.import_metron_matching import metron_series_preview_identity
+    from pullbox.core.metadata_identity import IdentityNamespace, MetadataSource
+    from pullbox.schemas.metadata_sources import SourceCapability
+    from pullbox.services.import_metron_matching import native_series_preview_identity
     from pullbox.services.library_root_management import list_library_roots
+    from pullbox.services.metadata_discovery import MetadataSourceRegistry
+    from pullbox.services.metadata_sources import load_source_runtime
 
     try:
-        job, item, external_id = await metron_series_preview_identity(session, job_id, series_id)
+        job, item, namespace, external_id = await native_series_preview_identity(
+            session, job_id, series_id
+        )
     except ValidationError as exc:
         raise HTTPException(status_code=409, detail=exc.message) from exc
+    source = MetadataSource.METRON_API
+    if namespace is IdentityNamespace.GCD:
+        registry = MetadataSourceRegistry(
+            await load_source_runtime(
+                session, gcd_api_enabled=settings.metadata_gcd_api_v2_enabled
+            ),
+            gcd_api_enabled=settings.metadata_gcd_api_v2_enabled,
+        )
+        candidates = [
+            candidate
+            for candidate in registry.ordered_sources(
+                sources=[MetadataSource.GCD_LOCAL, MetadataSource.GCD_API_V2]
+            )
+            if all(
+                registry.source_availability(candidate, capability) is None
+                for capability in (SourceCapability.SERIES_DETAILS, SourceCapability.ISSUE_LIST)
+            )
+            and (
+                candidate is MetadataSource.GCD_LOCAL
+                or registry.runtime[candidate].policy.credential_configured
+            )
+        ]
+        if not candidates:
+            raise HTTPException(
+                409,
+                "Enable and configure a GCD source in Metadata settings, then retry this preview. "
+                "Source files are unchanged.",
+            )
+        source = candidates[0]
     roots = [
         root
         for root in await list_library_roots(session)
@@ -48,7 +85,7 @@ async def metron_preview_context(
         root = next((root for root in roots if root["is_default_managed_destination"]), None)
     return JSONResponse(
         {
-            "source": "metron_api",
+            "source": source.value,
             "external_id": external_id,
             "title": item.raw_series_name,
             "library_root_id": root["id"] if root else None,

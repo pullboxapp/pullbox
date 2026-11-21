@@ -129,9 +129,7 @@ Chromium and Firefox regressions cover cancellation, late preview responses,
 exact add payloads, in-place review updates, no implicit selection, and light,
 dark, and Tron themes. The modal also passes the automated accessibility check.
 
-## Remaining Scope
-
-### GCD Exact-Identity Extension
+## GCD Exact-Identity Extension
 
 GCD-primary `MetronInfo.xml` archives now use the same local exact-identity path.
 Both `GCD` and `Grand Comics Database` source names are accepted by the existing
@@ -139,27 +137,42 @@ XML reader. The file must supply its own native series and issue identities,
 and both must agree with verified links already saved in Pullbox. ComicVine IDs
 are not required. Matching and rechecking do not contact a provider.
 
-Step 3 labels these rows **GCD identity**. For an unknown series, **Add or link
-GCD series** opens the existing Add Series page in a separate tab. After adding
-or correcting the linked catalog, return and use **Recheck linked metadata**.
-Rechecking does not select or import files. The inline exact GCD preview/add
-shortcut is not part of this checkpoint.
+Step 3 labels these rows **GCD identity**. For an unknown series, **Preview GCD
+series** opens the shared Add Series dialog without leaving review. It selects
+an enabled, configured GCD source in core-metadata priority order; GCD API remains
+excluded unless its feature flag is enabled. Preparing the preview context does
+not contact a provider. The shared preview and final Add retain catalog and
+revision validation. If no GCD source is configured, the dialog directs the user
+to Metadata settings. Adding queues the same-job local recheck; neither action
+selects or imports files. Conflicting identities cannot be resolved by priority.
 
 Integration coverage exercises numeric and lettered issue numbers, absent
 Number with exact identity proof, conflicting and stale links, already-owned
 files, final placement revalidation, source preservation, and rollback. Browser
-coverage checks GCD labels and same-job rechecking in all three themes. Live
-GCD import acceptance testing remains separate from the completed Metron
-browser checks above.
+coverage checks GCD labels, cancellation, late responses, explicit Add and
+same-job rechecking in all three themes.
 
-This is not the complete provider-aware importer. Inline GCD preview/add,
-automatic split-folder regrouping, and provider-neutral issue
+Local browser import #49 used a generated two-page archive with only GCD series
+15002 / issue 258869, Superman: Secret Identity (2004) #1. The official local GCD
+dump supplied the preview and all four canonical issues. Add created local series
+296 with no ComicVine ID, then rechecked the same job without selecting files.
+Explicit selection imported one file. Step 4 and Step 5 agreed on one imported
+file and zero series added by import execution. Rollback removed the generated
+library copy, restored Skipped, and retained the separately added series and its
+four issues. The source SHA-256 and all 1,088 pre-existing library-file rows were
+unchanged. GCD API and automatic acquisition remained disabled.
+
+## Remaining Scope
+
+This is not the complete provider-aware importer. Automatic split-folder
+regrouping, compiled sidecar import identity, and provider-neutral issue
 reassignment/recovery remain separate milestones.
 This checkpoint targets CBZ folder imports, not additional archive formats.
 It does not qualify PostgreSQL or change Anna's verification work.
 
 Regression coverage is in `tests/integration/test_metron_folder_import.py`,
 `tests/integration/test_gcd_folder_import.py`,
+`tests/api/test_gcd_import_preview.py`,
 `tests/integration/test_metron_import_recheck.py`,
 `tests/api/test_source_series_add_api.py`, `tests/e2e/test_metron_import_review.py`,
 `tests/unit/test_import_scan_materialization.py`, and

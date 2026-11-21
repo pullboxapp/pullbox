@@ -81,12 +81,23 @@ async def _add_verified_series(identifier: str, namespace: str = "metron") -> in
 
 
 @pytest.mark.parametrize("theme", ["light", "dark", "tron"])
+@pytest.mark.parametrize("namespace", ["metron", "gcd"])
 def test_metron_preview_cancel_add_and_recheck_stay_in_review(
-    authed_page, seeded_server, tmp_path, monkeypatch, theme
+    authed_page, seeded_server, tmp_path, monkeypatch, theme, namespace
 ):
     page = authed_page
     identifier = str(29000001 + ["light", "dark", "tron"].index(theme))
-    job_id, group_id, root_id = _run_async_blocking(_seed_review(tmp_path, identifier))
+    job_id, group_id, root_id = _run_async_blocking(_seed_review(tmp_path, identifier, namespace))
+    source_name = "metron_api" if namespace == "metron" else "gcd_local"
+    if namespace == "gcd":
+        from pullbox.core.metadata_identity import MetadataSource
+        from pullbox.services.metadata_sources import SourceRuntime, default_policy
+
+        async def configured_gcd(_session, **_kwargs):
+            policy = default_policy(MetadataSource.GCD_LOCAL).model_copy(update={"enabled": True})
+            return [SourceRuntime(policy)]
+
+        monkeypatch.setattr("pullbox.services.metadata_sources.load_source_runtime", configured_gcd)
 
     async def local_service(_session):
         return _service()
@@ -102,7 +113,7 @@ def test_metron_preview_cancel_add_and_recheck_stay_in_review(
     def add(route):
         adds.append(route.request.post_data_json)
         assert route.request.headers.get("x-csrf-token")
-        series_id = _run_async_blocking(_add_verified_series(identifier))
+        series_id = _run_async_blocking(_add_verified_series(identifier, namespace))
         route.fulfill(status=201, json={"id": series_id, "title": "Harbor Lights"})
 
     page.route("**/api/v1/series", add)
@@ -110,7 +121,7 @@ def test_metron_preview_cancel_add_and_recheck_stay_in_review(
     expect(page.locator("html")).to_have_attribute("data-theme", theme)
     page.get_by_test_id("import-review-lane-decide").click()
     page.get_by_role("button", name="Review identity", exact=True).click()
-    trigger = page.get_by_test_id("import-review-metron-preview")
+    trigger = page.get_by_test_id(f"import-review-{namespace}-preview")
     expect(trigger).to_be_visible()
     shell = page.locator("#import-step-review-shell")
     shell.evaluate("el => { window.metronReviewShell = el; }")
@@ -125,21 +136,21 @@ def test_metron_preview_cancel_add_and_recheck_stay_in_review(
     assert not adds
     # A cancelled provider response must not reopen the dialog or make it ready.
     for route in held:
-        route.fulfill(json=preview(identifier=identifier))
+        route.fulfill(json=preview(source_name, identifier=identifier))
     held.clear()
     with page.expect_request("**/api/v1/metadata/series/preview"):
         trigger.click()
     expect(dialog.get_by_test_id("add-series-preview-status")).to_be_visible()
     assert len(held) == 1
     assert held[0].request.post_data_json == {
-        "source": "metron_api",
+        "source": source_name,
         "external_id": identifier,
         "library_root_id": root_id,
     }
-    held[0].fulfill(json=preview(identifier=identifier))
+    held[0].fulfill(json=preview(source_name, identifier=identifier))
     expect(dialog.get_by_role("button", name="Add series", exact=True)).to_be_enabled()
     expect(dialog).to_contain_text("will not remove the added series")
-    assert_no_axe_violations(page, name=f"metron-import-preview-{theme}")
+    assert_no_axe_violations(page, name=f"{namespace}-import-preview-{theme}")
     box = dialog.bounding_box()
     assert box and box["y"] >= 0 and box["y"] + box["height"] <= page.viewport_size["height"]
     dialog.get_by_role("button", name="Add series", exact=True).click()
@@ -147,7 +158,7 @@ def test_metron_preview_cancel_add_and_recheck_stay_in_review(
     expect(page.get_by_test_id("import-review-lane-ready")).to_contain_text("(1)", timeout=15000)
     assert adds == [
         {
-            "source": "metron_api",
+            "source": source_name,
             "external_id": identifier,
             "source_revision": 7,
             "library_root_id": root_id,
@@ -162,7 +173,7 @@ def test_metron_preview_cancel_add_and_recheck_stay_in_review(
     checkbox = page.locator(f'[data-import-review-duplicate-selectable="{group_id}"]')
     expect(checkbox).not_to_be_checked()
     assert not errors
-    page.screenshot(path=str(Path("test-results") / f"metron-import-{theme}.png"))
+    page.screenshot(path=str(Path("test-results") / f"{namespace}-import-{theme}.png"))
 
 
 @pytest.mark.parametrize("theme", ["light", "dark", "tron"])
@@ -186,7 +197,7 @@ def test_gcd_recheck_uses_same_review_surface_without_metron_or_cv_controls(
     page.get_by_role("button", name="Review identity", exact=True).click()
     workspace = page.get_by_test_id("import-review-workspace-table")
     expect(workspace).to_contain_text("GCD identity needs review")
-    expect(workspace.get_by_role("link", name="Add or link GCD series")).to_be_visible()
+    expect(workspace.get_by_role("button", name="Preview GCD series")).to_be_visible()
     expect(page.get_by_test_id("import-review-metron-preview")).to_have_count(0)
     expect(workspace).not_to_contain_text("Search ComicVine")
     # Correcting the local link is independent of the import; recheck only reads it.

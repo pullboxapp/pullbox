@@ -236,19 +236,23 @@ async def _load_metron_review_scope(
     return job, item
 
 
-async def metron_series_preview_identity(
+async def native_series_preview_identity(
     session: AsyncSession, job_id: int, series_id: int
-) -> tuple[ImportJob, ImportedSeries, str]:
+) -> tuple[ImportJob, ImportedSeries, IdentityNamespace, str]:
     """Use only the saved exact series identity for an explicit provider preview."""
     job, item = await _load_metron_review_scope(session, job_id, series_id)
-    refs = (item.diagnostics or {}).get("metron_import", {}).get("identities", [])
-    metron_ids = {str(ref["id"]) for ref in refs if ref.get("namespace") == "metron"}
-    if len(metron_ids) != 1:
-        raise ValidationError("These files need one Metron series identity before previewing.")
-    external_id = next(iter(metron_ids))
+    evidence = (item.diagnostics or {}).get("metron_import", {})
+    namespace = import_identity_namespace(evidence)
+    refs = evidence.get("identities", [])
+    native_ids = {str(ref["id"]) for ref in refs if ref.get("namespace") == namespace}
+    if namespace is None or len(native_ids) != 1:
+        raise ValidationError(
+            "These files need one exact provider series identity before previewing."
+        )
+    external_id = next(iter(native_ids))
     if not external_id.isascii() or not external_id.isdecimal() or int(external_id) <= 0:
-        raise ValidationError("The saved Metron series identity is invalid. Review the source.")
-    return job, item, external_id
+        raise ValidationError("The saved provider series identity is invalid. Review the source.")
+    return job, item, namespace, external_id
 
 
 async def prepare_metron_series_recheck(

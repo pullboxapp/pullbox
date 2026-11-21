@@ -300,8 +300,8 @@ function importMetronSeries(config) {
       this.importSeriesId = detail.seriesId;
       this.trigger = detail.trigger;
       this.showModal = true;
-      this.selectedTitle = 'Metron series';
-      this.selectedSource = 'metron_api';
+      this.selectedTitle = 'Provider series';
+      this.selectedSource = '';
       this.selectedExternalId = '';
       this.selectedPublisher = this.selectedCoverUrl = this.selectedFolderPreview = '';
       this.selectedYear = this.selectedIssueCount = null;
@@ -324,11 +324,12 @@ function importMetronSeries(config) {
       this.previewFailed = false;
       this.addError = '';
       try {
-        const response = await fetch(`/import/${this.importJobId}/series/${this.importSeriesId}/metron-preview`, { signal: controller.signal });
+        const response = await fetch(`/import/${this.importJobId}/series/${this.importSeriesId}/identity-preview`, { signal: controller.signal });
         const data = await response.json();
         if (sequence !== this.previewSequence || this.disposed || !this.showModal) return;
         if (!response.ok) throw new Error(data.detail || data.error?.message || 'This import changed. Close the preview and review it again.');
-        if (data.source !== 'metron_api' || !/^[1-9][0-9]*$/.test(data.external_id)) throw new Error('The Metron identity could not be verified. Review the source.');
+        if (!['metron_api', 'gcd_local', 'gcd_api_v2'].includes(data.source) || !/^[1-9][0-9]*$/.test(data.external_id)) throw new Error('The provider identity could not be verified. Review the source.');
+        this.selectedSource = data.source;
         this.selectedExternalId = data.external_id;
         this.selectedTitle = data.title;
         this.libraryRootId = data.library_root_id;

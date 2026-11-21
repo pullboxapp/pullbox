@@ -29,8 +29,9 @@
       {% if metron_row and reason_key in ('needs_series', 'series_conflict') %}
       <h3 class="text-[11px] font-semibold uppercase tracking-wider text-pb-text-dim">{{ identity_label }} identity</h3>
       <p class="text-xs text-pb-text-sec">Add the series through {{ identity_label }}, or correct its linked metadata, then recheck here without starting another import. Titles alone cannot replace conflicting identities. Changed source files still need a source recheck or rescan.</p>
-      {% set metron_ids = series_diagnostics.get('metron_import', {}).get('identities', [])|selectattr('namespace', 'equalto', 'metron')|map(attribute='id')|unique|list %}
-      {% if gcd_row %}<a class="btn-ghost btn-sm" href="/series/add" target="_blank" rel="noopener noreferrer">Add or link GCD series</a>{% elif metron_ids|length == 1 %}<button type="button" class="btn-ghost btn-sm" data-testid="import-review-metron-preview" :disabled="reviewActionPending || {{ 'true' if row.updating else 'false' }}" @click="$dispatch('import:metron-preview', {jobId: {{ job.id }}, seriesId: {{ item.id }}, trigger: $event.currentTarget})">Preview Metron series</button>{% endif %}
+      {% set identity_namespace = 'gcd' if gcd_row else 'metron' %}
+      {% set native_ids = series_diagnostics.get('metron_import', {}).get('identities', [])|selectattr('namespace', 'equalto', identity_namespace)|map(attribute='id')|unique|list %}
+      {% if native_ids|length == 1 %}<button type="button" class="btn-ghost btn-sm" data-testid="import-review-{{ identity_namespace }}-preview" :disabled="reviewActionPending || {{ 'true' if row.updating else 'false' }}" @click="$dispatch('import:metron-preview', {jobId: {{ job.id }}, seriesId: {{ item.id }}, trigger: $event.currentTarget})">Preview {{ identity_label }} series</button>{% endif %}
       <button type="button" class="btn-primary btn-sm" data-testid="import-review-metron-recheck" :disabled="reviewActionPending || {{ 'true' if row.updating else 'false' }}" @click="recheckMetronIdentity({{ item.id }}, $event.currentTarget)">Recheck linked metadata</button>
       {% elif reason_key in ('needs_series', 'series_conflict') %}
       <h3 class="text-[11px] font-semibold uppercase tracking-wider text-pb-text-dim">ComicVine candidates</h3>
