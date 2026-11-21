@@ -287,6 +287,71 @@ function addSeries(config = {}) {
   };
 }
 
+function importMetronSeries(config) {
+  const shared = addSeries();
+  return {
+    ...shared,
+    importJobId: config.jobId,
+    importSeriesId: null,
+    importContextReady: false,
+
+    async openImportPreview(detail) {
+      if (detail.jobId !== this.importJobId || this.adding || this.showModal) return;
+      this.importSeriesId = detail.seriesId;
+      this.trigger = detail.trigger;
+      this.showModal = true;
+      this.selectedTitle = 'Metron series';
+      this.selectedSource = 'metron_api';
+      this.selectedExternalId = '';
+      this.selectedPublisher = this.selectedCoverUrl = this.selectedFolderPreview = '';
+      this.selectedYear = this.selectedIssueCount = null;
+      this.folderPreview = this.rootLabel = this.addError = '';
+      this.libraryRootId = null;
+      this.previewReady = this.previewFailed = this.importContextReady = false;
+      this.$nextTick(() => this.$refs.dialog.focus({ preventScroll: true }));
+      await this.loadPreview();
+    },
+
+    async loadPreview() {
+      if (this.adding || !this.showModal) return;
+      if (this.importContextReady) return shared.loadPreview.call(this);
+      this.previewController?.abort();
+      const controller = new AbortController();
+      this.previewController = controller;
+      const sequence = ++this.previewSequence;
+      const timeout = setTimeout(() => controller.abort(), 30000);
+      this.previewLoading = true;
+      this.previewFailed = false;
+      this.addError = '';
+      try {
+        const response = await fetch(`/import/${this.importJobId}/series/${this.importSeriesId}/metron-preview`, { signal: controller.signal });
+        const data = await response.json();
+        if (sequence !== this.previewSequence || this.disposed || !this.showModal) return;
+        if (!response.ok) throw new Error(data.detail || data.error?.message || 'This import changed. Close the preview and review it again.');
+        if (data.source !== 'metron_api' || !/^[1-9][0-9]*$/.test(data.external_id)) throw new Error('The Metron identity could not be verified. Review the source.');
+        this.selectedExternalId = data.external_id;
+        this.selectedTitle = data.title;
+        this.libraryRootId = data.library_root_id;
+        this.rootLabel = data.root_label;
+        this.importContextReady = true;
+      } catch (error) {
+        if (sequence !== this.previewSequence || this.disposed || !this.showModal) return;
+        this.addError = error.name === 'AbortError' ? 'Import lookup timed out. Retry the preview.' : error.message;
+        this.previewFailed = true;
+      } finally {
+        clearTimeout(timeout);
+        if (sequence === this.previewSequence) this.previewLoading = false;
+      }
+      if (this.importContextReady && this.showModal && !this.disposed) await shared.loadPreview.call(this);
+    },
+
+    afterSeriesAdded() {
+      const detail = { jobId: this.importJobId, seriesId: this.importSeriesId };
+      queueMicrotask(() => window.dispatchEvent(new CustomEvent('import:metron-added', { detail })));
+    },
+  };
+}
+
 function selectResult(payload, sourceEl = null) {
   const resolvedPayload = (typeof payload === 'number' || typeof payload === 'string')
     ? {

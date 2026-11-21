@@ -271,6 +271,11 @@ async def test_metron_folder_review_is_selectable_without_comicvine_controls(
         assert "Skip series" in workspace
         assert "Recheck linked metadata" in workspace
         assert 'data-testid="import-review-metron-recheck"' in workspace
+        assert 'data-testid="import-review-metron-preview"' in workspace
+        assert "Preview Metron series" in workspace
+        assert "Metron identity needs review" in workspace
+        assert "More than one series fits" not in workspace
+        assert 'href="/series/add"' not in workspace
 
 
 async def test_metron_review_recheck_queues_local_rematch(
@@ -324,6 +329,56 @@ async def test_metron_review_recheck_without_verified_link_is_actionable(
     )
     assert response.status_code == 409
     assert "Add or link the correct Metron series" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("blocked", [None, "busy", "skipped", "mixed", "other_job", "mylar"])
+async def test_metron_import_add_preview_uses_saved_identity_and_review_scope(
+    authenticated_client, sec_db, tmp_path, blocked
+):
+    from pullbox.models.import_job import ImportJobStatus, ImportSeriesStatus, ImportSourceType
+    from tests.integration.test_metron_import_recheck import _unlinked_scan
+
+    async with sec_db() as session:
+        _, job, group, file, _, _, _, _ = await _unlinked_scan(session, tmp_path)
+        if blocked == "busy":
+            job.status = ImportJobStatus.IMPORTING
+        elif blocked == "skipped":
+            group.status = ImportSeriesStatus.SKIPPED
+        elif blocked == "mixed":
+            group.diagnostics = {
+                "metron_import": {
+                    "identities": [
+                        {"namespace": "metron", "id": "21"},
+                        {"namespace": "metron", "id": "22"},
+                    ]
+                }
+            }
+        elif blocked == "mylar":
+            job.source_type = ImportSourceType.MYLAR3
+        await session.commit()
+        job_id = job.id + (1 if blocked == "other_job" else 0)
+        group_id, root_id = group.id, job.target_library_root_id
+        before = (group.status, group.series_id, file.status, file.include_in_import)
+    response = await authenticated_client.get(f"/import/{job_id}/series/{group_id}/metron-preview")
+    if blocked:
+        assert response.status_code == (404 if blocked == "other_job" else 409)
+    else:
+        assert response.status_code == 200
+        assert response.json()["external_id"] == "21"
+        assert response.json()["source"] == "metron_api"
+        assert response.json()["library_root_id"] == root_id
+        assert "no-store" in response.headers["cache-control"]
+    async with sec_db() as session:
+        from pullbox.models.import_job import ImportedFile, ImportedSeries
+
+        current_group = await session.get(ImportedSeries, group_id)
+        current_file = await session.get(ImportedFile, file.id)
+        assert (
+            current_group.status,
+            current_group.series_id,
+            current_file.status,
+            current_file.include_in_import,
+        ) == before
 
 
 def _headers(html):

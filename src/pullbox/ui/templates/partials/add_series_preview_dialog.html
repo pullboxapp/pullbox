@@ -55,6 +55,7 @@
       </div>
 
       <div class="modal-body min-h-0 p-5 sm:p-6 space-y-5">
+        {% if import_metron_preview|default(false) %}<p class="text-sm text-pb-text-sec">Adding creates a library series and rechecks this import. It does not select or import files. Cancelling or rolling back this import will not remove the added series.</p>{% endif %}
         <div x-show="previewLoading" data-testid="add-series-preview-status" role="status" aria-live="polite" class="flex items-center gap-2 text-sm text-pb-text-sec">
           <svg class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>

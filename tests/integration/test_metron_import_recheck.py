@@ -16,7 +16,7 @@ from pullbox.models.import_job import (
     ImportJobStatus,
     ImportSeriesStatus,
 )
-from pullbox.models.metadata_identity import SeriesExternalIdentity
+from pullbox.models.metadata_identity import IssueExternalIdentity, SeriesExternalIdentity
 from pullbox.schemas.import_job import ConfirmImportRequest, ImportJobCreate
 from pullbox.services.import_metron_matching import prepare_metron_series_recheck
 from tests.integration.test_metron_folder_import import _archive, _service, _setup
@@ -158,3 +158,43 @@ async def test_recheck_rejects_ineligible_or_conflicting_scope_without_changes(
             db_session, job.id + 1 if blocked == "other_job" else job.id, group.id
         )
     assert (group.status, group.series_id, group.diagnostics, file.status) == before
+
+
+@pytest.mark.parametrize("link_changed_after_queue", [False, True])
+async def test_recheck_issue_identity_uses_current_proof(
+    db_session: AsyncSession, tmp_path: Path, link_changed_after_queue: bool
+) -> None:
+    root, _, issue = await _setup(db_session, tmp_path)
+    link = (await db_session.scalars(select(IssueExternalIdentity))).one()
+    link.verification_state = IdentityVerificationState.STALE
+    await db_session.commit()
+    source = tmp_path / "source"
+    comic = source / "Unsorted" / "unidentified.cbz"
+    original = _archive(comic)
+    service = _service()
+    job = await service.create_job(
+        db_session,
+        ImportJobCreate(
+            source_path=str(source), source_type="filesystem", target_library_root_id=root.id
+        ),
+    )
+    await service.start_scan(db_session, job.id)
+    file = (await db_session.scalars(select(ImportedFile))).one()
+    group = await db_session.get(ImportedSeries, file.import_series_id)
+    assert file.status == ImportedFileStatus.NO_MATCH
+    assert file.diagnostics["conflict_type"] == "metron_identity_needs_review"
+    link.verification_state = IdentityVerificationState.VERIFIED
+    await db_session.commit()
+    await prepare_metron_series_recheck(db_session, job.id, group.id)
+    await db_session.commit()
+    if link_changed_after_queue:
+        link.verification_state = IdentityVerificationState.CONFLICTED
+        await db_session.commit()
+    await service.rematch_imported_series_files(db_session, job.id, group.id)
+    await db_session.refresh(file)
+    assert file.status == (
+        ImportedFileStatus.NO_MATCH if link_changed_after_queue else ImportedFileStatus.MATCHED
+    )
+    assert file.matched_issue_id == (None if link_changed_after_queue else issue.id)
+    assert file.include_in_import is False
+    assert comic.read_bytes() == original

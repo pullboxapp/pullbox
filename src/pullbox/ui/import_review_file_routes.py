@@ -18,6 +18,46 @@ from pullbox.services.import_review_scope import (
 router = APIRouter()
 
 
+@router.get("/import/{job_id}/series/{series_id}/metron-preview", include_in_schema=False)
+async def metron_preview_context(
+    job_id: int,
+    series_id: int,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+) -> Response:
+    from fastapi import HTTPException
+
+    from pullbox.core.exceptions import ValidationError
+    from pullbox.services.import_metron_matching import metron_series_preview_identity
+    from pullbox.services.library_root_management import list_library_roots
+
+    try:
+        job, item, external_id = await metron_series_preview_identity(session, job_id, series_id)
+    except ValidationError as exc:
+        raise HTTPException(status_code=409, detail=exc.message) from exc
+    roots = [
+        root
+        for root in await list_library_roots(session)
+        if all(
+            root[key]
+            for key in ("enabled", "allow_managed_writes", "available", "readable", "writable")
+        )
+    ]
+    root = next((root for root in roots if root["id"] == job.target_library_root_id), None)
+    if job.target_library_root_id is None:
+        root = next((root for root in roots if root["is_default_managed_destination"]), None)
+    return JSONResponse(
+        {
+            "source": "metron_api",
+            "external_id": external_id,
+            "title": item.raw_series_name,
+            "library_root_id": root["id"] if root else None,
+            "root_label": f"{root['path']} - {root['name']}" if root else "",
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @router.post("/import/{job_id}/series/{series_id}/metron-recheck", include_in_schema=False)
 async def recheck_metron_identity(
     job_id: int,

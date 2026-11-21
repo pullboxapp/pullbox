@@ -8363,9 +8363,9 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
     },
 
     applyReviewAction: async function (url, method, payload, button) {
-      if (button.disabled || this.reviewActionPending) { return; }
+      if (button?.disabled || this.reviewActionPending) { return; }
       this.reviewActionPending = true;
-      button.disabled = true;
+      if (button) { button.disabled = true; }
       try {
         var response = await fetch(url, {
           method: method,
@@ -8383,7 +8383,7 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
         return false;
       } finally {
         this.reviewActionPending = false;
-        if (button.isConnected) { button.disabled = false; }
+        if (button?.isConnected) { button.disabled = false; }
       }
     },
 

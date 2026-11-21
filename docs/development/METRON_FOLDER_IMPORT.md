@@ -9,8 +9,21 @@ provider request, and does not create or attach provider links.
 
 Step 3 shows the series under Ready with a Metron identity label. Since this is
 an existing series, use its ready-file selection controls to add missing issues.
-Already-owned issues remain excluded. An unverified identity stays in review,
-with guidance to add/link the series and scan again, or skip it for now.
+Already-owned issues remain excluded. An unverified identity stays in review.
+Use **Review identity** to preview and add its exact Metron series without leaving
+Step 3, or correct an existing provider link and choose **Recheck linked
+metadata**. A successful Add queues that same local recheck. Files are never
+selected or imported by either action; skip remains available.
+
+The preview reuses the regular source-aware Add Series dialog and API, including
+source availability, catalog review, managed-root checks, and final identity
+validation. Only an explicit preview/add contacts Metron; scanning, rendering,
+polling, and rechecking use saved evidence and local verified identities.
+
+Adding the series is independent of the import. Cancelling or rolling back the
+import does not delete that added library series. The dialog states this before
+confirmation. Mixed series IDs cannot use this shortcut, and conflicting issue
+evidence remains in review after the series has been added.
 
 ## User Test
 
@@ -29,10 +42,16 @@ Use an isolated development library and copies of import sources.
    a second time.
 6. With a separate source copy, use an unknown issue ID or a conflicting issue
    number. It must stay out of the ready import, even if its filename matches.
-   Correct the source/link and scan again, or skip the file/series.
+   Correct the provider link and use **Recheck linked metadata** in the same job,
+   or skip the file/series. If the source file itself changes, use the existing
+   source recheck/rescan workflow rather than trusting its old saved evidence.
 7. Roll back the successful test import. The test copy should be removed and
    the issue should return to its recorded pre-import status, unless a later
    choice or surviving library file means that status must be preserved.
+8. For a series not yet in the library, open **Review identity**, then **Preview
+   Metron series**. Confirm the title and managed library root before adding it.
+   After the recheck, select the ready file explicitly. Cancelling the preview
+   must add nothing, and a late response must not reopen the dialog.
 
 Do not invent provider IDs in a real library. The automated test fixture uses
 synthetic identities only in a disposable database.
@@ -97,15 +116,30 @@ file totals to zero and restored Skipped; source hashes and all 1,088 original
 library-file records remained unchanged. Browser regressions also cover new
 series, mixed file outcomes, partial live updates, polling, and rehydration.
 
+Browser import #48 exercised the new in-review Add path against Metron's real
+Superman: Red Son (2003) catalog (series 13131, issue 152712), using another
+clearly labeled generated archive. The series was initially absent. Preview/Add
+created the series and its three issues, rechecked the same job, and left the
+file unselected. Explicit selection imported one file. Step 4 and Step 5 agreed
+on one imported file and zero series added by import execution. Rollback removed
+the generated library copy, restored Skipped, and retained the independently
+added series. The source hash and every original library-file row were unchanged.
+
+Chromium and Firefox regressions cover cancellation, late preview responses,
+exact add payloads, in-place review updates, no implicit selection, and light,
+dark, and Tron themes. The modal also passes the automated accessibility check.
+
 ## Remaining Scope
 
-This is not the complete provider-aware importer. Creating a new Metron series
-from the import review screen, GCD matching, automatic split-folder regrouping,
-and provider-neutral issue reassignment/recovery remain separate milestones.
+This is not the complete provider-aware importer. GCD matching, automatic
+split-folder regrouping, and provider-neutral issue reassignment/recovery remain
+separate milestones.
 This checkpoint targets CBZ folder imports, not additional archive formats.
 It does not qualify PostgreSQL or change Anna's verification work.
 
 Regression coverage is in `tests/integration/test_metron_folder_import.py`,
+`tests/integration/test_metron_import_recheck.py`,
+`tests/api/test_source_series_add_api.py`, `tests/e2e/test_metron_import_review.py`,
 `tests/unit/test_import_scan_materialization.py`, and
 `tests/ui/test_import_review_v2.py`, alongside existing import lifecycle,
 matching, paging, recheck, and archive-safety tests.

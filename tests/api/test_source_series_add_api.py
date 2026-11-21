@@ -136,6 +136,72 @@ async def test_add_native_series_uses_full_server_catalog_and_is_repeat_safe(
         assert await session.scalar(select(func.count()).select_from(Issue)) == 3
 
 
+async def test_add_from_metron_import_rechecks_same_job_and_preserves_series_on_rollback(
+    authenticated_client, source_add_setup, sec_db, tmp_path, monkeypatch
+):
+    from unittest.mock import Mock
+
+    from pullbox.models.import_job import ImportedFile, ImportedFileStatus, ImportedSeries
+    from pullbox.schemas.import_job import ConfirmImportRequest, ImportJobCreate
+    from tests.integration.test_metron_folder_import import _archive, _service
+
+    fixture = source_add_setup
+    source = tmp_path / "incoming"
+    comic = source / "Unsorted" / "unidentified.cbz"
+    original = _archive(comic, series_id="8", issue_id="101", number="13b")
+    service = _service()
+    async with sec_db() as session:
+        job = await service.create_job(
+            session,
+            ImportJobCreate(
+                source_type="filesystem",
+                source_path=str(source),
+                target_library_root_id=fixture["body"]["library_root_id"],
+            ),
+        )
+        await service.start_scan(session, job.id)
+        file = (await session.scalars(select(ImportedFile))).one()
+        job_id, group_id, file_id = job.id, file.import_series_id, file.id
+        assert file.status == ImportedFileStatus.NO_MATCH
+        await session.commit()
+    assert not fixture["calls"]
+    context = await authenticated_client.get(f"/import/{job_id}/series/{group_id}/metron-preview")
+    assert context.status_code == 200
+    payload = context.json()
+    preview = await authenticated_client.post(
+        "/api/v1/metadata/series/preview",
+        json={key: payload[key] for key in ("source", "external_id", "library_root_id")},
+        headers=csrf(authenticated_client),
+    )
+    assert preview.status_code == 200
+    added = await authenticated_client.post(
+        "/api/v1/series", json=fixture["body"], headers=csrf(authenticated_client)
+    )
+    assert added.status_code == 201, added.text
+    series_id = added.json()["id"]
+    trigger = Mock()
+    monkeypatch.setattr("pullbox.tasks.import_task.trigger_import_series_rematch", trigger)
+    recheck = await authenticated_client.post(
+        f"/import/{job_id}/series/{group_id}/metron-recheck", headers=csrf(authenticated_client)
+    )
+    assert recheck.status_code == 202, recheck.text
+    trigger.assert_called_once_with(job_id, group_id)
+    async with sec_db() as session:
+        await service.rematch_imported_series_files(session, job_id, group_id)
+        file = await session.get(ImportedFile, file_id)
+        group = await session.get(ImportedSeries, group_id)
+        assert file.status == ImportedFileStatus.MATCHED and not file.include_in_import
+        assert group.series_id == series_id
+        await service.update_file_selection(session, job_id, file_id, include_in_import=True)
+        await service.confirm_import(session, job_id, ConfirmImportRequest(series_ids=[group_id]))
+        await service.run_import(session, job_id)
+        await session.refresh(file)
+        assert file.status == ImportedFileStatus.IMPORTED
+        assert await service.rollback_import(session, job_id)
+        assert await session.get(Series, series_id) is not None
+        assert comic.read_bytes() == original
+
+
 @pytest.mark.parametrize("invalid_after_preview", [False, True])
 @pytest.mark.parametrize("summary_count", [1, 1000001, 1000000000])
 async def test_stale_summary_preview_and_final_add_revalidate_the_catalog(

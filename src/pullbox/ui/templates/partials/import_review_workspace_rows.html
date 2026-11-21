@@ -28,6 +28,7 @@
   {% set compact_one_page = one_page and reason_key == 'single_page_comic' %}
   {% set series_diagnostics = item.diagnostics or {} %}
   {% set metron_row = item.cv_match_method == 'metron_id' or series_diagnostics.get('metron_import') is not none %}
+  {% set metron_series_review = metron_row and reason_key in ('needs_series', 'series_conflict') %}
   {% set known_cv_id = item.user_selected_cv_id or item.cv_id or library_series_cv_ids_by_imported_series_id.get(item.id) %}
   {% set known_series_target = known_cv_id or item.series_id %}
   {% set series_selectable = item.status.value == 'matched' and item.files_matched > 0 %}
@@ -54,7 +55,7 @@
       <td><span class="font-mono text-xs text-pb-success">{% if item.cv_match_score is not none %}{{ (item.cv_match_score * 100)|round|int }}%{% else %}&mdash;{% endif %}</span></td>
       <td>{% include "partials/import_review_row_menu.html" %}{{ review_expander(item, row, false) }}</td>
       {% else %}
-      <td><p class="font-semibold text-pb-text">{{ review_reasons[reason_key][0] }}</p><p class="mt-0.5 text-xs leading-[18px] text-pb-text-sec">{{ reason_descriptions.get(reason_key, 'Review the saved evidence and choose the next step.') }}{% if active_review_view != 'fix_source' and not dangerous_row and row.lane in ('fix_source', 'blocked') %} {{ review_expander(item, row, compact_one_page, 'Technical detail') }}{% endif %}</p>
+      <td><p class="font-semibold text-pb-text">{{ 'Metron identity needs review' if metron_series_review else review_reasons[reason_key][0] }}</p><p class="mt-0.5 text-xs leading-[18px] text-pb-text-sec">{{ 'Add or correct the linked series, then recheck the saved file identities.' if metron_series_review else reason_descriptions.get(reason_key, 'Review the saved evidence and choose the next step.') }}{% if active_review_view != 'fix_source' and not dangerous_row and row.lane in ('fix_source', 'blocked') %} {{ review_expander(item, row, compact_one_page, 'Technical detail') }}{% endif %}</p>
       {% if row.updating %}<span class="pill pill-info" role="status"><svg class="h-3 w-3 animate-spin motion-reduce:animate-none" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2" opacity=".25"/><path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="2"/></svg>Updating match</span>{% endif %}</td>
       <td><div class="flex flex-wrap items-center gap-1.5">
         {% if compact_one_page %}

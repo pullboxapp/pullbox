@@ -25,6 +25,7 @@
   x-on:import:conflict-visibility.window="visibleFileConflictGroupCount = Number(($event.detail && $event.detail.visibleFileConflictGroupCount) || 0)"
   x-on:import:conflicts-saved.window="handleConflictsSaved($event.detail)"
   x-on:import:conflicts-reset.window="handleConflictsReset($event.detail)"
+  x-on:import:metron-added.window="if ($event.detail.jobId === jobId) recheckMetronIdentity($event.detail.seriesId)"
   data-testid="import-collection-review"
   data-import-review-status-counts='{{ status_counts|tojson|forceescape }}'
   data-import-review-workspace
@@ -137,6 +138,10 @@
     </div>
   </div>
   {% include "partials/import_review_gate.html" %}
+  <div id="import-metron-add" x-data="importMetronSeries({jobId: {{ job.id }}})"
+    @import:metron-preview.window="openImportPreview($event.detail)">
+    {% with import_metron_preview=true %}{% include "partials/add_series_preview_dialog.html" %}{% endwith %}
+  </div>
 </div>
 {% set import_review_footer_mode = active_review_view if active_review_view in ('conflicts', 'story_arcs') else "series" %}
 <div id="page-footer-dock" data-testid="page-footer-dock" hx-swap-oob="innerHTML">

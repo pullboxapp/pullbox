@@ -193,10 +193,9 @@ async def match_local_metron_series(session: AsyncSession, item: ImportedSeries)
     return True
 
 
-async def prepare_metron_series_recheck(
+async def _load_metron_review_scope(
     session: AsyncSession, job_id: int, series_id: int
-) -> ImportedSeries:
-    """Prepare an explicit local-identity recheck without rescanning source files."""
+) -> tuple[ImportJob, ImportedSeries]:
     job = await session.get(ImportJob, job_id)
     item = await session.get(ImportedSeries, series_id)
     if job is None or item is None or item.import_job_id != job_id:
@@ -210,6 +209,29 @@ async def prepare_metron_series_recheck(
         or (item.diagnostics or {}).get("rematch_pending")
     ):
         raise ValidationError("This series is busy or no longer available for an identity recheck.")
+    return job, item
+
+
+async def metron_series_preview_identity(
+    session: AsyncSession, job_id: int, series_id: int
+) -> tuple[ImportJob, ImportedSeries, str]:
+    """Use only the saved exact series identity for an explicit provider preview."""
+    job, item = await _load_metron_review_scope(session, job_id, series_id)
+    refs = (item.diagnostics or {}).get("metron_import", {}).get("identities", [])
+    metron_ids = {str(ref["id"]) for ref in refs if ref.get("namespace") == "metron"}
+    if len(metron_ids) != 1:
+        raise ValidationError("These files need one Metron series identity before previewing.")
+    external_id = next(iter(metron_ids))
+    if not external_id.isascii() or not external_id.isdecimal() or int(external_id) <= 0:
+        raise ValidationError("The saved Metron series identity is invalid. Review the source.")
+    return job, item, external_id
+
+
+async def prepare_metron_series_recheck(
+    session: AsyncSession, job_id: int, series_id: int
+) -> ImportedSeries:
+    """Prepare an explicit local-identity recheck without rescanning source files."""
+    job, item = await _load_metron_review_scope(session, job_id, series_id)
     target = await _verified_metron_series(session, item)
     if target is None:
         raise ValidationError(
