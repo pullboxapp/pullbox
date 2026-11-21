@@ -1,6 +1,6 @@
 """File type converter executor — converts comic files between formats.
 
-Supports CBR→CBZ, CB7→CBZ, CBZ repack, PDF→CBZ conversions.
+Supports CBR→CBZ, CB7→CBZ, CBT→CBZ, CBZ repack, PDF→CBZ conversions.
 Exports a standalone convert_file() function for reuse by the
 download post-processing pipeline (Sprint 9 DDL Engine).
 
@@ -14,17 +14,19 @@ import asyncio
 import contextlib
 import json
 import os
+import tarfile
 import tempfile
 import time
 import zipfile
 from collections.abc import Callable, Iterator, Sequence
 from functools import partial
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
 import structlog
 from sqlalchemy import select
 
+from pullbox.core.file_publication import publish_file_without_overwrite
 from pullbox.core.file_safety import has_archive_member_path_traversal
 from pullbox.core.library_root_resolution import resolve_path_inside_roots
 from pullbox.core.rar_backend import RarBackendUnavailableError, configure_rarfile_backend
@@ -39,7 +41,7 @@ from pullbox.utilities.settings import (
 logger = structlog.get_logger(__name__)
 
 _SUPPORTED_TARGET_FORMATS = frozenset({"cbz"})
-_SUPPORTED_SOURCE_FORMATS = frozenset({"cbr", "cb7", "cbz", "pdf"})
+_SUPPORTED_SOURCE_FORMATS = frozenset({"cbr", "cb7", "cbt", "cbz", "pdf"})
 ConversionProgressCallback = Callable[[str, int, int, str], None]
 
 
@@ -128,6 +130,8 @@ def _convert_sync(
         return _convert_cb7_to_cbz(source, target_path, progress_callback=progress_callback)
     if actual_type == ".cbr":
         return _convert_cbr_to_cbz(source, target_path, progress_callback=progress_callback)
+    if actual_type == ".cbt":
+        return _convert_cbt_to_cbz(source, target_path, progress_callback=progress_callback)
     if actual_type == ".cbz":
         return _repack_cbz(source, target_path, progress_callback=progress_callback)
     if actual_type == ".pdf":
@@ -259,6 +263,57 @@ def _convert_cbr_to_cbz(
     ) as exc:
         raise ValueError(_format_corrupt_cbr_error(source, str(exc))) from exc
 
+    return target
+
+
+def _convert_cbt_to_cbz(
+    source: Path,
+    target: Path,
+    *,
+    progress_callback: ConversionProgressCallback | None = None,
+) -> Path:
+    """Stream regular TAR members into a staged CBZ without extracting paths."""
+    with tarfile.open(source, "r:*") as archive:
+        members = archive.getmembers()
+        _validate_archive_member_names([member.name for member in members])
+        files: list[tarfile.TarInfo] = []
+        seen: set[str] = set()
+        for member in members:
+            if member.isdir():
+                continue
+            if not member.isfile() or member.issparse():
+                raise ValueError(f"Archive member is not a regular file: {member.name}")
+            name = str(PurePosixPath(member.name.replace("\\", "/"))).casefold()
+            if name in seen:
+                raise ValueError(f"Archive contains duplicate member: {member.name}")
+            seen.add(name)
+            files.append(member)
+        if not files:
+            raise ValueError(f"No files to pack from: {source}")
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=target.parent, prefix=".pullbox-cbt-") as tmp:
+            stage = Path(tmp) / "converted.cbz"
+            with zipfile.ZipFile(stage, "w", zipfile.ZIP_DEFLATED) as output:
+                for index, member in enumerate(files, start=1):
+                    stream = archive.extractfile(member)
+                    if stream is None:
+                        raise ValueError(f"Archive member is unreadable: {member.name}")
+                    with stream, output.open(member.name, "w", force_zip64=True) as destination:
+                        remaining = member.size
+                        while remaining:
+                            chunk = stream.read(min(remaining, 1024 * 1024))
+                            if not chunk:
+                                raise ValueError(f"Archive member is truncated: {member.name}")
+                            destination.write(chunk)
+                            remaining -= len(chunk)
+                            _emit_conversion_progress(
+                                progress_callback, "packing", index - 1, len(files), "entries"
+                            )
+                    _emit_conversion_progress(
+                        progress_callback, "packing", index, len(files), "entries"
+                    )
+            publish_file_without_overwrite(stage, target)
     return target
 
 
@@ -522,7 +577,7 @@ def _pack_directory_as_cbz(
 # ── Preview ────────────────────────────────────────────────────
 
 # Lossless conversions: archive repack without rasterization
-_LOSSLESS_CONVERSIONS = frozenset({("cbr", "cbz"), ("cb7", "cbz"), ("cbz", "cbz")})
+_LOSSLESS_CONVERSIONS = frozenset({("cbr", "cbz"), ("cb7", "cbz"), ("cbt", "cbz"), ("cbz", "cbz")})
 
 
 def build_convert_preview(

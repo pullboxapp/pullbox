@@ -13,6 +13,7 @@ from pullbox.core.file_safety import FileSafetyError, run_safety_checks
 from pullbox.core.library_file_ownership import build_file_identity_signature
 from pullbox.core.metadata_identity import IdentityNamespace
 from pullbox.core.source_metadata import SourceMetadataExtractor
+from pullbox.models.config import SystemConfig
 from pullbox.models.import_job import ImportedFile, ImportedFileStatus, ImportedSeries
 from pullbox.models.library import LibraryFile, LibraryRoot
 from pullbox.schemas.import_job import ConfirmImportRequest, ImportJobCreate
@@ -38,16 +39,29 @@ def native_archive(path, namespace="metron", *, number="3", series_id="21", issu
     return path.read_bytes()
 
 
-@pytest.mark.parametrize("suffix", [".cbr", ".cb7", ".cbt"])
+@pytest.mark.parametrize(
+    "suffix,convert",
+    [(".cbr", False), (".cb7", False), (".cbt", False), (".cb7", True), (".cbt", True)],
+)
 @pytest.mark.parametrize("namespace", ["metron", "gcd"])
 @pytest.mark.parametrize("in_place", [False, True])
-async def test_nonzip_native_import_and_rollback(db_session, tmp_path, suffix, namespace, in_place):
+async def test_nonzip_native_import_and_rollback(
+    db_session, tmp_path, suffix, namespace, in_place, convert
+):
     destination, series, issue = await _setup(
         db_session, tmp_path, namespace=IdentityNamespace(namespace)
     )
     source = tmp_path / "source"
     path = source / "Unsorted" / f"unidentified{suffix}"
     original = native_archive(path, namespace)
+    db_session.add(
+        SystemConfig(
+            key="convert_to_preferred_format_on_import",
+            value="true" if convert else "false",
+            value_type="bool",
+        )
+    )
+    await db_session.commit()
     if in_place:
         db_session.add(
             LibraryRoot(
@@ -82,7 +96,17 @@ async def test_nonzip_native_import_and_rollback(db_session, tmp_path, suffix, n
     await db_session.refresh(file)
     assert file.status == ImportedFileStatus.IMPORTED, file.error_message
     placed = (await db_session.scalars(select(LibraryFile))).one()
-    assert Path(placed.file_path).read_bytes() == original
+    placed_path = Path(placed.file_path)
+    if convert and not in_place:
+        assert job.convert_to_preferred_format is True
+        assert placed_path.suffix == ".cbz"
+        with zipfile.ZipFile(placed_path) as archive:
+            reader = ArchiveReader(path)
+            assert {name: archive.read(name) for name in archive.namelist()} == {
+                name: reader.read_file(name) for name in reader.list_files()
+            }
+    else:
+        assert placed_path.read_bytes() == original
     assert await service.rollback_import(db_session, job.id)
     assert path.read_bytes() == original
     assert not (await db_session.scalars(select(LibraryFile))).all()

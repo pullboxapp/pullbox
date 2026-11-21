@@ -21,7 +21,7 @@ of discarding it. Recorded Mylar matches remain valid when native IDs are unknow
 or unverified. Only disagreements proven by verified saved identities block the
 file. No provider requests or new links are created by scanning or rechecking.
 
-This is an import-only correction, not an archive backend rewrite. It does not
+The native-identity correction is import-only, not an archive backend rewrite. It does not
 change conversion settings, metadata-writing policy, downloads, rollback rules,
 or archive safety limits. Real stored RAR, 7z, and TAR fixtures cover copy and
 keep-in-place import, rollback, Mylar conflicts, fresh source rechecks, ambiguous
@@ -32,6 +32,36 @@ Qualification: 34 initial behavior assertions reproduced missing evidence before
 the correction. The expanded regression set passes 439 cases, including 50
 non-ZIP cases and the existing Mylar/import lifecycle suites. Focused Ruff and
 strict mypy pass. This is not full CI or PostgreSQL release qualification.
+
+### Converted Native Archive Qualification
+
+Local browser qualification on November 21 exposed one downstream conversion
+gap: a correctly matched CBT failed with `Unsupported source format: .cbt` when
+the existing import policy required CBZ normalization. The shared converter now
+streams regular TAR entries into a staged CBZ, preserving page and XML bytes.
+It rejects unsafe paths, duplicate names, links, special files and sparse entries.
+Publication uses the existing exclusive destination claim, so cancellation,
+truncation and a competing destination do not publish a partial or replacement
+file. No import setting, provider-link rule or rollback policy changed.
+
+All six Metron/GCD CBR, CB7 and CBT browser cases then imported one explicitly
+selected file with zero new series, no failed files and no metadata follow-up.
+Both XML files reconciled without differences. Every generated copy was rolled
+back through the UI. The 12 old/new fixture hashes, all 1,088 original library-file
+rows, 4,600 provider identities, both roots and all 4,202 issue statuses remained
+unchanged. CBR conversion was verified with the existing container UnRAR backend.
+
+The identity-only negative fixtures remain unchanged. They intentionally lack a
+required MetronInfo Series/Name field: matching can succeed, but paired writing
+must still request metadata review. Separate schema-complete fixtures exercise
+the successful writing path rather than weakening XML validation.
+
+Qualification: 270 focused converter, paired-writer and native/legacy import
+regressions passed, along with focused Ruff and strict mypy. This is not full CI
+or PostgreSQL qualification. A transient browser-history restoration issue seen
+while returning from an issue page to completed-import follow-up remains a
+separate reproduction task; these successful direct import/rollback runs do not
+establish that history navigation is fixed.
 
 Step 3 shows the series under Ready with a Metron identity label. Since this is
 an existing series, use its ready-file selection controls to add missing issues.
@@ -57,7 +87,7 @@ Use an isolated development library and copies of import sources.
 
 1. Add a series through Metron, or verify its Metron link using the existing
    series metadata workflow. Its issue catalog must be present locally.
-2. Choose an unowned issue and a CBZ containing `MetronInfo.xml` whose primary
+2. Choose an unowned issue and a CBZ, CBR, CB7 or CBT containing `MetronInfo.xml` whose primary
    Metron ID and `Series/@id` identify that exact issue and series. A ComicVine
    identity and `ComicInfo.xml` are not required.
 3. Start a **Scan folder** import. In Step 3, open **Ready**. Check that the series
@@ -84,8 +114,9 @@ synthetic identities only in a disposable database.
 
 ## Safety And Compatibility
 
-- Metadata members are read through the existing bounded ZIP inspection, without
-  extracting archive-controlled paths or opening a second archive session.
+- ZIP metadata uses the existing bounded inspection report; non-ZIP metadata
+  uses the bounded paired-XML reader after archive safety inspection. Neither
+  trusts archive-controlled extraction paths.
 - Every automatically matched file needs its own exact identity. A tagged file
   does not authorize untagged neighbors in a mixed folder.
 - Competing exact identities and issue-number disagreements block the match.
