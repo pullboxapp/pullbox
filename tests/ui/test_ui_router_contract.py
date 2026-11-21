@@ -130,6 +130,18 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
             "view_series_files",
         ),
         (
+            "/import/{job_id}/series/{series_id}/review-library",
+            ("GET",),
+            "preview_library_series",
+            "preview_library_series",
+        ),
+        (
+            "/import/{job_id}/series/{series_id}/review-library",
+            ("POST",),
+            "apply_library_series",
+            "apply_library_series",
+        ),
+        (
             "/import/{job_id}/series/{series_id}/review-{action}",
             ("GET",),
             "preview_series_choice",

@@ -467,22 +467,20 @@ def inspect_zip_archive_safety(
             comicinfo: ComicInfoData | None = None
             comicinfo_entry = comicinfo_entries[0].filename if comicinfo_entries else None
             comicinfo_error: str | None = None
-            metadata_files = None
-            if any(
-                PurePosixPath(entry.filename.replace("\\", "/")).name.casefold() == "metroninfo.xml"
-                for entry in entries
-            ):
-                from pullbox.core.archive_metadata import read_open_metadata_members
+            from pullbox.core.archive_metadata import read_open_metadata_members
 
-                metadata_files = read_open_metadata_members(entries, lambda member: zf.open(member))
+            metadata_files = read_open_metadata_members(entries, lambda member: zf.open(member))
             if comicinfo_entries:
                 comicinfo_member = comicinfo_entries[0]
                 if comicinfo_member.file_size > _MAX_COMICINFO_XML_BYTES:
                     comicinfo_error = "comicinfo_size_limit"
                 else:
                     try:
-                        with zf.open(comicinfo_member, "r") as member:
-                            xml_bytes = member.read(_MAX_COMICINFO_XML_BYTES + 1)
+                        if metadata_files.comicinfo.payload is not None:
+                            xml_bytes = metadata_files.comicinfo.payload
+                        else:
+                            with zf.open(comicinfo_member, "r") as member:
+                                xml_bytes = member.read(_MAX_COMICINFO_XML_BYTES + 1)
                         if len(xml_bytes) > _MAX_COMICINFO_XML_BYTES:
                             comicinfo_error = "comicinfo_size_limit"
                         else:

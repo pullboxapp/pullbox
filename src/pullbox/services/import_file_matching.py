@@ -1037,6 +1037,14 @@ async def _load_existing_series_page_target_index(
         identity_filters.append(Issue.comicvine_id.in_(sorted(requested_cv_ids)))
     if requested_issue_numbers:
         identity_filters.append(Issue.issue_number.in_(sorted(requested_issue_numbers)))
+    if imp_series.cv_match_method == "library_review":
+        reviewed_ids = {
+            proof.get("issue_id")
+            for file in files
+            if isinstance(proof := file.diagnostics.get("reviewed_library_issue"), dict)
+        }
+        if reviewed_ids:
+            identity_filters.append(Issue.id.in_(reviewed_ids))
     if imp_series.cv_match_method in {"metron_id", "gcd_id"}:
         namespace = (
             IdentityNamespace.GCD
@@ -1080,7 +1088,7 @@ async def _load_existing_series_page_target_index(
 
     ambiguous_issue_numbers: set[float] = set()
     for issue, owned in target_rows:
-        if imp_series.cv_match_method in {"metron_id", "gcd_id"}:
+        if imp_series.cv_match_method in {"metron_id", "gcd_id", "library_review"}:
             target_index.issue_entries.append((issue, bool(owned)))
         entry = (issue.id, issue.comicvine_id, bool(owned), issue, issue.title)
         if issue.comicvine_id is not None:
@@ -1093,7 +1101,7 @@ async def _load_existing_series_page_target_index(
             ambiguous_issue_numbers.add(issue.issue_number)
             continue
         target_index.number_map[issue.issue_number] = entry
-    if imp_series.cv_match_method in {"metron_id", "gcd_id"}:
+    if imp_series.cv_match_method in {"metron_id", "gcd_id", "library_review"}:
         await load_metron_issue_targets(session, target_index, files)
     return target_index
 
@@ -2101,6 +2109,10 @@ def _evaluate_file_match_candidate(
     build_import_metadata_conflict: BuildImportMetadataConflictFunc,
     series_high_confidence: bool,
 ) -> tuple[FileMatchCandidate | None, dict[str, Any] | None]:
+    if imp_series.cv_match_method == "library_review":
+        from pullbox.services.import_library_selection import reviewed_library_candidate
+
+        return reviewed_library_candidate(imp_series, imp_file, target_index)
     if (
         imp_series.cv_match_method in {"metron_id", "gcd_id"}
         or (imp_series.diagnostics or {}).get("metron_import") is not None

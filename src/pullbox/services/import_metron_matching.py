@@ -435,6 +435,11 @@ async def revalidate_metron_import_target(
     issue: Issue,
 ) -> None:
     """A review-time provider link must still identify this issue before placement."""
+    if file.match_method == "library_review":
+        from pullbox.services.import_library_selection import revalidate_library_issue
+
+        await revalidate_library_issue(session, file, issue)
+        return
     if file.match_method not in {"metron_id", "gcd_id"}:
         return
     from pullbox.core.exceptions import ValidationError

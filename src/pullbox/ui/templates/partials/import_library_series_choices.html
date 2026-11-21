@@ -1,0 +1,25 @@
+<div class="modal-shell" x-data='importReviewSeriesChoiceData({jobId: {{ job.id }}, seriesId: {{ series.id }}, action: "library"})' x-show="open" x-init="$nextTick(() => $refs.choiceDialog.focus())" @keydown.escape.window="close()" @keydown.tab="trapImportReviewDialog($event, $refs.choiceDialog)" data-testid="import-library-series-choices">
+  <div class="modal-backdrop" @click="close()"></div>
+  <div class="modal-panel max-w-3xl" x-ref="choiceDialog" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="library-series-choice-title">
+    <div class="modal-header"><h2 class="modal-title" id="library-series-choice-title">Choose a library series</h2></div>
+    <div class="modal-body space-y-3 p-5">
+      <p class="text-sm text-pb-text-sec">Choose the series already in your library through Metron or GCD, then match each file to an issue. This does not select files for import or override conflicting embedded metadata.</p>
+      <form hx-get="/import/{{ job.id }}/series/{{ series.id }}/review-library" hx-target="#cv-search-modal" hx-swap="innerHTML" hx-boost="false" class="flex gap-2">
+        <input type="search" name="q" value="{{ query }}" class="input-pb min-w-0 flex-1" aria-label="Search library series" placeholder="Series title">
+        <button type="submit" class="btn-ghost btn-sm">Search library</button>
+      </form>
+      <div class="table-shell overflow-x-auto"><table class="downloads-table text-sm"><thead><tr><th>Series</th><th>Year</th><th>Provider</th><th><span class="sr-only">Action</span></th></tr></thead><tbody>
+      {% for choice in choices %}<tr><td>{{ choice.series.title }}</td><td>{{ choice.series.year_start or 'Unknown' }}</td><td>{{ 'GCD' if choice.identity.namespace == 'gcd' else 'Metron' }}</td><td>
+        <form hx-boost="false" @submit.prevent="submit($el)"><input type="hidden" name="token" value="{{ choice.token }}"><input type="hidden" name="library_series_id" value="{{ choice.series.id }}"><button type="submit" class="btn-primary btn-sm whitespace-nowrap" :disabled="selecting" data-testid="import-library-series-use">Use series</button></form>
+      </td></tr>{% else %}<tr><td colspan="4">No verified Metron or GCD series found. Add or link the series in your library first, then return to this review.</td></tr>{% endfor %}
+      </tbody></table></div>
+      {% if pages > 1 %}<nav class="flex items-center justify-end gap-3 text-xs" aria-label="Library series pages">
+        {% if page > 1 %}<button type="button" class="btn-ghost btn-sm" hx-get="/import/{{ job.id }}/series/{{ series.id }}/review-library?page={{ page - 1 }}&q={{ query|urlencode }}" hx-target="#cv-search-modal" hx-swap="innerHTML">Previous</button>{% endif %}
+        <span>{{ page }} of {{ pages }}</span>
+        {% if page < pages %}<button type="button" class="btn-ghost btn-sm" hx-get="/import/{{ job.id }}/series/{{ series.id }}/review-library?page={{ page + 1 }}&q={{ query|urlencode }}" hx-target="#cv-search-modal" hx-swap="innerHTML">Next</button>{% endif %}
+      </nav>{% endif %}
+      <p role="alert" x-show="error" x-cloak x-text="error" class="text-sm text-pb-error"></p>
+    </div>
+    <div class="modal-footer"><button type="button" class="btn-ghost btn-sm" @click="close()" :disabled="selecting">Cancel</button></div>
+  </div>
+</div>

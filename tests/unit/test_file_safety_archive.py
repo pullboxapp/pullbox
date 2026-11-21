@@ -144,6 +144,9 @@ def test_run_safety_checks_inspects_zip_archive_once(
     assert report.comicinfo_entry == "metadata/ComicInfo.xml"
     assert report.comicinfo_entry_count == 1
     assert report.comicinfo_error is None
+    assert report.metadata_files is not None
+    assert report.metadata_files.comicinfo.payload is not None
+    assert report.metadata_files.metroninfo.entry_count == 0
     assert report.entry_names == (
         "safe/page001.jpg",
         "safe/page002.jpg",

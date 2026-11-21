@@ -61,6 +61,7 @@ _SOURCE_EVIDENCE_DIAGNOSTIC_KEYS = (
     "review_source_previous",
     "review_deferred",
     "review_decision",
+    "reviewed_library_issue",
 )
 
 

@@ -423,7 +423,12 @@ async def test_validate_discovered_files_safety_reuses_compact_archive_evidence(
 
     await validate_discovered_files_safety(db_session, [discovered])
 
-    evidence = discovered.files[0].metadata_diagnostics["archive_member_evidence"]
+    evidence = discovered.files[0].metadata_diagnostics["archive_member_evidence"].copy()
+    reconciled = evidence.pop("metron_import")
+    assert reconciled["primary_source"] is None
+    assert reconciled["number"] == "1"
+    assert reconciled["identities"] == [{"namespace": "comicvine", "kind": "series", "id": "42721"}]
+    assert reconciled["problems"] == []
     assert evidence == {
         "member_index_scanned": True,
         "comicinfo_entry_count": 1,

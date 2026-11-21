@@ -45,12 +45,13 @@
       </tbody></table></div>{% else %}<p class="text-xs text-pb-text-sec">No saved candidates. Search ComicVine to find the correct series.</p>{% endif %}
       {% else %}
       <h3 class="text-[11px] font-semibold uppercase tracking-wider text-pb-text-dim">Files without an issue</h3>
+      {% if library_selection and not row.ready_files %}<button type="button" class="btn-ghost btn-sm" hx-get="/import/{{ job.id }}/series/{{ item.id }}/review-library" hx-target="#cv-search-modal" hx-swap="innerHTML">Change library series</button>{% endif %}
       {% for group in review_file_groups_by_series_id.get(item.id, []) if group.key in ('no_match', 'skipped') %}
       {% for file in group.rows %}<div class="rounded-lg border border-pb-border bg-pb-card/70 p-3">
         <div class="flex flex-wrap items-center justify-between gap-2"><span class="font-mono text-xs text-pb-text [overflow-wrap:anywhere]">{{ file.file_name }}</span><span class="text-xs text-pb-text-dim">{{ file.file_size|filesize }}</span></div>
         {% if file.status == 'skipped' %}<span class="pill pill-neutral" data-import-review-file-outcome="{{ file.id }}">Skipped</span>{% else %}
         {% if metron_row %}
-        <p class="mt-2 text-xs text-pb-text-sec">Choose from the verified {{ identity_label }} issue catalog. Conflicting embedded identities still need corrected linked metadata or a source recheck. You can also skip this file for now.</p>
+        <p class="mt-2 text-xs text-pb-text-sec">Choose from the verified {{ identity_label }} issue catalog. {% if library_selection %}Confirm the issue shown in this file; its filename alone is not proof. {% endif %}Conflicting embedded identities still need corrected linked metadata or a source recheck. You can also skip this file for now.</p>
         {% set native_choices_url = '/import/' ~ job.id ~ '/files/' ~ file.id ~ '/assign-native' %}
         <div class="mt-2 flex flex-wrap gap-2">{% if item.series_id %}<button type="button" class="btn-primary btn-sm" data-testid="import-review-choose-issue" aria-expanded="false" aria-controls="import-review-issue-choices-{{ file.id }}" @click='toggleReviewIssueChoices({{ file.id }}, {{ native_choices_url|tojson|forceescape }}, $event.currentTarget)'>Choose issue</button><a class="btn-ghost btn-sm" href="/series/{{ item.series_id }}" target="_blank" rel="noopener noreferrer">Review linked metadata</a>{% endif %}<button type="button" class="btn-ghost btn-sm" :disabled="reviewActionPending" @click="skipReviewFile({{ item.id }}, {{ file.id }}, $event.currentTarget)">Skip this file</button></div>
         {% if item.series_id %}<div id="import-review-issue-choices-{{ file.id }}" hidden></div>{% endif %}
@@ -61,7 +62,7 @@
           {% else %}hx-get="/import/{{ job.id }}/series/{{ item.id }}/cv-search?file_id={{ file.id }}" hx-target="#cv-search-modal" hx-swap="innerHTML"{% endif %}>Choose issue</button><button type="button" class="btn-ghost btn-sm" data-testid="import-review-reassign-file" hx-get="/import/{{ job.id }}/series/{{ item.id }}/cv-search?file_id={{ file.id }}" hx-target="#cv-search-modal" hx-swap="innerHTML">Different series</button><button type="button" class="btn-ghost btn-sm" :disabled="reviewActionPending" @click="skipReviewFile({{ item.id }}, {{ file.id }}, $event.currentTarget)">Skip this file</button></div>
         {% if issue_choices_url %}<div id="import-review-issue-choices-{{ file.id }}" hidden></div>{% endif %}{% endif %}{% endif %}
       </div>{% endfor %}{% endfor %}
-      {% if metron_row %}<button type="button" class="btn-primary btn-sm" data-testid="import-review-metron-recheck" :disabled="reviewActionPending || {{ 'true' if row.updating else 'false' }}" @click="recheckMetronIdentity({{ item.id }}, $event.currentTarget)">Recheck linked metadata</button>{% endif %}
+      {% if metron_row and not library_selection %}<button type="button" class="btn-primary btn-sm" data-testid="import-review-metron-recheck" :disabled="reviewActionPending || {{ 'true' if row.updating else 'false' }}" @click="recheckMetronIdentity({{ item.id }}, $event.currentTarget)">Recheck linked metadata</button>{% endif %}
       {% if not metron_row %}<button type="button" class="btn-ghost btn-sm" data-testid="import-review-reconcile-action" hx-get="/import/{{ job.id }}/series/{{ item.id }}/reconcile" hx-target="#cv-search-modal" hx-swap="innerHTML">Review all issue decisions</button>{% endif %}
       {% endif %}
     </section>

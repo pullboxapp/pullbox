@@ -27,8 +27,9 @@
   {% set one_page = one_page_review.get(item.id) %}
   {% set compact_one_page = one_page and reason_key == 'single_page_comic' %}
   {% set series_diagnostics = item.diagnostics or {} %}
-  {% set metron_row = item.cv_match_method == 'metron_id' or series_diagnostics.get('metron_import') is not none %}
-  {% set gcd_row = item.cv_match_method == 'gcd_id' or (series_diagnostics.get('metron_import', {}).get('identities', [])|selectattr('namespace', 'equalto', 'gcd')|list|length > 0) %}
+  {% set library_selection = series_diagnostics.get('manual_library_series') %}
+  {% set metron_row = library_selection or item.cv_match_method == 'metron_id' or series_diagnostics.get('metron_import') is not none %}
+  {% set gcd_row = (library_selection and library_selection.namespace == 'gcd') or item.cv_match_method == 'gcd_id' or (series_diagnostics.get('metron_import', {}).get('identities', [])|selectattr('namespace', 'equalto', 'gcd')|list|length > 0) %}
   {% set identity_label = 'GCD' if gcd_row else 'Metron' %}
   {% set metron_series_review = metron_row and reason_key in ('needs_series', 'series_conflict') %}
   {% set known_cv_id = item.user_selected_cv_id or item.cv_id or library_series_cv_ids_by_imported_series_id.get(item.id) %}
@@ -65,6 +66,7 @@
         {% elif reason_key in ('needs_series', 'series_conflict') %}
           {% if metron_row %}{{ review_expander(item, row, false, 'Review identity', true) }}{% else %}
           <button type="button" class="btn-primary btn-sm" data-testid="import-review-primary-action" onclick='return openImportCvSearchModal({jobId: {{ job.id }}, seriesId: {{ item.id }}, query: {{ item.raw_series_name|tojson|forceescape }} })'>Search ComicVine</button>
+          {% if job.source_type.value == 'filesystem' and item.status.value == 'no_match' %}<button type="button" class="btn-ghost btn-sm" data-testid="import-review-choose-library" hx-get="/import/{{ job.id }}/series/{{ item.id }}/review-library" hx-target="#cv-search-modal" hx-swap="innerHTML">Choose library series</button>{% endif %}
           {% endif %}
           <button type="button" class="btn-ghost btn-sm" hx-get="/import/{{ job.id }}/series/{{ item.id }}/review-skip" hx-target="#cv-search-modal" hx-swap="innerHTML">Skip series</button>
         {% elif dangerous_row %}

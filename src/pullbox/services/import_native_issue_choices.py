@@ -54,8 +54,23 @@ async def native_review_context(
     session: AsyncSession, job_id: int, file_id: int
 ) -> tuple[ImportJob, ImportedSeries, ImportedFile, Series, IdentityNamespace]:
     job, parent, file = await load_review_file(session, job_id, file_id)
-    series = await verified_native_import_series(session, parent)
-    namespace = import_identity_namespace(parent.diagnostics.get("metron_import", {}))
+    manual = parent.diagnostics.get("manual_library_series")
+    namespace: IdentityNamespace | None
+    if manual:
+        from pullbox.models.series import Series
+        from pullbox.services.import_library_selection import library_series_identity
+
+        series = await session.get(Series, parent.series_id)
+        if series is None or await library_series_identity(session, series) != manual:
+            raise ValidationError(
+                "The selected library series links changed. Review its metadata first."
+            )
+        from pullbox.core.metadata_identity import IdentityNamespace
+
+        namespace = IdentityNamespace(manual["namespace"])
+    else:
+        series = await verified_native_import_series(session, parent)
+        namespace = import_identity_namespace(parent.diagnostics.get("metron_import", {}))
     if (
         job.source_type != ImportSourceType.FILESYSTEM
         or parent.status != ImportSeriesStatus.DUPLICATE
@@ -95,9 +110,16 @@ async def native_issue_choice(
         )
     await load_metron_issue_targets(session, index, [file])
     candidate, _ = metron_file_candidate(file, index)
+    selection = None
+    manual = parent.diagnostics.get("manual_library_series")
+    if manual:
+        from pullbox.services.import_library_selection import reviewed_issue_proof
+
+        selection = reviewed_issue_proof(file, issue, index)
     return NativeIssueChoice(
         issue,
-        candidate is not None and issue.series_id == series.id,
+        (selection is not None if manual else candidate is not None)
+        and issue.series_id == series.id,
         {
             "actor": actor_id,
             "action": "assign-native",
@@ -108,6 +130,8 @@ async def native_issue_choice(
             "issue_links": [list(key) for key in sorted(index.provider_id_map)],
             "number": issue.effective_issue_number_text,
             "title": issue.title,
+            "manual_series": manual,
+            "selection": selection,
         },
     )
 
@@ -198,7 +222,7 @@ async def assign_native_issue(
         issue.issue_type.value,
         issue.effective_issue_number_text,
     )
-    return await apply_review_file_assignment(
+    result = await apply_review_file_assignment(
         session,
         job,
         parent,
@@ -207,5 +231,11 @@ async def assign_native_issue(
         issue,
         summary,
         issue_cv_id=issue.comicvine_id,
-        method=f"{namespace.value}_id",
+        method="library_review" if choice.scope["selection"] else f"{namespace.value}_id",
     )
+    if choice.scope["selection"]:
+        result.diagnostics = {
+            **result.diagnostics,
+            "reviewed_library_issue": choice.scope["selection"],
+        }
+    return result

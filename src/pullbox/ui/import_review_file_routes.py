@@ -161,6 +161,71 @@ async def view_series_files(
     )
 
 
+@router.get("/import/{job_id}/series/{series_id}/review-library", include_in_schema=False)
+async def preview_library_series(
+    job_id: int,
+    series_id: int,
+    request: Request,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+    q: str = Query("", max_length=200),
+    page: int = Query(1, ge=1),
+) -> Response:
+    from pullbox.services.import_library_selection import (
+        library_selection_context,
+        library_series_identity,
+        library_series_page,
+    )
+    from pullbox.ui.import_routes import _ctx, _templates
+
+    job, parent, scope = await library_selection_context(session, job_id, series_id, user.id)
+    series, page, pages = await library_series_page(session, q, page)
+    choices = []
+    for item in series:
+        identity = await library_series_identity(session, item)
+        signed = await sign_review_scope(
+            session, {**scope, "target": identity, "title": item.title, "year": item.year_start}
+        )
+        choices.append({"series": item, "identity": identity, "token": signed})
+    return _templates().TemplateResponse(
+        request,
+        "partials/import_library_series_choices.html",
+        _ctx(
+            request,
+            user,
+            job=job,
+            series=parent,
+            choices=choices,
+            query=q,
+            page=page,
+            pages=pages,
+        ),
+    )
+
+
+@router.post("/import/{job_id}/series/{series_id}/review-library", include_in_schema=False)
+async def apply_library_series(
+    job_id: int,
+    series_id: int,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+    library_series_id: Annotated[int, Form(gt=0)],
+    token: Annotated[str, Form()],
+) -> Response:
+    from pullbox.services.import_library_selection import choose_library_series
+
+    await choose_library_series(session, job_id, series_id, library_series_id, user.id, token)
+    await session.commit()
+    return JSONResponse(
+        {
+            "message": (
+                "Library series selected. Choose each file's issue before importing; "
+                "no files were selected automatically."
+            )
+        }
+    )
+
+
 @router.get("/import/{job_id}/series/{series_id}/review-{action}", include_in_schema=False)
 async def preview_series_choice(
     job_id: int,
@@ -525,6 +590,7 @@ async def preview_native_assignment(
             query=q,
             native_choices=choices,
             native_assignment=True,
+            manual_library_choice=bool(parent.diagnostics.get("manual_library_series")),
         ),
     )
 

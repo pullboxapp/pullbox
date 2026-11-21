@@ -274,8 +274,10 @@ async def apply_review_file_assignment(
 
 def require_legacy_assignment(parent: ImportedSeries, file: ImportedFile) -> None:
     """Native identity review must not fall through the ComicVine-only picker."""
-    if parent.diagnostics.get("metron_import") or uses_metron_identity(
-        file_metron_evidence(file) or {}
+    if (
+        parent.diagnostics.get("manual_library_series")
+        or parent.diagnostics.get("metron_import")
+        or uses_metron_identity(file_metron_evidence(file) or {})
     ):
         raise ValidationError(
             "Use this file's verified provider issue choices. Conflicting native identities "
