@@ -189,6 +189,23 @@ Mylar extras, filesystem/Mylar sidecar choices, Metron/GCD, all three themes,
 accessibility, cancellation, recovery, and activity/sidebar behavior. The tests
 use synthetic archives and local identities, not live provider availability.
 
+Local browser acceptance imported a recorded Mylar issue alongside separate
+Metron and GCD extras into three existing series. A second run used a compiled
+sidecar and an explicit issue choice, importing one file while leaving its
+neighbor unresolved. Both imports rolled back through the UI, restoring prior
+issue statuses and preserving source bytes, existing library records, and all
+provider links. Selection controls use the displayed matched series title,
+not the original mixed folder's name.
+That label correction passed 130 focused UI checks and 12 sidecar browser cases
+each in Chromium and Firefox, retaining the source-name fallback for unmatched
+titles and the existing selection behavior.
+
+The local lab's nested test root required a temporary, approved disable during
+these Mylar checks and was restored afterward. No overlap validation was
+bypassed, root path rebound, or existing file moved. The standalone exact-GCD
+sidecar and contradictory-number lab fixtures retain automated coverage but
+have not yet been exercised in this live Mylar browser session.
+
 ### Step 3 Selection
 
 An unmatched folder group without native series evidence now offers **Choose
@@ -451,12 +468,15 @@ unchanged. GCD API and automatic acquisition remained disabled.
 
 ## Remaining Scope
 
-This is not the complete provider-aware importer. Compiled sidecar recognition
-and exact native Follow-up rechecks are implemented. Broader Mylar/native
-recovery, manual native issue reassignment in Follow-up, and qualification of
-additional archive formats remain separate milestones.
-This checkpoint targets CBZ folder imports, not additional archive formats.
-It does not qualify PostgreSQL or change Anna's verification work.
+This is not the complete provider-aware importer. Compiled sidecar recognition,
+unrecorded native Mylar groups, exact native Follow-up rechecks, and explicit
+native issue choices in Step 3 and Follow-up are implemented. Missing-series
+search/add also preserves those explicit decisions.
+
+Recorded Mylar cross-provider reconciliation, broader source/safety retry
+qualification, and additional archive formats remain separate milestones. The
+current live acceptance uses synthetic CBZ files and verified local catalogs;
+it does not qualify PostgreSQL or change Anna's verification work.
 
 Regression coverage is in `tests/integration/test_metron_folder_import.py`,
 `tests/integration/test_gcd_folder_import.py`,

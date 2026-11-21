@@ -51,6 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Used matched series names for import selection controls, so files grouped
+  from a mixed source folder remain distinguishable to screen-reader users.
 - Included the visible background activity count in its accessible button label.
 - Kept unresolved native files for existing library series visible in completed
   import Follow-up, showing their matched series rather than the source folder's

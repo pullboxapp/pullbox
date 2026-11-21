@@ -16,6 +16,23 @@ from tests.ui.test_import_review_file_routes import csrf, token
 pytest_plugins = ["conftest_security"]
 
 
+@pytest.mark.parametrize("namespace", ["metron", "gcd"])
+async def test_mylar_ready_selection_names_the_matched_series_not_its_source_folder(
+    authenticated_client, sec_db, tmp_path, namespace
+):
+    async with sec_db() as session:
+        job, service, native, _issue, legacy, *_ = await seed_mylar_native_extra(
+            session, tmp_path, namespace
+        )
+        await service.start_scan(session, job.id)
+        job_id = job.id
+        native_title, legacy_title = native.title, legacy.title
+    response = await authenticated_client.get(f"/import/{job_id}/review-partial?status=ready")
+    assert response.status_code == 200, response.text
+    assert response.text.count(f'aria-label="Import ready files for {native_title}"') == 1
+    assert response.text.count(f'aria-label="Import ready files for {legacy_title}"') == 1
+
+
 async def completed_mylar_extra(session, tmp_path, namespace, **kwargs):
     (
         job,

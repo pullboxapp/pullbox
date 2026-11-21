@@ -107,6 +107,13 @@ def test_sidecar_issue_choice_preserves_neighbors_and_review_shell(
     )
     identity.scroll_into_view_if_needed()
     expect(identity).to_be_visible()
+    expect(
+        page.get_by_role("checkbox", name="Import ready files for Harbor Lights", exact=True)
+    ).to_be_checked()
+    if source_type == "mylar3":
+        expect(
+            page.get_by_role("checkbox", name="Import ready files for Old Harbor", exact=True)
+        ).not_to_be_checked()
     assert_no_axe_violations(page, name=f"sidecar-ready-{source_type}-{namespace}-{theme}")
     page.screenshot(
         path=str(screenshots / f"{browser_name}-{source_type}-{namespace}-{theme}-ready.png")
