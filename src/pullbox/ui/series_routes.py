@@ -607,7 +607,10 @@ async def load_add_series_search_context(
     search_mode: str | None = None,
     source: MetadataSource | None = None,
     cache: MetadataSearchCache | None = None,
+    allowed_sources: tuple[MetadataSource, ...] | None = None,
 ) -> dict[str, object]:
+    if source is not None and allowed_sources is not None and source not in allowed_sources:
+        raise ValueError("The selected source is outside this search scope.")
     settings = get_settings()
     descriptors = describe_source_policies(
         await read_source_policies(session), gcd_api_enabled=settings.metadata_gcd_api_v2_enabled
@@ -634,6 +637,7 @@ async def load_add_series_search_context(
             (item.source.value, SOURCE_LABELS[item.source])
             for item in descriptors
             if SourceCapability.SERIES_SEARCH in item.capabilities
+            and (allowed_sources is None or item.source in allowed_sources)
         ],
         "search_source_messages": [],
         "search_query": normalized_query,
@@ -651,7 +655,7 @@ async def load_add_series_search_context(
         "library_roots_count": roots_count,
     }
 
-    if len(normalized_query) < 2:
+    if len(normalized_query) < 2 or allowed_sources == ():
         return base_context
 
     parsed_query = parse_comicvine_series_query(normalized_query)
@@ -688,7 +692,7 @@ async def load_add_series_search_context(
             SeriesDiscoveryQuery(
                 query=parsed_query.title_query,
                 year=parsed_query.year_hint,
-                sources=[source] if source else None,
+                sources=[source] if source else list(allowed_sources) if allowed_sources else None,
                 search_mode="preview" if preview_mode else "full",
                 limit_per_source=per_page if preview_mode else 100,
             ),

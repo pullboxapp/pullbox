@@ -142,6 +142,12 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
             "apply_library_series",
         ),
         (
+            "/import/{job_id}/series/{series_id}/review-library-search",
+            ("GET",),
+            "search_library_series",
+            "search_library_series",
+        ),
+        (
             "/import/{job_id}/series/{series_id}/review-{action}",
             ("GET",),
             "preview_series_choice",

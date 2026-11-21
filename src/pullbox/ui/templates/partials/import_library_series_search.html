@@ -1,0 +1,42 @@
+{% from "components/dropdown_select.html" import dropdown_select %}
+{% set search_url = '/import/' ~ job.id ~ '/series/' ~ series.id ~ '/review-library-search' %}
+<div x-data='importLibrarySeriesSearch({{ search_config|tojson }})' hx-sync="#cv-search-modal:replace" x-init="$nextTick(() => $refs.searchDialog.focus())" data-testid="import-library-series-search">
+  <div class="modal-shell" x-show="open && !showModal" @keydown.escape.window="close()" @keydown.tab="trapImportReviewDialog($event, $refs.searchDialog)">
+    <div class="modal-backdrop" @click="close()"></div>
+    <div class="modal-panel max-w-3xl max-h-[calc(100dvh-5rem)]" x-ref="searchDialog" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="import-library-search-title">
+      <div class="modal-header shrink-0"><h2 class="modal-title" id="import-library-search-title">Search Metron / GCD</h2></div>
+      <div class="modal-body min-h-0 space-y-3 p-5">
+        <p class="text-sm text-pb-text-sec">Choose a library series, or preview and add a missing one. No files are selected or imported until you choose their issues.</p>
+        <div x-show="addedSeries" x-cloak role="status" class="inline-alert inline-alert-success flex-wrap">
+          <span x-text="addedSeries ? addedSeries.title + ' is in your library.' : ''"></span>
+          <button type="button" class="btn-primary btn-sm" x-ref="chooseAdded" @click="chooseAddedSeries()" :disabled="selecting">Choose added series</button>
+        </div>
+        <form hx-get="{{ search_url }}" hx-target="#cv-search-modal" hx-swap="innerHTML" hx-boost="false" hx-disabled-elt="find button" hx-indicator="#import-library-search-progress" class="flex flex-wrap gap-2">
+          <input type="search" name="q" value="{{ search.search_query }}" minlength="2" required class="input-pb min-w-0 flex-1" aria-label="Search Metron or GCD series" placeholder="Series title">
+          <label for="import-library-source-trigger" class="sr-only">Metadata source</label>
+          {{ dropdown_select(name="source", value=search.search_source, options=search.search_source_options, trigger_id="import-library-source-trigger", root_testid="import-library-search-source", size="sm") }}
+          <button type="submit" class="btn-primary btn-sm">Search sources</button>
+          <span id="import-library-search-progress" class="htmx-indicator text-sm text-pb-text-sec" role="status">Searching metadata sources...</span>
+        </form>
+        {% if search.search_error %}<p role="alert" class="text-sm text-pb-error">{{ search.search_error }}</p>{% endif %}
+        {% for message in search.search_source_messages %}<p class="text-sm text-pb-text-sec">{{ message }}</p>{% endfor %}
+        {% if search.search_results %}<div class="table-shell overflow-x-auto"><table class="downloads-table text-sm"><thead><tr><th>Series</th><th>Year</th><th>Provider</th><th><span class="sr-only">Action</span></th></tr></thead><tbody>
+        {% for row in search.search_results %}<tr><td>{{ row.title }}</td><td>{{ row.year_start or 'Unknown' }}</td><td>{{ row.source_label }}</td><td>
+          {% if row.choice_token %}<form hx-boost="false" @submit.prevent="submit($el)"><input type="hidden" name="token" value="{{ row.choice_token }}"><input type="hidden" name="library_series_id" value="{{ row.library_series_id }}"><button type="submit" class="btn-primary btn-sm whitespace-nowrap" :disabled="selecting">Use series</button></form>
+          {% elif row.identity_needs_review %}<a href="/series/{{ row.library_series_id }}" target="_blank" rel="noopener" class="btn-ghost btn-sm" hx-boost="false">Review library link</a>
+          {% else %}<button type="button" class="btn-primary btn-sm whitespace-nowrap" data-source="{{ row.source }}" data-external-id="{{ row.external_id }}" data-title="{{ row.title }}" @click="previewResult($el)" :disabled="selecting || (addedSeries && addedSeries.source === $el.dataset.source && addedSeries.externalId === $el.dataset.externalId)">Preview &amp; add</button>{% endif %}
+        </td></tr>{% endfor %}
+        </tbody></table></div>
+        {% elif search.search_query|length >= 2 and not search.search_error %}<p class="text-sm text-pb-text-sec">No matching series returned. Try another title or check source availability in Metadata settings.</p>{% endif %}
+        {% if search.search_total_pages > 1 %}<nav class="flex items-center justify-end gap-3 text-xs" aria-label="Metadata search pages">
+          {% if search.search_page > 1 %}<button type="button" class="btn-ghost btn-sm" hx-get="{{ search_url }}?page={{ search.search_page - 1 }}&q={{ search.search_query|urlencode }}&source={{ search.search_source }}" hx-target="#cv-search-modal" hx-swap="innerHTML">Previous</button>{% endif %}
+          <span>{{ search.search_page }} of {{ search.search_total_pages }}</span>
+          {% if search.search_page < search.search_total_pages %}<button type="button" class="btn-ghost btn-sm" hx-get="{{ search_url }}?page={{ search.search_page + 1 }}&q={{ search.search_query|urlencode }}&source={{ search.search_source }}" hx-target="#cv-search-modal" hx-swap="innerHTML">Next</button>{% endif %}
+        </nav>{% endif %}
+        <p role="alert" x-show="error" x-cloak x-text="error" class="text-sm text-pb-error"></p>
+      </div>
+      <div class="modal-footer"><button type="button" class="btn-ghost btn-sm" hx-get="/import/{{ job.id }}/series/{{ series.id }}/review-library" hx-target="#cv-search-modal" hx-swap="innerHTML" :disabled="selecting">Back to library choices</button><button type="button" class="btn-ghost btn-sm" @click="close()" :disabled="selecting">Cancel</button></div>
+    </div>
+  </div>
+  {% with import_library_preview=true, preview_id_prefix='import-library-add' %}{% include "partials/add_series_preview_dialog.html" %}{% endwith %}
+</div>

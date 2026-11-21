@@ -136,6 +136,97 @@ async def test_add_native_series_uses_full_server_catalog_and_is_repeat_safe(
         assert await session.scalar(select(func.count()).select_from(Issue)) == 3
 
 
+async def test_untagged_review_add_uses_real_catalog_then_explicit_issue_and_rollback(
+    authenticated_client, source_add_setup, sec_db, tmp_path, monkeypatch
+):
+    import zipfile
+    from unittest.mock import AsyncMock
+
+    from pullbox.models.import_job import ImportedFile, ImportedFileStatus
+    from pullbox.schemas.import_job import ConfirmImportRequest, ImportJobCreate
+    from tests.integration.test_metron_folder_import import _service
+    from tests.ui.test_import_library_search import discovery
+    from tests.ui.test_import_review_file_routes import token
+
+    fixture = source_add_setup
+    comic = tmp_path / "incoming" / "Unsorted" / "unidentified.cbz"
+    comic.parent.mkdir(parents=True)
+    with zipfile.ZipFile(comic, "w") as archive:
+        archive.writestr("001.jpg", b"synthetic page one")
+        archive.writestr("002.jpg", b"synthetic page two")
+    original = comic.read_bytes()
+    service = _service()
+    async with sec_db() as session:
+        job = await service.create_job(
+            session,
+            ImportJobCreate(
+                source_type="filesystem",
+                source_path=str(tmp_path / "incoming"),
+                target_library_root_id=fixture["body"]["library_root_id"],
+            ),
+        )
+        await service.start_scan(session, job.id)
+        file = await session.scalar(
+            select(ImportedFile).where(ImportedFile.import_job_id == job.id)
+        )
+        job_id, parent_id, file_id = job.id, file.import_series_id, file.id
+    monkeypatch.setattr(
+        "pullbox.ui.series_routes.search_snapshot",
+        AsyncMock(return_value=discovery(identifier="8")),
+    )
+    result = await authenticated_client.get(
+        f"/import/{job_id}/series/{parent_id}/review-library-search?q=Fixture"
+    )
+    assert result.status_code == 200
+    assert "Preview &amp; add" in result.text
+    preview = await authenticated_client.post(
+        "/api/v1/metadata/series/preview",
+        json={key: value for key, value in fixture["body"].items() if key != "source_revision"},
+        headers=csrf(authenticated_client),
+    )
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["issues"]["data"]["total"] == 3
+    added = await authenticated_client.post(
+        "/api/v1/series", json=fixture["body"], headers=csrf(authenticated_client)
+    )
+    assert added.status_code == 201, added.text
+    series_id = added.json()["id"]
+    async with sec_db() as session:
+        file = await session.get(ImportedFile, file_id)
+        assert file.status == ImportedFileStatus.NO_MATCH and not file.include_in_import
+        issue_id = await session.scalar(
+            select(Issue.id).where(
+                Issue.series_id == series_id, func.lower(Issue.issue_number_text) == "13a"
+            )
+        )
+    url = f"/import/{job_id}/series/{parent_id}/review-library"
+    choice = await authenticated_client.get(f"{url}?library_series_id={series_id}")
+    assert choice.status_code == 200
+    selected = await authenticated_client.post(
+        url,
+        data={"token": token(choice.text), "library_series_id": series_id},
+        headers=csrf(authenticated_client),
+    )
+    assert selected.status_code == 200
+    url = f"/import/{job_id}/files/{file_id}/assign-native"
+    choice = await authenticated_client.get(url + "?q=13a")
+    selected = await authenticated_client.post(
+        url,
+        data={"token": token(choice.text), "issue_id": issue_id},
+        headers=csrf(authenticated_client),
+    )
+    assert selected.status_code == 200, selected.text
+    async with sec_db() as session:
+        await service.update_file_selection(session, job_id, file_id, include_in_import=True)
+        await service.confirm_import(session, job_id, ConfirmImportRequest(series_ids=[parent_id]))
+        await service.run_import(session, job_id)
+        file = await session.get(ImportedFile, file_id)
+        assert file.status == ImportedFileStatus.IMPORTED, file.error_message
+        assert await service.rollback_import(session, job_id)
+        assert await session.get(Series, series_id) is not None
+    assert comic.read_bytes() == original
+
+
 async def test_add_from_metron_import_rechecks_same_job_and_preserves_series_on_rollback(
     authenticated_client, source_add_setup, sec_db, tmp_path, monkeypatch
 ):

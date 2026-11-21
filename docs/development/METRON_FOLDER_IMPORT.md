@@ -151,6 +151,46 @@ library selection, native issue choice, and shared review-workspace regressions;
 all 29 cases passed in each of Chromium and Firefox. The suites ran serially
 after the broader validation run.
 
+### Find A Missing Library Series
+
+**Choose library series** now includes **Search Metron / GCD**. This is an
+explicit search using the shared Add Series discovery, configured source
+priority, cache, availability and backoff behavior. Opening the dialog does
+not contact providers. ComicVine search remains on its existing review path.
+
+Existing verified results offer **Use series**, with the same actor-bound
+review token and explicit per-file choices. Missing results offer **Preview &
+add**, using the standard catalog preview and Add Series API. The dialog
+states that this creates an independent library record: cancelling or rolling
+back the import will not remove it, and adding does not select or import files.
+**Choose added series** opens only that exact saved record for confirmation,
+not a title search that could select a different same-name series.
+
+Search results are paginated, both chooser bodies stay within the viewport,
+and cancelled searches cannot reopen the dialog with a late response. Cancelling
+preview returns focus to its result. The review shell remains mounted, and
+ready counts remain unchanged until a file receives an explicit issue decision.
+Source and issue proofs are still revalidated through the existing import and
+rollback services; no archive-writing or recovery rules changed.
+
+Qualification includes real catalog adoption through the shared API followed by
+explicit selection, import and rollback, source-byte preservation, stale review
+rejection before and after provider I/O, search source restrictions, exact-ID
+return, cancellation, all three themes and browser accessibility checks.
+Live provider acceptance on local 8585 remains separate from these deterministic
+tests. This checkpoint does not complete broader Mylar/native, sidecar or
+PostgreSQL qualification.
+
+Checkpoint validation: the new search/add flow and existing native identity
+review regressions pass together in Chromium (16 tests), including accessibility
+checks. The combined run uses separate provider fixture IDs so the search tests
+cannot pre-create the catalog expected to be missing by the recheck tests.
+Full qualification remains pending: the initial `make validate` run reported
+the now-corrected dropdown contract violation and a reader RSS-bound failure;
+the reader module and dropdown contracts subsequently passed together (74 tests).
+A fresh full validation run, Firefox coverage and live provider acceptance are
+still required before treating this checkpoint as release-qualified.
+
 ## Rollback Status
 
 New file-registration journal entries record the issue's status and manual-skip

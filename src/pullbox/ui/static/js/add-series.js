@@ -353,7 +353,49 @@ function importMetronSeries(config) {
   };
 }
 
-function selectResult(payload, sourceEl = null) {
+function importLibrarySeriesSearch(config) {
+  const review = importReviewSeriesChoiceData(config);
+  const shared = addSeries(config);
+  return {
+    ...review,
+    ...shared,
+    addedSeries: null,
+    close(force) {
+      if (this.showModal || this.adding) return;
+      htmx.trigger(document.getElementById('cv-search-modal'), 'htmx:abort');
+      review.close.call(this, force);
+    },
+    closeModal() {
+      if (this.adding) return;
+      shared.closeModal.call(this);
+      this.$nextTick(() => {
+        const target = this.addedSeries ? this.$refs.chooseAdded : this.trigger;
+        if (!this.disposed && target?.isConnected) target.focus({ preventScroll: true });
+      });
+    },
+    previewResult(button) {
+      selectResult({
+        source: button.dataset.source, externalId: button.dataset.externalId,
+        title: button.dataset.title,
+      }, button, this);
+    },
+    afterSeriesAdded(data) {
+      this.addedSeries = { id: data.id, title: data.title || this.selectedTitle, source: this.selectedSource, externalId: this.selectedExternalId };
+    },
+    chooseAddedSeries() {
+      if (!Number.isSafeInteger(this.addedSeries?.id) || this.addedSeries.id < 1 || this.selecting) return;
+      this.selecting = true;
+      this.error = '';
+      performHtmxSwap('GET', `/import/${config.jobId}/series/${config.seriesId}/review-library?library_series_id=${this.addedSeries.id}`, {
+        target: '#cv-search-modal', swap: 'innerHTML',
+      }).catch(() => {
+        this.error = 'The series was added, but this review could not reload. Reopen Choose library series; no files were selected.';
+      }).finally(() => { this.selecting = false; });
+    },
+  };
+}
+
+function selectResult(payload, sourceEl = null, targetComponent = null) {
   const resolvedPayload = (typeof payload === 'number' || typeof payload === 'string')
     ? {
         externalId: sourceEl?.dataset.seriesExternalId || String(payload),
@@ -369,7 +411,7 @@ function selectResult(payload, sourceEl = null) {
       }
     : payload;
   const el = document.getElementById('add-series-app');
-  const component = Alpine.$data(el);
+  const component = targetComponent || Alpine.$data(el);
   if (component.adding) return;
   component.trigger = sourceEl || document.activeElement;
   component.selectedSource = resolvedPayload.source || 'comicvine_api';

@@ -20,7 +20,7 @@
       role="dialog"
       data-testid="add-series-dialog"
       aria-modal="true"
-      aria-labelledby="add-series-dialog-title"
+      aria-labelledby="{{ preview_id_prefix|default('add-series') }}-dialog-title"
       tabindex="-1"
       x-ref="dialog"
       @keydown.tab="trapFocus($event)"
@@ -38,7 +38,7 @@
             @error="selectedCoverUrl = ''">
         </div>
         <div class="min-w-0 flex-1 space-y-1">
-          <h3 id="add-series-dialog-title" class="add-series-modal-title" x-text="selectedTitle + (selectedYear ? ' (' + selectedYear + ')' : '')"></h3>
+          <h3 id="{{ preview_id_prefix|default('add-series') }}-dialog-title" class="add-series-modal-title" x-text="selectedTitle + (selectedYear ? ' (' + selectedYear + ')' : '')"></h3>
           <p class="add-series-modal-subtitle">
             <span x-text="selectedPublisher || 'Unknown publisher'"></span>
             <template x-if="selectedIssueCount">
@@ -56,6 +56,7 @@
 
       <div class="modal-body min-h-0 p-5 sm:p-6 space-y-5">
         {% if import_metron_preview|default(false) %}<p class="text-sm text-pb-text-sec">Adding creates a library series and rechecks this import. It does not select or import files. Cancelling or rolling back this import will not remove the added series.</p>{% endif %}
+        {% if import_library_preview|default(false) %}<p class="text-sm text-pb-text-sec">Adding creates a library series. Then choose it for this review and match each file to an issue. No files are selected or imported. Cancelling or rolling back this import will not remove the added series.</p>{% endif %}
         <div x-show="previewLoading" data-testid="add-series-preview-status" role="status" aria-live="polite" class="flex items-center gap-2 text-sm text-pb-text-sec">
           <svg class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
@@ -86,9 +87,9 @@
           <p class="add-series-modal-section-label">Library settings</p>
 
           <div class="add-series-modal-row">
-            <label for="add-series-root" class="add-series-modal-row-label">Library root</label>
+            <label for="{{ preview_id_prefix|default('add-series') }}-root" class="add-series-modal-row-label">Library root</label>
             <div class="min-w-0 flex-1">
-              <input id="add-series-root" data-testid="add-series-root-display"
+              <input id="{{ preview_id_prefix|default('add-series') }}-root" data-testid="add-series-root-display"
                 type="text" :value="rootLabel" x-show="libraryRootId" readonly disabled
                 class="input-pb w-full add-series-root-display">
               <div x-show="!libraryRootId" class="inline-alert inline-alert-warning">

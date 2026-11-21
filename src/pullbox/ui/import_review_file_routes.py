@@ -1,6 +1,6 @@
 """Bounded individual file decisions for the guided import review."""
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Form, Query, Request
 from fastapi.responses import JSONResponse
@@ -170,6 +170,7 @@ async def preview_library_series(
     session: DbSession,
     q: str = Query("", max_length=200),
     page: int = Query(1, ge=1),
+    library_series_id: int | None = Query(None, gt=0),
 ) -> Response:
     from pullbox.services.import_library_selection import (
         library_selection_context,
@@ -179,7 +180,7 @@ async def preview_library_series(
     from pullbox.ui.import_routes import _ctx, _templates
 
     job, parent, scope = await library_selection_context(session, job_id, series_id, user.id)
-    series, page, pages = await library_series_page(session, q, page)
+    series, page, pages = await library_series_page(session, q, page, series_id=library_series_id)
     choices = []
     for item in series:
         identity = await library_series_identity(session, item)
@@ -223,6 +224,89 @@ async def apply_library_series(
                 "no files were selected automatically."
             )
         }
+    )
+
+
+@router.get("/import/{job_id}/series/{series_id}/review-library-search", include_in_schema=False)
+async def search_library_series(
+    job_id: int,
+    series_id: int,
+    request: Request,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+    q: str = Query("", max_length=200),
+    page: int = Query(1, ge=1),
+    source: Annotated[Literal["all", "metron_api", "gcd_local", "gcd_api_v2"], Query()] = "all",
+) -> Response:
+    from pullbox.core.metadata_identity import MetadataSource
+    from pullbox.models.series import Series
+    from pullbox.services.import_library_selection import (
+        library_selection_context,
+        library_series_identity,
+    )
+    from pullbox.services.library_root_management import list_library_roots
+    from pullbox.ui.import_routes import _ctx, _templates
+    from pullbox.ui.series_routes import _request_search_cache, load_add_series_search_context
+
+    actor_id = user.id
+    await library_selection_context(session, job_id, series_id, actor_id)
+    search = await load_add_series_search_context(
+        session,
+        q,
+        "relevance",
+        page,
+        source=MetadataSource(source) if source != "all" else None,
+        allowed_sources=(
+            MetadataSource.METRON_API,
+            MetadataSource.GCD_LOCAL,
+            MetadataSource.GCD_API_V2,
+        ),
+        cache=_request_search_cache(request),
+    )
+    # Provider I/O ends the prior transaction. Revalidate the review before offering choices.
+    job, parent, scope = await library_selection_context(session, job_id, series_id, actor_id)
+    await session.refresh(user)
+    rows = search["search_results"]
+    if isinstance(rows, list):
+        for row in rows:
+            if not row["already_added"]:
+                continue
+            item = await session.get(Series, row["library_series_id"])
+            if item is not None:
+                identity = await library_series_identity(session, item)
+                row["choice_token"] = await sign_review_scope(
+                    session,
+                    {**scope, "target": identity, "title": item.title, "year": item.year_start},
+                )
+    roots = [
+        root
+        for root in await list_library_roots(session)
+        if all(
+            root[key]
+            for key in ("enabled", "allow_managed_writes", "available", "readable", "writable")
+        )
+    ]
+    root = next((root for root in roots if root["id"] == job.target_library_root_id), None)
+    if job.target_library_root_id is None:
+        root = next((root for root in roots if root["is_default_managed_destination"]), None)
+    return _templates().TemplateResponse(
+        request,
+        "partials/import_library_series_search.html",
+        _ctx(
+            request,
+            user,
+            job=job,
+            series=parent,
+            search=search,
+            search_config={
+                "jobId": job_id,
+                "seriesId": series_id,
+                "action": "library",
+                "libraryRootId": root["id"] if root else None,
+                "rootLabel": f"{root['path']} - {root['name']}" if root else "",
+            },
+        ),
+        headers={"Cache-Control": "no-store"},
     )
 
 

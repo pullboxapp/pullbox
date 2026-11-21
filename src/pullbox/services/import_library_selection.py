@@ -96,7 +96,7 @@ async def library_selection_context(
 
 
 async def library_series_page(
-    session: AsyncSession, query: str, page: int
+    session: AsyncSession, query: str, page: int, *, series_id: int | None = None
 ) -> tuple[list[Series], int, int]:
     verified = select(SeriesExternalIdentity.series_id).where(
         SeriesExternalIdentity.identity_namespace.in_(
@@ -105,6 +105,8 @@ async def library_series_page(
         SeriesExternalIdentity.verification_state == IdentityVerificationState.VERIFIED,
     )
     filters: list[ColumnElement[bool]] = [Series.id.in_(verified)]
+    if series_id is not None:
+        filters.append(Series.id == series_id)
     if query.strip():
         filters.append(func.lower(Series.title).contains(query.strip().lower(), autoescape=True))
     total = int(await session.scalar(select(func.count(Series.id)).where(*filters)) or 0)
