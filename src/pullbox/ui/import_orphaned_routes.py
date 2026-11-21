@@ -248,6 +248,7 @@ async def import_orphaned_recovery(
             request,
             user,
             imported_series=payload["imported_series"],
+            native_recovery=payload.get("native_recovery", False),
             issue_options=payload["issue_options"],
             files=payload["files"],
             requires_library_root=payload["requires_library_root"],

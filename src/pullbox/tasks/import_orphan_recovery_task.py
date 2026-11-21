@@ -31,6 +31,8 @@ def get_orphan_recovery_progress_state(
 async def start_orphan_recovery_run(
     imported_series_id: int,
     request: RecoverOrphanRequest,
+    *,
+    actor_id: int | None = None,
 ) -> OrphanRecoveryProgressResponse:
     """Start a background orphan-recovery run unless one is already active."""
     async with _orphan_recovery_start_lock:
@@ -55,7 +57,9 @@ async def start_orphan_recovery_run(
         _orphan_recovery_states[imported_series_id] = initial
 
         task = asyncio.create_task(
-            _run_orphan_recovery(imported_series_id, request.model_dump(mode="python"))
+            _run_orphan_recovery(
+                imported_series_id, request.model_dump(mode="python"), actor_id=actor_id
+            )
         )
         _background_tasks.add(task)
         task.add_done_callback(_background_tasks.discard)
@@ -89,6 +93,8 @@ async def _queue_orphan_recovery_progress(
 async def _run_orphan_recovery(
     imported_series_id: int,
     request_payload: dict[str, Any],
+    *,
+    actor_id: int | None = None,
 ) -> None:
     from pullbox.composition.services import build_import_service
 
@@ -160,6 +166,7 @@ async def _run_orphan_recovery(
                 imported_series_id,
                 request,
                 progress_callback=progress_callback,
+                **({"actor_id": actor_id} if actor_id is not None else {}),
             )
             await session.commit()
             completed = _set_orphan_recovery_state(

@@ -5,6 +5,7 @@
   class="modal-shell"
   x-data="orphanedRecoveryModal({
     importedSeriesId: {{ imported_series.id }},
+    nativeRecovery: {{ (native_recovery|default(false))|tojson }},
     csrfToken: {{ csrf_token|tojson|forceescape }},
     requiresLibraryRoot: {{ requires_library_root|tojson }},
     selectedLibraryRootId: {{ selected_library_root_id|tojson|forceescape }},
@@ -24,16 +25,19 @@
   ></div>
 
   <div
-    class="modal-panel max-w-5xl"
+    class="modal-panel max-w-5xl max-h-[calc(100dvh-5rem)] min-h-0"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="orphaned-recovery-title-{{ imported_series.id }}"
     x-transition:enter="transition ease-out duration-200"
     x-transition:enter-start="opacity-0 translate-y-2 scale-95"
     x-transition:enter-end="opacity-100 translate-y-0 scale-100"
     @click.outside="if (!$event.target.closest('[data-dropdown-select-panel]')) { open = false; closeOrphanedModal() }"
   >
-    <div class="modal-header">
+    <div class="modal-header shrink-0">
       <div class="space-y-1">
         <p class="text-[11px] font-medium uppercase tracking-[0.14em] text-pb-brand">Recover files</p>
-        <h3 class="text-base font-semibold text-pb-text">{{ imported_series.cv_title or imported_series.raw_series_name }}</h3>
+        <h3 id="orphaned-recovery-title-{{ imported_series.id }}" class="text-base font-semibold text-pb-text">{{ imported_series.cv_title or imported_series.raw_series_name }}</h3>
         {% if imported_series.status.value == 'imported' %}
           <p class="text-xs leading-5 text-pb-text-dim">This series is already in the library. Finish the leftover file decisions here by assigning each file to an issue or skipping it for now.</p>
         {% else %}
@@ -52,7 +56,7 @@
       </button>
     </div>
 
-    <div class="modal-body">
+    <div class="modal-body min-h-0">
       <div class="space-y-4 px-5 py-5">
         <div class="grid gap-3 md:grid-cols-4">
           <div class="rounded-lg border border-pb-border bg-pb-card px-3 py-3">
@@ -202,6 +206,15 @@
                             Skipped during recovery
                           {% endif %}
                         </span>
+                      {% elif native_recovery %}
+                        <button type="button" class="btn-ghost btn-sm"
+                          id="orphaned-recovery-issue-trigger-{{ file.imported_file_id }}"
+                          data-testid="orphaned-recovery-issue-trigger-{{ file.imported_file_id }}"
+                          :disabled="isFileSkipped({{ file.imported_file_id }}) || recovering"
+                          :aria-expanded="nativeChoiceOpen[{{ file.imported_file_id }}] ? 'true' : 'false'"
+                          aria-controls="native-recovery-choices-{{ file.imported_file_id }}"
+                          @click="toggleNativeChoice({{ imported_series.import_job_id }}, {{ file.imported_file_id }})"
+                          x-text="nativeSelections[{{ file.imported_file_id }}]?.label || 'Choose issue'">Choose issue</button>
                       {% else %}
                         {{ dropdown_select(
                           name="orphaned-recovery-issue-select-" ~ file.imported_file_id,
@@ -264,6 +277,17 @@
                       {% endif %}
                     </td>
                   </tr>
+                  {% if native_recovery and not file.decision_locked %}
+                  <tr x-cloak x-show="nativeChoiceOpen[{{ file.imported_file_id }}]" id="native-recovery-choices-{{ file.imported_file_id }}">
+                    <td colspan="5">
+                      <div x-show="!nativeChoiceErrors[{{ file.imported_file_id }}]" id="import-review-issue-choices-{{ file.imported_file_id }}"><p role="status" class="text-sm text-pb-text-sec">Loading verified issues...</p></div>
+                      <div x-cloak x-show="nativeChoiceErrors[{{ file.imported_file_id }}]" class="space-y-2">
+                        <p role="alert" class="text-sm text-pb-error" x-text="nativeChoiceErrors[{{ file.imported_file_id }}]"></p>
+                        <button type="button" class="btn-ghost btn-sm" @click="loadNativeChoices({{ imported_series.import_job_id }}, {{ file.imported_file_id }})">Retry issue choices</button>
+                      </div>
+                    </td>
+                  </tr>
+                  {% endif %}
                 {% endfor %}
               </tbody>
             </table>

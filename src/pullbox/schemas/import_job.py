@@ -392,6 +392,10 @@ class OrphanRecoveryDecision(BaseModel):
         gt=0,
         description="ComicVine issue ID to assign when action=assign",
     )
+    library_issue_id: int | None = Field(None, gt=0, description="Reviewed native library issue")
+    review_token: str | None = Field(
+        None, max_length=16384, description="Signed native issue choice"
+    )
 
 
 class ImportReconcileDecision(BaseModel):
@@ -925,6 +929,7 @@ class OrphanRecoveryResponse(BaseModel):
     """Recovery modal payload for an orphaned import series."""
 
     imported_series: ImportedSeriesRead
+    native_recovery: bool = False
     issue_options: list[OrphanRecoveryIssueOption] = Field(default_factory=list)
     files: list[OrphanRecoveryFileRead] = Field(default_factory=list)
     requires_library_root: bool = False

@@ -51,9 +51,20 @@ class NativeIssueChoice:
 
 
 async def native_review_context(
-    session: AsyncSession, job_id: int, file_id: int
+    session: AsyncSession, job_id: int, file_id: int, *, follow_up: bool = False
 ) -> tuple[ImportJob, ImportedSeries, ImportedFile, Series, IdentityNamespace]:
-    job, parent, file = await load_review_file(session, job_id, file_id)
+    if follow_up:
+        from pullbox.core.exceptions import NotFoundError
+        from pullbox.services.import_orphan_recovery_context import load_orphan_recovery_item
+
+        file = await session.get(ImportedFile, file_id)
+        if file is None or file.import_job_id != job_id:
+            raise NotFoundError("ImportedFile", file_id)
+        job, parent = await load_orphan_recovery_item(session, file.import_series_id)
+        if job.control_request != ImportControlRequest.NONE:
+            raise ValidationError("This import is busy. Try again after it finishes.")
+    else:
+        job, parent, file = await load_review_file(session, job_id, file_id)
     manual = parent.diagnostics.get("manual_library_series")
     namespace: IdentityNamespace | None
     if manual:
@@ -73,7 +84,7 @@ async def native_review_context(
         namespace = import_identity_namespace(parent.diagnostics.get("metron_import", {}))
     if (
         job.source_type != ImportSourceType.FILESYSTEM
-        or parent.status != ImportSeriesStatus.DUPLICATE
+        or (not follow_up and parent.status != ImportSeriesStatus.DUPLICATE)
         or parent.user_selected_cv_id is not None
         or series is None
         or series.id != parent.series_id

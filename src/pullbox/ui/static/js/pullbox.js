@@ -17841,6 +17841,9 @@ function orphanedRecoveryModal(config) {
     saving: false,
     recovering: false,
     skippedFileIds: {},
+    nativeSelections: {},
+    nativeChoiceOpen: {},
+    nativeChoiceErrors: {},
     recoveryPollTimer: null,
     recoveryState: "idle",
     recoveryMessage: "",
@@ -17856,6 +17859,42 @@ function orphanedRecoveryModal(config) {
       cfg.selectedLibraryRootId != null && cfg.selectedLibraryRootId !== false
         ? String(cfg.selectedLibraryRootId)
         : "",
+
+    toggleNativeChoice: function (jobId, fileId) {
+      var opened = !this.nativeChoiceOpen[fileId];
+      this.nativeChoiceOpen = Object.assign({}, this.nativeChoiceOpen, { [fileId]: opened });
+      var target = document.getElementById("import-review-issue-choices-" + fileId);
+      if (!opened || !target || target.dataset.importReviewIssueChoicesLoaded === "true") return;
+      this.loadNativeChoices(jobId, fileId);
+    },
+
+    loadNativeChoices: function (jobId, fileId) {
+      var self = this;
+      var target = document.getElementById("import-review-issue-choices-" + fileId);
+      if (!target) return;
+      this.nativeChoiceErrors = Object.assign({}, this.nativeChoiceErrors, { [fileId]: "" });
+      var failed = function () {
+        self.nativeChoiceErrors = Object.assign({}, self.nativeChoiceErrors, {
+          [fileId]: "Could not load verified issues. Retry, or close and reopen recovery if the series links changed. You can still skip this file.",
+        });
+      };
+      htmx.ajax("GET", "/import/" + jobId + "/files/" + fileId + "/assign-native?follow_up=true", {
+        target: target, swap: "outerHTML",
+      }).then(function () {
+        var loaded = document.getElementById("import-review-issue-choices-" + fileId);
+        if (loaded && loaded.dataset.importReviewIssueChoicesLoaded !== "true") failed();
+      }).catch(failed);
+    },
+
+    chooseNativeIssue: function (fileId, issueId, token, label) {
+      this.nativeSelections = Object.assign({}, this.nativeSelections, {
+        [fileId]: { library_issue_id: issueId, review_token: token, label: label },
+      });
+      this.clearSkip(fileId);
+      this.nativeChoiceOpen = Object.assign({}, this.nativeChoiceOpen, { [fileId]: false });
+      var trigger = document.getElementById("orphaned-recovery-issue-trigger-" + fileId);
+      if (trigger) trigger.focus();
+    },
 
     init: function () {
       if (cfg.initialRecoveryProgress && typeof cfg.initialRecoveryProgress === "object") {
@@ -18138,6 +18177,16 @@ function orphanedRecoveryModal(config) {
           return;
         }
 
+        var native = self.nativeSelections[fileId];
+        if (cfg.nativeRecovery && native) {
+          decisions.push({
+            imported_file_id: fileId,
+            action: "assign",
+            library_issue_id: native.library_issue_id,
+            review_token: native.review_token,
+          });
+          return;
+        }
         var issueCvId = issueSelect ? parseInt(issueSelect.value || "", 10) : NaN;
         if (Number.isFinite(issueCvId) && issueCvId > 0) {
           decisions.push({
@@ -18163,7 +18212,7 @@ function orphanedRecoveryModal(config) {
       var assignCount = decisions.filter(function (decision) {
         return decision.action === "assign";
       }).length;
-      if (assignCount === 0 && !hasExistingImported) {
+      if (assignCount === 0 && !hasExistingImported && !cfg.nativeRecovery) {
         return {
           error: "Assign at least one file before completing recovery.",
         };

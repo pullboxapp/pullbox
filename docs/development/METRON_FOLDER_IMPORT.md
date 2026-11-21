@@ -446,10 +446,9 @@ an alternate copy of an owned issue remains a conflict rather than replacing it.
 Explicit series/issue choices that lack automatic exact identity proof are not
 silently inferred by this action. The existing Mylar recovery path is unchanged.
 
-This checkpoint does not provide the still-needed native manual issue chooser
-inside the Follow-up recovery dialog. A failed exact recheck is not evidence that
-the file should be forced into a match. PostgreSQL and combined release
-qualification also remain incomplete.
+Manual native issue choices are a separate action described below. A failed exact
+recheck is not evidence that the file should be forced into a match. PostgreSQL
+and combined release qualification also remain incomplete.
 
 The focused browser checkpoint passes six cases each in Chromium and Firefox:
 Metron and GCD across light, dark, and Tron themes. It covers the authenticated
@@ -461,4 +460,48 @@ fixed or claimed as passing by this checkpoint. The focused regression suite
 passes 258 tests covering native imports, deferred recovery, mixed folders,
 Mylar keep-in-place behavior, cancellation, ownership, and rollback. Ruff and
 focused strict mypy also pass. No full CI, public release, or production
+deployment is implied.
+
+## Manual Native Follow-up Choices
+
+For completed folder imports with a verified or explicitly selected native
+library series, **Follow-up > Match issues > Choose issue** now uses that series'
+saved Metron/GCD catalog. Search and 25-item pagination stay inside the recovery
+dialog, with a ten-row scrolling issue list. The dialog body scrolls while its
+Save and Close actions remain visible. A failed initial list request offers Retry
+or Skip rather than leaving the loading message indefinitely.
+
+Selecting **Use this** only stages the choice in the dialog. **Save recovery
+choices** submits all remaining decisions to the existing background recovery
+worker. Files may also all be skipped without inventing an issue match. No
+provider calls, catalog changes, or metadata-link creation are performed by the
+picker or the recovery action.
+
+Choices are signed for the authenticated user and current file, series, issue,
+and provider-link evidence. Recovery validates the whole decision set before
+applying it. Changed or conflicting identities are rejected; source signatures
+are rechecked at placement. Owned copies remain untouched, competing copies
+remain conflicts, and native groups containing already-owned or duplicate-file
+records do not reopen after their remaining decisions are completed. Existing
+ComicVine/Mylar recovery and Step 3 selection continue through their existing
+paths. Import settings, source preservation, and rollback still apply.
+
+This does not yet add a native series-selection workflow to completed-import
+groups that have no identified library series. Those groups must not be coerced
+into a ComicVine match. Broader provider-aware Mylar matching, PostgreSQL
+qualification, and combined v2 release qualification remain separate work.
+
+Regression-first coverage includes signed choices, user mismatch, stale links,
+changed source bytes, locked files, duplicate decisions, all-skip, owned copies,
+competing copies, resolved neighbors, and rollback. The focused integration,
+service, API, task, UI-route, and Mylar regression set passes 203 tests. Browser
+coverage exercises Metron/GCD in light, dark, and Tron themes, including search,
+pagination, retry, unsaved-choice isolation, background completion, and source
+preservation. Accessibility checks cover the recovery dialog, not the unrelated
+shared-header finding noted above. Chromium and Firefox each pass 17 focused
+browser cases, including the existing Step 3 picker and Follow-up navigation;
+each run skips one older recovery-row test because its baseline fixture has no
+recovery-pending row. The new native workflow has no skipped cases. Mobile checks
+keep the dialog and Save action inside the viewport. Ruff, focused strict mypy,
+JavaScript syntax, and the stylesheet build pass. No full CI or production
 deployment is implied.

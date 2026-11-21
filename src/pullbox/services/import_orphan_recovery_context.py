@@ -16,6 +16,7 @@ from pullbox.models.import_job import (
     ImportJob,
     ImportJobStatus,
     ImportSeriesStatus,
+    ImportSourceType,
 )
 from pullbox.models.issue import Issue
 from pullbox.models.library import LibraryRoot
@@ -74,7 +75,12 @@ async def build_orphan_recovery_context(
     )
     files = list(files_result.scalars().all())
 
-    issue_options = await _load_recovery_issue_options(session, item, metadata_service)
+    from pullbox.services.import_native_recovery import native_recovery_row
+
+    native = job.source_type == ImportSourceType.FILESYSTEM and native_recovery_row(item)
+    issue_options = (
+        [] if native else await _load_recovery_issue_options(session, item, metadata_service)
+    )
     file_rows, files_remaining, files_completed = _build_recovery_file_rows(files, issue_options)
 
     available_library_roots: list[dict[str, Any]] = []
@@ -93,6 +99,7 @@ async def build_orphan_recovery_context(
 
     return {
         "imported_series": item,
+        "native_recovery": native,
         "issue_options": issue_options,
         "files": file_rows,
         "requires_library_root": requires_library_root,

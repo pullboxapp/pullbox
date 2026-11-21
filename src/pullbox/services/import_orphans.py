@@ -450,14 +450,21 @@ async def recover_orphan(
     recompute_series_counters: RecomputeSeriesCountersFunc,
     log_event: ImportEventLogger,
     progress_callback: ProgressCallback | None = None,
+    actor_id: int | None = None,
 ) -> dict[str, Any]:
     """Create/reuse the local series and import selected files for delayed recovery."""
     require_retained_import_destination(job)
     job_id = job.id
     item_id = item.id
+    from pullbox.models.import_job import ImportSourceType
+    from pullbox.services.import_native_recovery import native_recovery_row
+
+    native = job.source_type == ImportSourceType.FILESYSTEM and native_recovery_row(item)
     has_identified_series = (
-        item.status == ImportSeriesStatus.RECOVERY_PENDING and item.cv_id is not None
-    ) or (item.status == ImportSeriesStatus.IMPORTED and item.series_id is not None)
+        (item.status == ImportSeriesStatus.RECOVERY_PENDING and item.cv_id is not None)
+        or (item.status == ImportSeriesStatus.IMPORTED and item.series_id is not None)
+        or (native and item.series_id is not None)
+    )
     if not has_identified_series:
         raise ValidationError("Choose a ComicVine match before saving recovery decisions.")
 
@@ -482,7 +489,7 @@ async def recover_orphan(
 
     has_existing_import = any(imp_file.status == ImportedFileStatus.IMPORTED for imp_file in files)
     assign_count = sum(1 for decision in request.decisions if decision.action == "assign")
-    if assign_count == 0 and not has_existing_import:
+    if assign_count == 0 and not has_existing_import and not native:
         raise ValidationError("Assign at least one file before completing recovery.")
 
     if item.series_id is not None:
@@ -516,13 +523,18 @@ async def recover_orphan(
                 ),
             )
 
-    cv_id_to_issue, _, _ = await load_issue_lookup_for_series(session, series.id)
-    apply_orphan_recovery_decisions(
-        item=item,
-        files=files,
-        decisions=request.decisions,
-        cv_id_to_issue=cv_id_to_issue,
-    )
+    if native:
+        from pullbox.services.import_native_orphan_recovery import apply_native_orphan_decisions
+
+        await apply_native_orphan_decisions(session, job, item, files, request, actor_id)
+    else:
+        cv_id_to_issue, _, _ = await load_issue_lookup_for_series(session, series.id)
+        apply_orphan_recovery_decisions(
+            item=item,
+            files=files,
+            decisions=request.decisions,
+            cv_id_to_issue=cv_id_to_issue,
+        )
 
     await process_series_files(
         session,
@@ -547,7 +559,23 @@ async def recover_orphan(
         .order_by(ImportedFile.id.asc())
     )
     refreshed_files = list(remaining_result.scalars().all())
-    recovery_summary = summarize_orphan_recovery_result(item=item, files=refreshed_files)
+    summary_files = refreshed_files
+    if native:
+        # Resolved alternates have no remaining decision and must not reopen the group.
+        summary_files = [
+            file
+            for file in refreshed_files
+            if file.status
+            not in {ImportedFileStatus.ALREADY_OWNED, ImportedFileStatus.DUPLICATE_FILE}
+        ]
+    recovery_summary = summarize_orphan_recovery_result(item=item, files=summary_files)
+    if (
+        native
+        and recovery_summary["files_remaining"] == 0
+        and recovery_summary["imported_count"] == 0
+    ):
+        item.status = ImportSeriesStatus.SKIPPED
+        recovery_summary["status"] = item.status
     await log_event(
         session,
         job.id,

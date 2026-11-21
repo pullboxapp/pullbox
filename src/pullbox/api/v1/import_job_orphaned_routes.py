@@ -119,6 +119,7 @@ async def get_orphan_recovery(
     payload = await service.get_orphan_recovery_context(session, imported_series_id)
     return OrphanRecoveryResponse(
         imported_series=ImportedSeriesRead.model_validate(payload["imported_series"]),
+        native_recovery=bool(payload.get("native_recovery", False)),
         issue_options=payload["issue_options"],
         files=payload["files"],
         requires_library_root=bool(payload["requires_library_root"]),
@@ -141,7 +142,7 @@ async def recover_orphan(
 ) -> RecoverOrphanResponse:
     """Finalize one guided unmatched recovery pass."""
     service = await _build_orphan_import_service(session)
-    payload = await service.recover_orphan(session, imported_series_id, body)
+    payload = await service.recover_orphan(session, imported_series_id, body, actor_id=_user.id)
     await session.commit()
     return RecoverOrphanResponse(**payload)
 
@@ -158,7 +159,7 @@ async def start_orphan_recovery(
     session: DbSession,
 ) -> OrphanRecoveryProgressResponse:
     """Start a background orphan recovery run and return its initial progress state."""
-    progress = await start_orphan_recovery_run(imported_series_id, body)
+    progress = await start_orphan_recovery_run(imported_series_id, body, actor_id=_user.id)
     await project_orphan_recovery_operation_progress(session, progress)
     await session.commit()
     return progress

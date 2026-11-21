@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added folder-import recognition of compiled `series.json` provider identities.
   Exact file identities can match verified local issues across linked providers;
   a series-only sidecar still requires an explicit issue choice for each file.
+- Added searched, paginated Metron/GCD issue choices to completed-import Follow-up
+  for identified library series. Choices remain local until saved; stale links,
+  competing copies, and changed sources cannot silently replace owned files.
 - Added opt-in Metron API and read-only GCD Local series search, provider linking,
   and reviewed metadata refresh alongside the existing ComicVine sources.
 - Added explicit existing-CBZ metadata review and coordinated ComicInfo.xml and

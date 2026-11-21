@@ -169,6 +169,8 @@ class ImportServiceRecoveryMixin:
         imported_series_id: int,
         request: RecoverOrphanRequest,
         progress_callback: ReportFileProgressFunc | None = None,
+        *,
+        actor_id: int | None = None,
     ) -> dict[str, Any]:
         """Create/reuse the local series and import the selected unmatched files."""
         job, item = await self._load_orphan_recovery_item(session, imported_series_id)
@@ -184,6 +186,7 @@ class ImportServiceRecoveryMixin:
             recompute_series_counters=self._recompute_series_counters,
             log_event=self._log_event,
             progress_callback=progress_callback,
+            actor_id=actor_id,
         )
 
     async def dismiss_orphan(
