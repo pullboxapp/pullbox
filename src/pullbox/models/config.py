@@ -28,6 +28,7 @@ DEFAULT_SYSTEM_CONFIG: dict[str, tuple[str, str]] = {
     "stall_timeout_hours": ("1", "int"),
     # Metadata
     "metadata_refresh_days": ("7", "int"),
+    "series_sidecars_on_refresh": ("false", "bool"),
     "comicvine_rate_limit_per_second": ("1", "int"),
     "comicvine_api_key": ("", "secret"),
     # Library

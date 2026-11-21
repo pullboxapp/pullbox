@@ -20,6 +20,18 @@ override keeps the current value until configured refresh supplies a replacement
 Missing source values cannot silently erase data. Required values cannot be
 cleared. User choices remain available after validation errors.
 
+**Settings > Metadata > Refresh policy > Write series.json on manual refresh** is
+off by default. When enabled, clicking **Refresh metadata** on a series saves
+the library metadata first, then updates eligible managed folders from the same
+saved snapshot. Unchanged sidecars are not rewritten. This does not change
+comic files, run during scheduled refresh or import, or grant file writes to
+API-key clients.
+
+If a folder is skipped, **Review series.json folders** opens the existing
+read-only preview. It explains each folder's status, including files kept in
+place. After correcting a writable folder, use **Write series.json** in that
+preview; there is no need to contact a provider or repeat the catalog refresh.
+
 ## Field Inventory
 
 | Field | Scope and output |

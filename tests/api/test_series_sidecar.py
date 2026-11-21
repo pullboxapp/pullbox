@@ -66,6 +66,117 @@ async def write(client, series_id, data):
     )
 
 
+@pytest.fixture
+def provider_refresh(monkeypatch):
+    from pullbox.services import metadata_series_refresh
+
+    async def refresh(session, series_id):
+        series = await session.get(Series, series_id)
+        series.title = "Refreshed title"
+        return series
+
+    monkeypatch.setattr(metadata_series_refresh, "refresh_series_from_sources", refresh)
+
+
+async def test_refresh_updates_managed_split_but_preserves_referenced_folder(
+    authenticated_client, sec_db, sidecar_target, provider_refresh
+):
+    from pullbox.models.config import SystemConfig
+
+    series_id, folder, root = sidecar_target
+    split, reference = root / "Split", root / "Keep"
+    (folder / "series.json").write_text('{"metadata":{"comicid":42},"custom":"keep"}')
+    async with sec_db.begin() as session:
+        session.add(SystemConfig(key="series_sidecars_on_refresh", value="true", value_type="bool"))
+        series = await session.get(Series, series_id)
+        for n, (path, mode) in enumerate(
+            [
+                (split, LibraryFileStorageMode.MANAGED),
+                (reference, LibraryFileStorageMode.REFERENCED),
+            ],
+            start=1,
+        ):
+            path.mkdir()
+            comic = path / "issue.cbz"
+            comic.write_bytes(b"original comic")
+            issue = Issue(series_id=series_id, issue_number=n)
+            session.add(issue)
+            await session.flush()
+            session.add(
+                LibraryFile(
+                    file_path=str(comic),
+                    file_name=comic.name,
+                    file_size=comic.stat().st_size,
+                    file_format=FileFormat.CBZ,
+                    file_modified_at=datetime.now(UTC),
+                    library_root_id=series.library_root_id,
+                    issue_id=issue.id,
+                    storage_mode=mode,
+                )
+            )
+    result = await authenticated_client.post(
+        f"/api/v1/series/{series_id}/refresh", headers=csrf(authenticated_client)
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["title"] == "Refreshed title"
+    assert (split / "series.json").is_file()
+    primary = json.loads((folder / "series.json").read_bytes())
+    assert primary["custom"] == "keep"
+    assert primary["metadata"]["name"] == "Refreshed title"
+    assert primary["pullbox"] == json.loads((split / "series.json").read_bytes())["pullbox"]
+    assert not (reference / "series.json").exists()
+    assert all(
+        (path / "issue.cbz").read_bytes() == b"original comic" for path in (reference, split)
+    )
+    assert result.headers["X-Pullbox-Series-Json"] == "review"
+
+
+@pytest.mark.parametrize("scenario", ["default", "api-key", "refresh-failed", "unsafe-json"])
+async def test_refresh_sidecar_boundaries(
+    authenticated_client,
+    unauthenticated_client,
+    sec_api_key,
+    sidecar_target,
+    sec_db,
+    provider_refresh,
+    monkeypatch,
+    scenario,
+):
+    from pullbox.models.config import SystemConfig
+    from pullbox.services import metadata_series_refresh
+
+    series_id, folder, _ = sidecar_target
+    client, headers = authenticated_client, csrf(authenticated_client)
+    sidecar = folder / "series.json"
+    if scenario != "default":
+        async with sec_db.begin() as session:
+            session.add(
+                SystemConfig(key="series_sidecars_on_refresh", value="true", value_type="bool")
+            )
+    if scenario == "api-key":
+        client, headers = unauthenticated_client, {"X-API-Key": sec_api_key}
+    if scenario == "refresh-failed":
+
+        async def fail(session, series_id):
+            (await session.get(Series, series_id)).title = "Not committed"
+            raise metadata_series_refresh.SeriesRefreshError("Catalog needs review")
+
+        monkeypatch.setattr(metadata_series_refresh, "refresh_series_from_sources", fail)
+    if scenario == "unsafe-json":
+        sidecar.write_bytes(b"invalid original")
+    result = await client.post(f"/api/v1/series/{series_id}/refresh", headers=headers)
+    assert result.status_code == (409 if scenario == "refresh-failed" else 200), result.text
+    async with sec_db() as session:
+        title = (await session.get(Series, series_id)).title
+        assert title == ("Test series" if scenario == "refresh-failed" else "Refreshed title")
+    if scenario == "unsafe-json":
+        assert result.headers["X-Pullbox-Series-Json"] == "review"
+        assert sidecar.read_bytes() == b"invalid original"
+    else:
+        assert "X-Pullbox-Series-Json" not in result.headers
+        assert not sidecar.exists()
+
+
 async def test_preview_then_write_canonical_sidecar_without_issue_catalog_reads(
     authenticated_client, sidecar_target, monkeypatch
 ):

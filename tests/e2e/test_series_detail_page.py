@@ -16,6 +16,25 @@ pytestmark = pytest.mark.e2e
 class TestSeriesDetailPage:
     """Behavior-first E2E coverage for /series/{id}."""
 
+    def test_sidecar_warning_survives_refresh_and_can_be_reviewed(self, authed_page, seeded_server):
+        page = authed_page
+        SeriesDetailPage(page, seeded_server).goto(1)
+        page.route(
+            "**/api/v1/series/1/refresh",
+            lambda route: route.fulfill(
+                json={"id": 1}, headers={"X-Pullbox-Series-Json": "review"}
+            ),
+        )
+        page.get_by_test_id("series-action-refresh").click()
+        expect(
+            page.get_by_text(
+                "Library metadata saved. Review the folders where series.json could not be written.",
+                exact=True,
+            )
+        ).to_be_visible()
+        page.get_by_role("button", name="Review series.json folders").click()
+        expect(page.get_by_role("dialog", name="Write series metadata")).to_be_visible()
+
     @pytest.mark.parametrize("theme", ["light", "dark"])
     def test_metadata_refresh_conflict_is_actionable_without_reloading(
         self, authed_page, seeded_server, theme

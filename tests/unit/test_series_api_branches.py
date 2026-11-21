@@ -346,7 +346,9 @@ async def test_add_update_refresh_and_folder_routes_delegate(
     }
 
     refresh_target = await _seed_series(db_session, title="Refresh Target")
-    refreshed = await series_api.refresh_series(refresh_target.id, _user(), db_session)
+    refreshed = await series_api.refresh_series(
+        refresh_target.id, Request({"type": "http"}), Response(), _user(), db_session
+    )
     assert refreshed.id == refresh_target.id
     refresh_command.assert_awaited_once_with(
         db_session,
@@ -369,7 +371,9 @@ async def test_refresh_series_rejects_duplicate_initial_catalog_sync(
     )
 
     with pytest.raises(HTTPException) as exc_info:
-        await series_api.refresh_series(series.id, _user(), db_session)
+        await series_api.refresh_series(
+            series.id, Request({"type": "http"}), Response(), _user(), db_session
+        )
 
     assert exc_info.value.status_code == 409
     assert exc_info.value.detail == "Initial metadata sync is already in progress."

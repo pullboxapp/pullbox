@@ -19896,6 +19896,12 @@ function seriesDetailPage(config) {
     init: function () {
       this.monitored = !!cfg.monitored;
       this.metadataSyncing = !!cfg.metadataSyncing;
+      var url = new URL(window.location.href);
+      if (url.searchParams.has("series-json")) {
+        this.sidecarOutcome = url.searchParams.get("series-json");
+        url.searchParams.delete("series-json");
+        window.history.replaceState(window.history.state, "", url);
+      }
       this.startMetadataSyncPolling();
 
       var self = this;
@@ -19969,6 +19975,17 @@ function seriesDetailPage(config) {
 
     currentDetailUrl: function () {
       return window.location.pathname + window.location.search;
+    },
+
+    sidecarOutcome: "",
+    sidecarNotice: function () {
+      switch (this.sidecarOutcome) {
+        case "updated": return "Updated series.json in the managed series folders.";
+        case "current": return "Managed series.json files are already up to date.";
+        case "no-folders": return "Library metadata saved. This series has no registered folders.";
+        case "review": return "Library metadata saved. Review the folders where series.json could not be written.";
+        default: return "";
+      }
     },
 
     refreshIssuesPanel: function () {
@@ -20224,9 +20241,12 @@ function seriesDetailPage(config) {
             }
             throw new Error(failureMessage);
           }
-          self.dispatchToast("Metadata refreshed", "success");
+          var destination = new URL(self.currentDetailUrl(), window.location.origin);
+          var sidecars = response.headers.get("X-Pullbox-Series-Json");
+          if (sidecars) destination.searchParams.set("series-json", sidecars);
+          else self.dispatchToast("Metadata refreshed", "success");
           setTimeout(function () {
-            window.location.assign(self.currentDetailUrl());
+            window.location.assign(destination);
           }, 500);
         })
         .catch(function () {

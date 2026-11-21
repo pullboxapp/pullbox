@@ -1,4 +1,4 @@
-"""Explicit, bounded sidecar writes; no provider calls or archive mutations."""
+"""Bounded sidecar writes; no provider calls or archive mutations."""
 
 import asyncio
 import hashlib
@@ -10,16 +10,19 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
 from pydantic import TypeAdapter
 from sqlalchemy import or_, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from pullbox.core.exceptions import ValidationError
+from pullbox.core.exceptions import NotFoundError, ValidationError
 from pullbox.core.metadata_identity import MetadataEntityKind
 from pullbox.core.series_sidecar import MAX_SIDECAR_BYTES, render_series_sidecar
 from pullbox.models import Issue, LibraryFile, LibraryRoot, Series
+from pullbox.models.config import SystemConfig
 from pullbox.models.library import LibraryFileStorageMode
 from pullbox.schemas.metadata_snapshot import MetadataSnapshot
 from pullbox.schemas.series_sidecar import (
@@ -563,21 +566,51 @@ async def write_series_sidecar(
         raise ValueError("The metadata, folders, or sidecars changed after preview. Preview again.")
     if not prepared.preview.ready:
         raise ValueError("No writable series sidecars need updating. Review the preview first.")
+    return await _write_targets(session, prepared.binding, prepared.targets)
+
+
+async def sync_refreshed_series_sidecars(
+    session: AsyncSession, series_id: int
+) -> Literal["updated", "current", "review", "no-folders"] | None:
+    """After an interactive refresh commits, publish only to eligible managed folders."""
+    try:
+        setting = await session.get(SystemConfig, "series_sidecars_on_refresh")
+        if setting is None or setting.value.lower() not in {"true", "1"}:
+            await session.rollback()
+            return None
+        binding = await _binding(session, series_id)
+        await session.commit()
+        targets = await inspect_series_sidecar_binding(binding)
+        if not targets:
+            return "no-folders"
+        result = await _write_targets(session, binding, targets)
+    except (ValueError, ValidationError, NotFoundError, OSError, SQLAlchemyError):
+        # The library refresh is already committed. Only sidecar output needs review.
+        await session.rollback()
+        return "review"
+    if any(target.action == "blocked" for target in result.targets):
+        return "review"
+    return "updated" if result.written else "current"
+
+
+async def _write_targets(
+    session: AsyncSession, binding: SidecarBinding, targets: tuple[SidecarTarget, ...]
+) -> SeriesSidecarWriteRead:
     results = []
     written = 0
-    for target in prepared.targets:
+    for target in targets:
         if target.read.action not in {"create", "update"}:
             results.append(target.read)
             continue
         # Join the whole short item, including stage cleanup, before releasing its session.
         result = await finish_short_mutation(
-            asyncio.create_task(_write_target(session, prepared.binding, target))
+            asyncio.create_task(_write_target(session, binding, target))
         )
         written += result.action == "unchanged"
         results.append(result)
     return SeriesSidecarWriteRead(
         written=written,
-        unchanged=sum(target.read.action == "unchanged" for target in prepared.targets),
+        unchanged=sum(target.read.action == "unchanged" for target in targets),
         targets=results,
     )
 
@@ -592,6 +625,9 @@ async def _write_target(
         descriptor = stage_descriptor
         await lock_file_mutation_admission(session)
         await ensure_no_active_import_file_mutation(session)
+        await session.execute(
+            select(Series.id).where(Series.id == binding.series_id).with_for_update()
+        )
         if await _binding(session, binding.series_id) != binding:
             raise ValueError("The series metadata or locations changed. Preview again.")
         await require_no_archive_publication(

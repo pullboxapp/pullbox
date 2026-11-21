@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 import pytest
 
 from pullbox.models import Issue, LibraryFile, LibraryRoot, Series
+from pullbox.models.config import SystemConfig
 from pullbox.models.import_job import ImportJob, ImportJobStatus, ImportSourceType
 from pullbox.models.library import FileFormat
 from pullbox.models.metadata_identity import SeriesExternalIdentity
@@ -167,6 +168,36 @@ async def test_active_import_blocks_sidecar_and_cleans_staging(managed_series):
     assert "import" in result.targets[0].reason.lower()
     assert not (folder / "series.json").exists()
     assert not list(folder.glob(".pullbox-series-*.tmp"))
+    assert comic.read_bytes() == b"Archive must remain untouched"
+
+
+async def test_opt_in_refresh_respects_import_guard_and_leaves_current_sidecar_untouched(
+    managed_series,
+):
+    factory, series_id, _, folder, comic = managed_series
+    sidecar = folder / "series.json"
+    async with factory.begin() as session:
+        session.add(SystemConfig(key="series_sidecars_on_refresh", value="true", value_type="bool"))
+        job = ImportJob(
+            source_path=str(folder),
+            source_type=ImportSourceType.FILESYSTEM,
+            status=ImportJobStatus.IMPORTING,
+        )
+        session.add(job)
+        await session.flush()
+        job_id = job.id
+    async with factory() as session:
+        assert await series_sidecar.sync_refreshed_series_sidecars(session, series_id) == "review"
+    assert not sidecar.exists()
+    assert not list(folder.glob(".pullbox-series-*.tmp"))
+    async with factory.begin() as session:
+        (await session.get(ImportJob, job_id)).status = ImportJobStatus.COMPLETED
+    async with factory() as session:
+        assert await series_sidecar.sync_refreshed_series_sidecars(session, series_id) == "updated"
+        before = sidecar.stat()
+        assert await series_sidecar.sync_refreshed_series_sidecars(session, series_id) == "current"
+    after = sidecar.stat()
+    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
     assert comic.read_bytes() == b"Archive must remain untouched"
 
 

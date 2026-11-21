@@ -97,6 +97,14 @@
           </div>
         {% endcall %}
 
+        {% call settings_row(label="Write series.json on manual refresh", help="When you click Refresh metadata on a series, update its managed folders too. Comic files and folders kept in place are not changed.") %}
+          <input type="hidden" name="series_sidecars_on_refresh" value="false">
+          <label class="relative inline-flex items-center">
+            <input type="checkbox" role="switch" class="peer toggle-input" name="series_sidecars_on_refresh" value="true" aria-label="Write series.json on manual refresh" {% if configs.get('series_sidecars_on_refresh', 'false')|lower in ['true', '1'] %}checked{% endif %}>
+            <span class="toggle-switch"></span>
+          </label>
+        {% endcall %}
+
         {% call settings_row(label="Import Match Burst", help="How aggressively bulk import matching may burst ComicVine requests before pacing them out. Lower is safer.") %}
           <div class="flex items-center gap-2">
             <input type="number" name="comicvine_rate_limit_per_second" aria-label="Import Match Burst" value="{{ configs.get('comicvine_rate_limit_per_second', '1') }}" min="1" max="10" class="input-pb w-24">

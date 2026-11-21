@@ -1,4 +1,4 @@
-<div x-data="seriesSidecar({{ series.id }})" data-testid="series-sidecar">
+<div x-data="seriesSidecar({{ series.id }})" data-testid="series-sidecar" @review-series-sidecar.window="show()">
   <button type="button" class="btn-ghost btn-sm" @click="show()">Write series metadata</button>
   <template x-teleport="body">
     <div class="modal-shell" x-show="open" x-cloak @keydown.escape.window="if (open) close()" @keydown.tab.window="trapFocus($event)">

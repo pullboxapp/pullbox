@@ -1,5 +1,6 @@
 """The Add dialog binds one preview identity and revision, never browser metadata."""
 
+import json
 from contextlib import suppress
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -239,6 +240,7 @@ def test_real_local_search_preview_add_refresh_and_existing_owner(
     record = response.json()
 
     def remove_test_series():
+        (Path(record["path"]) / "series.json").unlink(missing_ok=True)
         result = page.request.delete(
             f"{seeded_server}/api/v1/series/{record['id']}",
             headers={"X-CSRF-Token": page.evaluate("readCsrfTokenFromBody()")},
@@ -256,17 +258,48 @@ def test_real_local_search_preview_add_refresh_and_existing_owner(
         "href", f"/series/{record['id']}"
     )
     assert events.emit.await_count == 1
+    page.goto(f"{seeded_server}/settings?tab=metadata")
+    control = page.get_by_role("switch", name="Write series.json on manual refresh")
+    expect(control).not_to_be_checked()
+    control.locator("..").click()
+    save = page.get_by_role("button", name="Save refresh settings")
+    with page.expect_response(
+        lambda response: (
+            response.url.endswith("/api/v1/config") and response.request.method == "PUT"
+        )
+    ) as saved:
+        save.click()
+    assert saved.value.ok, saved.value.text()
+
+    def restore_refresh_policy():
+        result = page.request.put(
+            f"{seeded_server}/api/v1/config",
+            data={"values": {"series_sidecars_on_refresh": "false"}},
+            headers={"X-CSRF-Token": page.evaluate("readCsrfTokenFromBody()")},
+        )
+        assert result.ok, result.text()
+
+    request.addfinalizer(restore_refresh_policy)
+    page.reload()
+    expect(control).to_be_checked()
     page.goto(f"{seeded_server}/series/{record['id']}")
     with (
-        page.expect_navigation(
-            url=f"{seeded_server}/series/{record['id']}", wait_until="domcontentloaded"
-        ),
+        page.expect_navigation(wait_until="domcontentloaded"),
         page.expect_response(
             lambda response: response.url.endswith(f"/series/{record['id']}/refresh")
         ) as refreshed,
     ):
         page.get_by_test_id("series-action-refresh").click()
     assert refreshed.value.status == 200
+    expect(
+        page.get_by_text("Updated series.json in the managed series folders.", exact=True)
+    ).to_be_visible()
+    assert (
+        json.loads((Path(record["path"]) / "series.json").read_bytes())["pullbox"]["snapshot"][
+            "values"
+        ]["title"]
+        == "Batman"
+    )
     # The success action navigates away. Verify persisted state without waiting
     # for a response body attached to the previous document's fetch lifecycle.
     updated = page.request.get(f"{seeded_server}/api/v1/series/{record['id']}")

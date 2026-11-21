@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Series Details can now update `series.json` in all eligible managed folders
+  when you click **Refresh metadata**. Turn it on in **Settings > Metadata >
+  Refresh policy**. Skipped folders can be reviewed without refreshing again;
+  comic files and folders kept in place are unchanged.
 - What's New refresh now clears a Watch from the Watching list when fresh
   publication data confirms a series already tracked in the selected library.
   It does not add a second series, change monitoring, or download issues.

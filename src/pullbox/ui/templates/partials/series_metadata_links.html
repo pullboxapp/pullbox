@@ -18,6 +18,10 @@
       <button type="button" class="btn-ghost btn-sm" @click="openLink()" :disabled="loading">Link provider</button>
     </div>
   </div>
+  <div class="flex flex-wrap items-center gap-2" x-show="sidecarNotice()" x-cloak>
+    <p class="text-sm text-pb-text" role="status" x-text="sidecarNotice()"></p>
+    <button type="button" class="btn-ghost btn-sm" x-show="sidecarOutcome === 'review'" @click="$dispatch('review-series-sidecar')">Review series.json folders</button>
+  </div>
   <p class="text-sm text-pb-success" role="status" x-show="message" x-text="message" x-cloak></p>
   <p class="text-sm text-pb-error" role="alert" x-show="error && !open" x-text="error" x-cloak></p>
   <template x-teleport="body">

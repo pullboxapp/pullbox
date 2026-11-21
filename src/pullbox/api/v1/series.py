@@ -46,6 +46,7 @@ from pullbox.services.metadata_service import MetadataService
 from pullbox.services.metadata_sources import load_source_runtime
 from pullbox.services.search_targets import load_series_wanted_search_targets
 from pullbox.services.series_service import SeriesService
+from pullbox.services.series_sidecar import sync_refreshed_series_sidecars
 from pullbox.services.whats_new_actions import (
     WhatsNewSelectionError,
     link_confirmed_release,
@@ -632,6 +633,8 @@ async def search_series(
 @router.post("/{series_id}/refresh", response_model=SeriesResponse)
 async def refresh_series(
     series_id: int,
+    request: Request,
+    response: Response,
     _user: AuthenticatedUser,
     session: DbSession,
 ) -> SeriesResponse:
@@ -651,10 +654,15 @@ async def refresh_series(
         )
     try:
         async with source_series_refresh_transaction(session, series_id):
-            response = await _load_series_response(session, series_id)
-        return response
+            record = await _load_series_response(session, series_id)
     except SeriesRefreshError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if getattr(request.state, "auth_method", None) in {"session", "local_bypass"}:
+        outcome = await sync_refreshed_series_sidecars(session, series_id)
+        if outcome is not None:
+            response.headers["X-Pullbox-Series-Json"] = outcome
+            logger.info("series_refresh_sidecar_result", series_id=series_id, outcome=outcome)
+    return record
 
 
 @router.post("/{series_id}/rename-folder", status_code=200)

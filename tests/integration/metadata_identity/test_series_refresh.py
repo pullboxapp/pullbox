@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 import structlog
+from fastapi import Request, Response
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import OperationalError
 from structlog.testing import capture_logs
@@ -29,6 +30,10 @@ from tests.integration.metadata_identity.test_series_adoption import (  # noqa: 
     configured_sources,
 )
 from tests.unit.test_metadata_source_reads import ReadAdapter, registry
+
+
+def operator_request():
+    return Request({"type": "http", "state": {"auth_method": "session"}})
 
 
 async def test_linked_metron_enriches_gcd_series_without_taking_over_issues(
@@ -412,7 +417,9 @@ async def test_existing_refresh_endpoint_uses_native_identity_and_preserves_resp
     instance = refresh_registry(adapter)
     monkeypatch.setattr(refresh, "MetadataSourceRegistry", lambda *args, **kwargs: instance)
     async with factory() as session:
-        response = await routes.refresh_series(series_id, User(username="tester"), session)
+        response = await routes.refresh_series(
+            series_id, operator_request(), Response(), User(username="tester"), session
+        )
         assert response.description == "Endpoint refreshed"
         assert response.id == series_id
         await session.commit()
@@ -553,7 +560,9 @@ async def test_failed_response_rolls_back_actual_refresh_command(identity_probe_
     monkeypatch.setattr(routes, "_load_series_response", fail)
     async with factory() as session:
         with pytest.raises(RuntimeError, match="response failed"):
-            await routes.refresh_series(series_id, User(username="tester"), session)
+            await routes.refresh_series(
+                series_id, operator_request(), Response(), User(username="tester"), session
+            )
     async with factory() as session:
         assert (await load_metadata_baseline(session, Kind.SERIES, series_id)).revision == 1
         assert (await session.get(Series, series_id)).description == "Original provider description"
@@ -593,7 +602,9 @@ async def test_cover_fetch_occurs_after_commit_and_rechecks_url(
             return True
 
         monkeypatch.setattr(refresh.ProviderArtworkClient, "download_cover", download)
-        await routes.refresh_series(series_id, User(username="tester"), session)
+        await routes.refresh_series(
+            series_id, operator_request(), Response(), User(username="tester"), session
+        )
     assert (tmp_path / str(series_id) / "series.jpg").exists() is (not race)
     assert list(tmp_path.rglob(".*series.jpg")) == []
 
@@ -648,7 +659,9 @@ async def test_artwork_failure_does_not_report_committed_metadata_as_failed(
             refresh, "logger", structlog.wrap_logger(None, cache_logger_on_first_use=False)
         )
         async with factory() as session:
-            response = await routes.refresh_series(series_id, User(username="tester"), session)
+            response = await routes.refresh_series(
+                series_id, operator_request(), Response(), User(username="tester"), session
+            )
             assert response.description == "Committed metadata"
             assert not session.in_transaction()
     async with factory() as session:
