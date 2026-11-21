@@ -370,9 +370,10 @@ unchanged. GCD API and automatic acquisition remained disabled.
 
 ## Remaining Scope
 
-This is not the complete provider-aware importer. Compiled sidecar import
-identity, broader provider-neutral mixed-folder recovery, and issue
-reassignment/recovery remain separate milestones.
+This is not the complete provider-aware importer. Compiled sidecar recognition
+and exact native Follow-up rechecks are implemented. Broader Mylar/native
+recovery, manual native issue reassignment in Follow-up, and qualification of
+additional archive formats remain separate milestones.
 This checkpoint targets CBZ folder imports, not additional archive formats.
 It does not qualify PostgreSQL or change Anna's verification work.
 
@@ -420,3 +421,44 @@ Validation for this checkpoint passed `make validate` (16,597 passed, 1,778
 skipped, one expected failure), the focused native/Mylar/split-series regressions,
 and nine existing provider-review browser tests in each of Chromium and Firefox.
 The skipped PostgreSQL cases are not PostgreSQL qualification evidence.
+
+## Native Follow-up Recheck
+
+After a folder import completes, **Follow-up > Recheck files** now recognizes
+exact Metron/GCD identities using the verified library records available at the
+time of the recheck. This also covers compiled sidecars with an exact per-file
+issue identity. A series added or linked after the original import can therefore
+be recovered without rescanning the entire source or guessing a ComicVine match.
+Adding or correcting the library link is still a separate, explicit operation.
+
+The existing signed preview, confirmation, background progress, cancellation,
+and import settings are reused. Selected files enter the existing-series import
+path, retaining their native match method so placement revalidates current links
+and source signatures. No new provider calls, provider links, migrations, or
+default settings are introduced. Original metadata evidence is retained, and
+ordinary ownership, source preservation, and rollback safeguards still apply.
+
+Native groups cannot fall through to the legacy filename or ComicVine-catalog
+recovery path. Unverified identities, conflicting issue designations, malformed
+metadata, untagged neighbors, and competing physical copies remain unresolved.
+Already-registered sources are recognized only with matching source evidence;
+an alternate copy of an owned issue remains a conflict rather than replacing it.
+Explicit series/issue choices that lack automatic exact identity proof are not
+silently inferred by this action. The existing Mylar recovery path is unchanged.
+
+This checkpoint does not provide the still-needed native manual issue chooser
+inside the Follow-up recovery dialog. A failed exact recheck is not evidence that
+the file should be forced into a match. PostgreSQL and combined release
+qualification also remain incomplete.
+
+The focused browser checkpoint passes six cases each in Chromium and Firefox:
+Metron and GCD across light, dark, and Tron themes. It covers the authenticated
+preview, cancellation, confirmation, saved execution results, and Step 4's
+one imported file / zero new series counters. Accessibility checks cover the
+confirmation dialog. A separate full-page check exposed an existing header
+activity badge `label-content-name-mismatch`; that shared-header finding is not
+fixed or claimed as passing by this checkpoint. The focused regression suite
+passes 258 tests covering native imports, deferred recovery, mixed folders,
+Mylar keep-in-place behavior, cancellation, ownership, and rollback. Ruff and
+focused strict mypy also pass. No full CI, public release, or production
+deployment is implied.

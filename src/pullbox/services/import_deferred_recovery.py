@@ -21,10 +21,12 @@ from pullbox.models.import_job import (
     ImportJob,
     ImportJobLog,
     ImportSeriesStatus,
+    ImportSourceType,
 )
 from pullbox.models.issue import Issue
 from pullbox.models.library import LibraryFile
 from pullbox.models.series import IssueCatalogState, Series
+from pullbox.services.import_native_recovery import native_recovery_row, native_recovery_targets
 from pullbox.services.import_source_metadata import source_metadata_for_import_file
 from pullbox.services.import_terminal_recovery import allows_terminal_import_recovery
 
@@ -95,10 +97,11 @@ def _unresolved_identity_conflicts(file: ImportedFile) -> bool:
     return False
 
 
-def protected_file(file: ImportedFile, item: ImportedSeries) -> bool:
+def protected_file(file: ImportedFile, item: ImportedSeries, *, allow_native: bool = False) -> bool:
     diagnostics = dict(file.diagnostics or {})
     return bool(
         file.status is not ImportedFileStatus.NO_MATCH
+        or (native_recovery_row(item) and not allow_native)
         or file.library_file_id is not None
         or file.include_in_import
         or item.user_selected_cv_id is not None
@@ -255,6 +258,11 @@ async def plan_deferred_recovery(
     if job is None or (not running and not allows_terminal_import_recovery(job)):
         return ()
     rows = await load_deferred_rows(session, job_id)
+    native_targets = (
+        await native_recovery_targets(session, rows)
+        if job.source_type == ImportSourceType.FILESYSTEM
+        else {}
+    )
     groups: dict[str, list[tuple[ImportedFile, ImportedSeries]]] = defaultdict(list)
     for file, item in rows:
         groups[file.file_path].append((file, item))
@@ -291,6 +299,7 @@ async def plan_deferred_recovery(
     for ids in batched(
         sorted(
             {issue.id for issue, _ in targets.values()}
+            | {issue.id for issue, _ in native_targets.values()}
             | {issue.id for issues in issues_by_series.values() for issue in issues}
         ),
         300,
@@ -309,7 +318,7 @@ async def plan_deferred_recovery(
 
     plans: list[DeferredRecoveryPlan] = []
     for path, cohort in groups.items():
-        if any(protected_file(file, item) for file, item in cohort):
+        if any(protected_file(file, item, allow_native=True) for file, item in cohort):
             continue
         identities = set().union(*(provider_ids(file) for file, _ in cohort))
         if len(identities) > 1:
@@ -321,7 +330,12 @@ async def plan_deferred_recovery(
             continue
         provider_id = next(iter(identities), None)
         target = targets.get(provider_id) if provider_id is not None else None
-        if target is not None:
+        native = any(native_recovery_row(parent) for _, parent in cohort)
+        if native:
+            target = native_targets.get(file.id)
+            if target is None or any(native_targets.get(other.id) != target for other, _ in cohort):
+                continue
+        elif target is not None:
             issue, series = target
             if any(not _source_agrees(other, parent, series, issue) for other, parent in cohort):
                 continue
@@ -348,7 +362,11 @@ async def plan_deferred_recovery(
                     file.id,
                     "owned_variant" if issue.id in owned else "exact_target",
                     issue_id=issue.id,
-                    reason="provider_id" if provider_id else "strict_filename",
+                    reason="native_identity"
+                    if native
+                    else "provider_id"
+                    if provider_id
+                    else "strict_filename",
                 )
             )
         for other, _ in cohort[1:]:
@@ -453,7 +471,7 @@ async def apply_deferred_recovery(
     plans = await plan_deferred_recovery(session, job.id, running=running)
     counts: dict[str, int] = defaultdict(int)
     affected: set[int] = set()
-    targets: dict[int, ImportedSeries] = {}
+    targets: dict[tuple[int, int | None], ImportedSeries] = {}
     for batch in batched(plans, 300):
         files = {
             file.id: file
@@ -506,7 +524,19 @@ async def apply_deferred_recovery(
                     file.status = ImportedFileStatus.CONFLICT
                     file.error_message = "This issue is already owned. Review this alternate file."
                 else:
-                    target = targets.get(series.id)
+                    native = plan.reason == "native_identity"
+                    target_key = (series.id, parent.id if native else None)
+                    target = targets.get(target_key)
+                    method = "completed_import_exact_target"
+                    if native:
+                        from pullbox.services.import_metron_matching import (
+                            file_metron_evidence,
+                            import_identity_namespace,
+                        )
+
+                        namespace = import_identity_namespace(file_metron_evidence(file) or {})
+                        assert namespace is not None
+                        method = f"{namespace.value}_id"
                     if target is None:
                         # Isolate selected files from unrelated ready rows in the old parent.
                         target = ImportedSeries(
@@ -516,32 +546,48 @@ async def apply_deferred_recovery(
                             cv_id=series.comicvine_id,
                             cv_title=series.title,
                             cv_year=series.year_start,
-                            cv_match_method="deferred_exact_identity",
+                            cv_match_method=method if native else "deferred_exact_identity",
                             cv_match_score=1.0,
                             series_id=series.id,
                             has_files=True,
-                            status=ImportSeriesStatus.CONFIRMED,
+                            status=ImportSeriesStatus.DUPLICATE
+                            if native
+                            else ImportSeriesStatus.CONFIRMED,
                             selected_for_import=True,
-                            diagnostics={"kind": "deferred_recovery", "source_preserved": True},
+                            diagnostics={
+                                "kind": "deferred_recovery",
+                                "source_preserved": True,
+                                **(
+                                    {"metron_import": parent.diagnostics["metron_import"]}
+                                    if native
+                                    else {}
+                                ),
+                            },
                         )
                         session.add(target)
                         await session.flush()
-                        targets[series.id] = target
+                        targets[target_key] = target
                     file.import_series_id = target.id
                     affected.add(target.id)
                     file.status = ImportedFileStatus.CONFIRMED
                     file.include_in_import = True
-                    file.match_method = "completed_import_exact_target"
+                    file.match_method = method
                     file.match_confidence = "high"
                     file.parsed_issue_number = issue.issue_number
                     file.issue_number_raw = issue.issue_number_text
                     file.conflict_group_id = None
-                    apply_proven_identity(
-                        file,
-                        issue_cv_id=issue.comicvine_id,
-                        series_cv_id=series.comicvine_id,
-                        summary=issue_summary(issue),
-                    )
+                    if native:
+                        file.diagnostics = {
+                            **file.diagnostics,
+                            "target_issue_summary": issue_summary(issue),
+                        }
+                    else:
+                        apply_proven_identity(
+                            file,
+                            issue_cv_id=issue.comicvine_id,
+                            series_cv_id=series.comicvine_id,
+                            summary=issue_summary(issue),
+                        )
                 evidence["target_issue_id"] = issue.id
             if plan.action != "exact_target":
                 file.include_in_import = False

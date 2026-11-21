@@ -39,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Extended Follow-up's Recheck files action to recover exact Metron/GCD folder
+  identities after their library links are verified, including compiled sidecars.
+  Recovery preserves original files, rejects changed identities, and keeps
+  ambiguous or competing copies for review without falling back to title guesses.
 - Fixed an empty import issue picker when a selected library series and its
   verified issue catalog use different linked Metron/GCD identities.
 - Kept import-review tab labels and counts readable during lane changes by
