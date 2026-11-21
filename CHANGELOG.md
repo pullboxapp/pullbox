@@ -39,6 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed an empty import issue picker when a selected library series and its
+  verified issue catalog use different linked Metron/GCD identities.
 - Kept import-review tab labels and counts readable during lane changes by
   switching their theme colors together without an intermediate color fade.
 - Reconciled stale provider catalog counts and safely extended linked issue

@@ -22,7 +22,7 @@ async def _seed(root, namespace, theme):
             + ["metron", "gcd"].index(namespace) * 1000
         )
         job_id, _, series_id, _, _, _, _ = await seed_library_choice(
-            session, root, namespace, identity_base, admit=False
+            session, root, namespace, identity_base, admit=False, other_catalog=True
         )
         return job_id, series_id
 
@@ -74,6 +74,9 @@ def test_library_series_and_issue_choices(
     assert pending_refresh == [{"visible": True, "disabled": True}]
     expect(page.get_by_test_id("import-review-lane-ready")).to_contain_text("(0)")
     page.get_by_test_id("import-review-primary-action").click()
+    expect(page.get_by_test_id("import-review-workspace-table")).to_contain_text(
+        "Choose from this series' verified linked issue catalogs."
+    )
     page.get_by_test_id("import-review-choose-issue").click()
     choices = page.get_by_test_id("import-review-issue-choices")
     expect(choices).to_contain_text("Confirm its contents")

@@ -124,6 +124,19 @@ does not rewrite the archive or turn the user's decision into embedded XML
 evidence. Ready rows say **Library selection (Metron)** or **Library selection
 (GCD)** rather than claiming an automatic identity match.
 
+For a series with verified links to both native providers, the issue picker
+includes its verified Metron and GCD issue records even when the selected series
+label names the other provider. Local acceptance exposed this with Superman:
+Red Son: the library chooser used its GCD link, while its saved issues were
+linked through Metron. The old namespace-only list was empty. The shared
+per-file identity/number checks and stale-link revalidation still gate choices
+and placement; this does not merge catalogs or create provider links.
+The correction passed 96 focused import checks and 12 browser checks in each
+of Chromium and Firefox, plus lint, formatting and strict typing. The browser
+cases cover both cross-provider directions in all three themes. The preceding
+full validation gate is recorded under Compiled Series Sidecars; it predates
+this narrow picker correction.
+
 The saved file decision binds the source evidence, issue, and verified links.
 Rematching retains a still-valid explicit decision but does not guess unchosen
 neighbors, even when their issue number agrees. Execution revalidates the

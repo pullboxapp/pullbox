@@ -658,7 +658,8 @@ async def preview_native_assignment(
         namespace,
         issue_page,
         q,
-        include_other_native=has_compiled_series_choice(file),
+        include_other_native=bool(parent.diagnostics.get("manual_library_series"))
+        or has_compiled_series_choice(file),
     )
     choices = {}
     for issue in issues:
