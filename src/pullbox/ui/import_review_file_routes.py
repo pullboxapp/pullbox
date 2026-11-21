@@ -8,7 +8,11 @@ from starlette.responses import Response
 
 from pullbox.api.deps import DbSession, InteractiveOperatorUser, Settings
 from pullbox.composition.services import build_metadata_service
-from pullbox.services.import_review_file_assignment import assign_review_file, load_review_file
+from pullbox.services.import_review_file_assignment import (
+    assign_review_file,
+    load_review_file,
+    require_legacy_assignment,
+)
 from pullbox.services.import_review_scope import (
     review_scope,
     sign_review_scope,
@@ -403,6 +407,7 @@ async def preview_file_assignment(
     from pullbox.ui.import_routes import _ctx, _templates
 
     job, parent, file = await load_review_file(session, job_id, file_id)
+    require_legacy_assignment(parent, file)
     service = await build_metadata_service(session)
     series = await service.get_series_metadata(cv_id)
     issues = await service.get_issue_summaries_for_series(cv_id)
@@ -473,6 +478,69 @@ async def apply_file_assignment(
         issue_cv_id=issue_cv_id,
         metadata_service=await build_metadata_service(session),
     )
+    await session.commit()
+    return JSONResponse(
+        {"message": "File assigned. Source files and other issue decisions are unchanged."}
+    )
+
+
+@router.get("/import/{job_id}/files/{file_id}/assign-native", include_in_schema=False)
+async def preview_native_assignment(
+    job_id: int,
+    file_id: int,
+    request: Request,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+    issue_page: int = Query(1, ge=1),
+    q: str = Query("", max_length=200),
+) -> Response:
+    from pullbox.services.import_native_issue_choices import (
+        native_issue_choice,
+        native_issue_page,
+        native_review_context,
+    )
+    from pullbox.ui.import_routes import _ctx, _templates
+
+    job, parent, file, series, namespace = await native_review_context(session, job_id, file_id)
+    issues, issue_page, pages = await native_issue_page(
+        session, series.id, namespace, issue_page, q
+    )
+    choices = {}
+    for issue in issues:
+        choice = await native_issue_choice(session, job, parent, file, series, issue, user.id)
+        choice.token = await sign_review_scope(session, choice.scope)
+        choices[issue.id] = choice
+    return _templates().TemplateResponse(
+        request,
+        "partials/import_review_issue_choices.html",
+        _ctx(
+            request,
+            user,
+            job=job,
+            file=file,
+            series=series,
+            issues=issues,
+            issue_page=issue_page,
+            issue_page_count=pages,
+            query=q,
+            native_choices=choices,
+            native_assignment=True,
+        ),
+    )
+
+
+@router.post("/import/{job_id}/files/{file_id}/assign-native", include_in_schema=False)
+async def apply_native_assignment(
+    job_id: int,
+    file_id: int,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+    issue_id: Annotated[int, Form(gt=0)],
+    token: Annotated[str, Form()],
+) -> Response:
+    from pullbox.services.import_native_issue_choices import assign_native_issue
+
+    await assign_native_issue(session, job_id, file_id, issue_id, token, user.id)
     await session.commit()
     return JSONResponse(
         {"message": "File assigned. Source files and other issue decisions are unchanged."}

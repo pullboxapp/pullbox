@@ -50,8 +50,10 @@
         <div class="flex flex-wrap items-center justify-between gap-2"><span class="font-mono text-xs text-pb-text [overflow-wrap:anywhere]">{{ file.file_name }}</span><span class="text-xs text-pb-text-dim">{{ file.file_size|filesize }}</span></div>
         {% if file.status == 'skipped' %}<span class="pill pill-neutral" data-import-review-file-outcome="{{ file.id }}">Skipped</span>{% else %}
         {% if metron_row %}
-        <p class="mt-2 text-xs text-pb-text-sec">Correct the linked {{ identity_label }} series or issue metadata, then recheck here. If the source file changed, recheck its source or rescan it. You can also skip it for now.</p>
-        <div class="mt-2 flex flex-wrap gap-2">{% if item.series_id %}<a class="btn-ghost btn-sm" href="/series/{{ item.series_id }}" target="_blank" rel="noopener noreferrer">Review linked metadata</a>{% endif %}<button type="button" class="btn-ghost btn-sm" :disabled="reviewActionPending" @click="skipReviewFile({{ item.id }}, {{ file.id }}, $event.currentTarget)">Skip this file</button></div>
+        <p class="mt-2 text-xs text-pb-text-sec">Choose from the verified {{ identity_label }} issue catalog. Conflicting embedded identities still need corrected linked metadata or a source recheck. You can also skip this file for now.</p>
+        {% set native_choices_url = '/import/' ~ job.id ~ '/files/' ~ file.id ~ '/assign-native' %}
+        <div class="mt-2 flex flex-wrap gap-2">{% if item.series_id %}<button type="button" class="btn-primary btn-sm" data-testid="import-review-choose-issue" aria-expanded="false" aria-controls="import-review-issue-choices-{{ file.id }}" @click='toggleReviewIssueChoices({{ file.id }}, {{ native_choices_url|tojson|forceescape }}, $event.currentTarget)'>Choose issue</button><a class="btn-ghost btn-sm" href="/series/{{ item.series_id }}" target="_blank" rel="noopener noreferrer">Review linked metadata</a>{% endif %}<button type="button" class="btn-ghost btn-sm" :disabled="reviewActionPending" @click="skipReviewFile({{ item.id }}, {{ file.id }}, $event.currentTarget)">Skip this file</button></div>
+        {% if item.series_id %}<div id="import-review-issue-choices-{{ file.id }}" hidden></div>{% endif %}
         {% else %}
         {% set issue_choices_url = ('/import/' ~ job.id ~ '/files/' ~ file.id ~ '/assign?cv_id=' ~ known_cv_id ~ '&inline=true') if known_cv_id else none %}
         <div class="mt-2 flex flex-wrap gap-2"><button type="button" class="btn-primary btn-sm" data-testid="import-review-choose-issue"

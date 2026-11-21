@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import TYPE_CHECKING
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, true
 
 from pullbox.core.exceptions import NotFoundError, ValidationError
 from pullbox.models.import_job import (
@@ -21,12 +21,14 @@ from pullbox.models.issue import Issue
 from pullbox.models.library import LibraryFile
 from pullbox.models.series import Series
 from pullbox.services.import_counters import recompute_file_counters, recompute_series_counters
+from pullbox.services.import_metron_matching import file_metron_evidence, uses_metron_identity
 from pullbox.services.import_review_scope import review_scope
 from pullbox.services.import_story_arc_resolution import refresh_story_arc_entries_for_import_files
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from pullbox.providers.base import IssueSummary
     from pullbox.services.metadata_service import MetadataService
 
 
@@ -61,6 +63,7 @@ async def assign_review_file(
 ) -> ImportedFile:
     """Change one staged identity; never move a file or rewrite its source metadata."""
     job, parent, file = await load_review_file(session, job_id, file_id)
+    require_legacy_assignment(parent, file)
     original_scope = review_scope(job, parent, file)
     if file.status not in {
         ImportedFileStatus.CONFLICT,
@@ -140,14 +143,54 @@ async def assign_review_file(
         )
         session.add(target)
         await session.flush()
+    return await apply_review_file_assignment(
+        session,
+        job,
+        parent,
+        file,
+        target,
+        issue,
+        summary,
+        issue_cv_id=issue_cv_id,
+        method="import_reconcile",
+    )
+
+
+async def apply_review_file_assignment(
+    session: AsyncSession,
+    job: ImportJob,
+    parent: ImportedSeries,
+    file: ImportedFile,
+    target: ImportedSeries,
+    issue: Issue | None,
+    summary: IssueSummary,
+    *,
+    issue_cv_id: int | None,
+    method: str,
+) -> ImportedFile:
+    """Apply an already validated choice using the shared duplicate/counter contract."""
+    job_id = job.id
+    owned = (
+        issue is not None
+        and await session.scalar(
+            select(LibraryFile.id).where(LibraryFile.issue_id == issue.id).limit(1)
+        )
+        is not None
+    )
     other_targets = list(
         (
             await session.scalars(
                 select(ImportedFile).where(
                     ImportedFile.import_job_id == job_id,
-                    ImportedFile.import_series_id == target.id,
+                    (ImportedFile.import_series_id == target.id)
+                    if method == "import_reconcile"
+                    else true(),
                     ImportedFile.id != file.id,
-                    ImportedFile.matched_issue_cv_id == issue_cv_id,
+                    (
+                        ImportedFile.matched_issue_id == issue.id
+                        if issue is not None and issue_cv_id is None
+                        else ImportedFile.matched_issue_cv_id == issue_cv_id
+                    ),
                     ImportedFile.status.in_(
                         [
                             ImportedFileStatus.MATCHED,
@@ -165,7 +208,7 @@ async def assign_review_file(
     file.matched_issue_id = issue.id if issue is not None else None
     file.status = ImportedFileStatus.ALREADY_OWNED if owned else ImportedFileStatus.MATCHED
     file.include_in_import = not owned
-    file.match_method = "import_reconcile"
+    file.match_method = method
     file.match_confidence = "manual"
     file.conflict_group_id = None
     file.duplicate_group_id = None
@@ -180,8 +223,9 @@ async def assign_review_file(
         "manual_file_assignment": {
             "source_series_id": old_series_id,
             "target_series_id": target.id,
-            "target_series_cv_id": cv_id,
+            "target_series_cv_id": target.cv_id,
             "target_issue_cv_id": issue_cv_id,
+            "target_issue_id": issue.id if issue is not None else None,
         },
     }
     # An explicit reassignment cannot silently choose between two files for one issue.
@@ -203,7 +247,13 @@ async def assign_review_file(
             value.include_in_import = False
             value.is_preferred = False
     await session.flush()
-    await recompute_file_counters(session, job, series_ids=list({old_series_id, target.id}))
+    await recompute_file_counters(
+        session,
+        job,
+        series_ids=list(
+            {old_series_id, target.id, *(value.import_series_id for value in other_targets)}
+        ),
+    )
     if target.status is ImportSeriesStatus.MATCHED and file.status in {
         ImportedFileStatus.MATCHED,
         ImportedFileStatus.CONFIRMED,
@@ -220,3 +270,14 @@ async def assign_review_file(
     )
     await session.flush()
     return file
+
+
+def require_legacy_assignment(parent: ImportedSeries, file: ImportedFile) -> None:
+    """Native identity review must not fall through the ComicVine-only picker."""
+    if parent.diagnostics.get("metron_import") or uses_metron_identity(
+        file_metron_evidence(file) or {}
+    ):
+        raise ValidationError(
+            "Use this file's verified provider issue choices. Conflicting native identities "
+            "must be corrected in linked metadata or the source, then rechecked."
+        )

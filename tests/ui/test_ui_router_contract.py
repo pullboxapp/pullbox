@@ -178,6 +178,18 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
             "apply_file_assignment",
         ),
         (
+            "/import/{job_id}/files/{file_id}/assign-native",
+            ("GET",),
+            "preview_native_assignment",
+            "preview_native_assignment",
+        ),
+        (
+            "/import/{job_id}/files/{file_id}/assign-native",
+            ("POST",),
+            "apply_native_assignment",
+            "apply_native_assignment",
+        ),
+        (
             "/import/{job_id}/metadata-writes",
             ("GET",),
             "import_metadata_write_follow_up",

@@ -165,6 +165,13 @@ async def _verified_metron_series(session: AsyncSession, item: ImportedSeries) -
     return series if valid else None
 
 
+async def verified_native_import_series(
+    session: AsyncSession, item: ImportedSeries
+) -> Series | None:
+    """Resolve the same exact series evidence used during scan and native review."""
+    return await _verified_metron_series(session, item)
+
+
 async def match_local_metron_series(session: AsyncSession, item: ImportedSeries) -> bool:
     """Handle native XML identities before legacy name/CV matching can select them."""
     if not isinstance((item.diagnostics or {}).get("metron_import"), dict):

@@ -1,8 +1,11 @@
+{% set choice_action = 'assign-native' if native_assignment else 'assign' %}
+{% set choices_url = '/import/' ~ job.id ~ '/files/' ~ file.id ~ '/' ~ choice_action %}
+{% set choices_query = '' if native_assignment else 'cv_id=' ~ series.provider_id ~ '&inline=true&' %}
 <div id="import-review-issue-choices-{{ file.id }}" data-testid="import-review-issue-choices" data-import-review-issue-choices-loaded="true"
-  x-data='importReviewFileActionData({jobId: {{ job.id }}, fileId: {{ file.id }}, action: "assign", inline: true})'
+  x-data='importReviewFileActionData({jobId: {{ job.id }}, fileId: {{ file.id }}, action: {{ choice_action|tojson }}, inline: true})'
   class="mt-3 space-y-2">
-  <form hx-get="/import/{{ job.id }}/files/{{ file.id }}/assign" hx-target="#import-review-issue-choices-{{ file.id }}" hx-swap="outerHTML" hx-boost="false" class="flex items-center gap-2">
-    <input type="hidden" name="cv_id" value="{{ series.provider_id }}"><input type="hidden" name="inline" value="true">
+  <form hx-get="{{ choices_url }}" hx-target="#import-review-issue-choices-{{ file.id }}" hx-swap="outerHTML" hx-boost="false" class="flex items-center gap-2">
+    {% if not native_assignment %}<input type="hidden" name="cv_id" value="{{ series.provider_id }}"><input type="hidden" name="inline" value="true">{% endif %}
     <input type="search" name="q" value="{{ query }}" class="input-pb min-w-0 flex-1" aria-label="Find an issue for {{ file.file_name }}" placeholder="Issue number or title">
     <button type="submit" class="btn-ghost btn-sm">Find issue</button>
   </form>
@@ -11,17 +14,20 @@
       {% for issue in issues %}<tr>
         <td class="font-semibold">#{{ issue.issue_number|issue_num(issue.issue_number_text|default(none)) }}</td><td>{{ issue.title or 'Untitled issue' }}</td>
         <td><form hx-boost="false" @submit.prevent="submit($el)">
-          <input type="hidden" name="token" value="{{ token }}"><input type="hidden" name="cv_id" value="{{ series.provider_id }}"><input type="hidden" name="issue_cv_id" value="{{ issue.provider_id }}">
-          <button type="submit" class="btn-primary btn-sm whitespace-nowrap" :disabled="selecting" data-testid="import-review-use-issue">Use this</button>
+          {% if native_assignment %}
+          <input type="hidden" name="token" value="{{ native_choices[issue.id].token }}"><input type="hidden" name="issue_id" value="{{ issue.id }}">
+          {% else %}<input type="hidden" name="token" value="{{ token }}"><input type="hidden" name="cv_id" value="{{ series.provider_id }}"><input type="hidden" name="issue_cv_id" value="{{ issue.provider_id }}">{% endif %}
+          <button type="submit" class="btn-primary btn-sm whitespace-nowrap" :disabled="selecting{% if native_assignment and not native_choices[issue.id].eligible %} || true{% endif %}" {% if native_assignment and not native_choices[issue.id].eligible %}disabled title="The embedded identity or issue number does not agree with this issue. Review linked metadata or correct the source, then recheck."{% endif %} data-testid="import-review-use-issue">Use this</button>
         </form></td>
       </tr>{% else %}<tr><td colspan="3" class="text-pb-text-dim">No matching issues. Try another number or title.</td></tr>{% endfor %}
     </tbody></table>
   </div>
   {% if issue_page_count > 1 %}<nav data-testid="import-review-issue-pagination" class="flex items-center justify-end gap-3 text-xs" aria-label="Issue choices pages">
-    {% if issue_page > 1 %}<button type="button" class="btn-ghost btn-sm" hx-get="/import/{{ job.id }}/files/{{ file.id }}/assign?cv_id={{ series.provider_id }}&inline=true&issue_page={{ issue_page - 1 }}&q={{ query|urlencode }}" hx-target="#import-review-issue-choices-{{ file.id }}" hx-swap="outerHTML">Previous</button>{% endif %}
+    {% if issue_page > 1 %}<button type="button" class="btn-ghost btn-sm" hx-get="{{ choices_url }}?{{ choices_query }}issue_page={{ issue_page - 1 }}&q={{ query|urlencode }}" hx-target="#import-review-issue-choices-{{ file.id }}" hx-swap="outerHTML">Previous</button>{% endif %}
     <span>{{ issue_page }} of {{ issue_page_count }}</span>
-    {% if issue_page < issue_page_count %}<button type="button" class="btn-ghost btn-sm" hx-get="/import/{{ job.id }}/files/{{ file.id }}/assign?cv_id={{ series.provider_id }}&inline=true&issue_page={{ issue_page + 1 }}&q={{ query|urlencode }}" hx-target="#import-review-issue-choices-{{ file.id }}" hx-swap="outerHTML">Next</button>{% endif %}
+    {% if issue_page < issue_page_count %}<button type="button" class="btn-ghost btn-sm" hx-get="{{ choices_url }}?{{ choices_query }}issue_page={{ issue_page + 1 }}&q={{ query|urlencode }}" hx-target="#import-review-issue-choices-{{ file.id }}" hx-swap="outerHTML">Next</button>{% endif %}
   </nav>{% endif %}
   <p class="text-xs text-pb-text-dim">Verified issue list for {{ series.title }}. Only this file's match changes.</p>
+  {% if native_assignment %}<p class="text-xs text-pb-text-sec">Choices that disagree with embedded identities or issue numbers are disabled. Review linked metadata or correct the source and recheck it; choosing an issue cannot override conflicting evidence.</p>{% endif %}
   <p x-cloak x-show="error" x-text="error" role="alert" class="text-xs text-pb-error"></p>
 </div>

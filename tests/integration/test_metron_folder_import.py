@@ -32,6 +32,9 @@ async def _setup(
     *,
     number: str = "3",
     namespace: IdentityNamespace = IdentityNamespace.METRON,
+    series_external_id: str = "21",
+    issue_external_id: str = "101",
+    default_destination: bool = True,
 ) -> tuple[LibraryRoot, Series, Issue]:
     library = root / "library"
     library.mkdir()
@@ -40,7 +43,7 @@ async def _setup(
         path=str(library),
         enabled=True,
         allow_managed_writes=True,
-        is_default_managed_destination=True,
+        is_default_managed_destination=default_destination,
     )
     series = Series(title="Harbor Lights", sort_title="Harbor Lights", year_start=2024)
     session.add_all([destination, series])
@@ -55,14 +58,14 @@ async def _setup(
             SeriesExternalIdentity(
                 series_id=series.id,
                 identity_namespace=namespace,
-                external_id="21",
+                external_id=series_external_id,
                 verification_state=IdentityVerificationState.VERIFIED,
                 evidence_kind=IdentityEvidenceKind.PROVIDER_RESULT,
             ),
             IssueExternalIdentity(
                 issue_id=issue.id,
                 identity_namespace=namespace,
-                external_id="101",
+                external_id=issue_external_id,
                 verification_state=IdentityVerificationState.VERIFIED,
                 evidence_kind=IdentityEvidenceKind.PROVIDER_RESULT,
             ),

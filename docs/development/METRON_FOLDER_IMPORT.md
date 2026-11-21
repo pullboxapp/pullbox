@@ -72,6 +72,42 @@ synthetic identities only in a disposable database.
 - Mylar matching and ComicVine-primary paired archives keep their existing path.
 - There is no database migration or new production default/feature flag.
 
+## Native Issue Choices
+
+Known Metron/GCD series now offer **Choose issue** for unresolved files in Step 3.
+The existing inline picker searches the saved, verified local catalog with a
+10-row viewport and 25-issue pages. Lettered numbers remain distinct. Opening,
+searching, paging, and applying a choice make no metadata-provider requests.
+
+This is useful after correcting a provider link or refreshing a catalog while
+an import is already in review: the user can confirm the now-proven issue for
+one file without rematching its neighbors. It is not permission to override
+contradictory XML or guess the identity of an untagged file. Each eligible
+choice must agree with the file's exact identities and embedded issue number;
+other choices stay disabled with an explanation. **Review linked metadata**,
+**Recheck linked metadata**, and **Skip this file** remain available.
+
+Choices are actor/file/issue scoped and expire. Changed source evidence, series
+links, issue links, or displayed issue identity invalidates the preview. Execution
+revalidates links and source signatures again. Owned files are not replaced, and
+two staged files targeting one unowned issue become an explicit copy conflict.
+The old ComicVine-only assignment path cannot bypass native identity checks.
+
+Local acceptance import #51 used the existing generated Metron and GCD archives.
+Only their test issue links were briefly marked stale during scan, then restored
+before opening the picker. Both choices imported successfully and rollback
+restored Skipped. All three fixture hashes and all 1,088 pre-existing library-file
+records remained unchanged. No production service was deployed.
+
+Validation passed `make validate` (16,611 passed, 1,778 skipped, one expected
+failure) and 92 focused native/legacy import regressions. Browser checks cover
+both native catalogs in all three themes, including pagination, search,
+selection, accessibility, and preservation of the review shell. The combined
+Chromium run passed all 15 checks. Firefox passed all 15 checks on rerun; an earlier run during concurrent
+validation hit an intermittent collapsed-row failure in the existing GCD
+preview test. Its cause is not established. PostgreSQL remains unqualified by
+these local results.
+
 ## Rollback Status
 
 New file-registration journal entries record the issue's status and manual-skip
