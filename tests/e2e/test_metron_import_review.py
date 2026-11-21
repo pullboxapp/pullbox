@@ -14,7 +14,9 @@ from tests.integration.test_metron_folder_import import _archive, _service
 pytestmark = pytest.mark.e2e
 
 
-async def _seed_review(root: Path, identifier: str) -> tuple[int, int, int]:
+async def _seed_review(
+    root: Path, identifier: str, namespace: str = "metron"
+) -> tuple[int, int, int]:
     from pullbox.database import get_session_factory
     from pullbox.models.import_job import ImportedFile, ImportJob, ImportSourceType
     from pullbox.models.library import LibraryRoot
@@ -22,7 +24,12 @@ async def _seed_review(root: Path, identifier: str) -> tuple[int, int, int]:
     library = root / "library"
     library.mkdir()
     source = root / "source"
-    _archive(source / "Unsorted" / "test.cbz", series_id=identifier, issue_id=identifier)
+    _archive(
+        source / "Unsorted" / "test.cbz",
+        series_id=identifier,
+        issue_id=identifier,
+        primary=namespace,
+    )
     async with get_session_factory()() as session:
         destination = LibraryRoot(name="Metron test", path=str(library), allow_managed_writes=True)
         session.add(destination)
@@ -42,7 +49,7 @@ async def _seed_review(root: Path, identifier: str) -> tuple[int, int, int]:
         return job.id, file.import_series_id, destination.id
 
 
-async def _add_verified_series(identifier: str) -> int:
+async def _add_verified_series(identifier: str, namespace: str = "metron") -> int:
     from pullbox.core.metadata_identity import IdentityEvidenceKind, IdentityNamespace
     from pullbox.core.metadata_identity_state import IdentityVerificationState
     from pullbox.database import get_session_factory
@@ -58,7 +65,7 @@ async def _add_verified_series(identifier: str) -> int:
         session.add(issue)
         await session.flush()
         evidence = dict(
-            identity_namespace=IdentityNamespace.METRON,
+            identity_namespace=IdentityNamespace(namespace),
             external_id=identifier,
             verification_state=IdentityVerificationState.VERIFIED,
             evidence_kind=IdentityEvidenceKind.PROVIDER_RESULT,
@@ -156,3 +163,47 @@ def test_metron_preview_cancel_add_and_recheck_stay_in_review(
     expect(checkbox).not_to_be_checked()
     assert not errors
     page.screenshot(path=str(Path("test-results") / f"metron-import-{theme}.png"))
+
+
+@pytest.mark.parametrize("theme", ["light", "dark", "tron"])
+def test_gcd_recheck_uses_same_review_surface_without_metron_or_cv_controls(
+    authed_page, seeded_server, tmp_path, monkeypatch, theme
+):
+    page = authed_page
+    identifier = str(39000001 + ["light", "dark", "tron"].index(theme))
+    job_id, group_id, _ = _run_async_blocking(_seed_review(tmp_path, identifier, "gcd"))
+
+    async def local_service(_session):
+        return _service()
+
+    monkeypatch.setattr("pullbox.tasks.import_task._build_import_service", local_service)
+    page.add_init_script(f"localStorage.setItem('pullbox-theme', '{theme}')")
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.goto(f"{seeded_server}/import?tab=collection&resume_job_id={job_id}&resume_step=3")
+    expect(page.locator("html")).to_have_attribute("data-theme", theme)
+    page.get_by_test_id("import-review-lane-decide").click()
+    page.get_by_role("button", name="Review identity", exact=True).click()
+    workspace = page.get_by_test_id("import-review-workspace-table")
+    expect(workspace).to_contain_text("GCD identity needs review")
+    expect(workspace.get_by_role("link", name="Add or link GCD series")).to_be_visible()
+    expect(page.get_by_test_id("import-review-metron-preview")).to_have_count(0)
+    expect(workspace).not_to_contain_text("Search ComicVine")
+    # Correcting the local link is independent of the import; recheck only reads it.
+    _run_async_blocking(_add_verified_series(identifier, "gcd"))
+    page.get_by_role("button", name="Recheck linked metadata", exact=True).click()
+    expect(page.get_by_test_id("import-review-lane-ready")).to_contain_text("(1)", timeout=15000)
+    page.get_by_test_id("import-review-lane-ready").click()
+    expect(workspace).to_contain_text("GCD identity")
+    expect(workspace).not_to_contain_text("Metron identity")
+    expect(
+        page.locator(f'[data-import-review-duplicate-selectable="{group_id}"]')
+    ).not_to_be_checked()
+    # Check settled tab colors, not an interpolated frame during lane selection.
+    page.wait_for_function(
+        """() => [...document.querySelectorAll('[id^="import-review-tab-"]')]
+            .every(tab => tab.getAnimations({subtree: true})
+                .every(animation => animation.playState === 'finished'))"""
+    )
+    assert_no_axe_violations(page, name=f"gcd-import-review-{theme}")
+    assert not errors

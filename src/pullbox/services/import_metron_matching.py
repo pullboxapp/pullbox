@@ -1,4 +1,8 @@
-"""Exact local Metron folder matches; no provider calls or identity attachment."""
+"""Exact Metron/GCD folder matches using saved XML evidence and verified links.
+
+The durable ``metron_import`` key remains compatible with existing review jobs;
+it describes evidence read from MetronInfo, not necessarily the Metron provider.
+"""
 
 from __future__ import annotations
 
@@ -83,10 +87,22 @@ def metron_import_evidence(files: ArchiveMetadataFiles) -> dict[str, Any]:
     }
 
 
+def import_identity_namespace(evidence: dict[str, Any]) -> IdentityNamespace | None:
+    primary = evidence.get("primary_source")
+    if primary in {"metron", "gcd"}:
+        return IdentityNamespace(primary)
+    namespaces = {
+        ref["namespace"]
+        for ref in evidence.get("identities", [])
+        if ref.get("namespace") in {"metron", "gcd"}
+    }
+    return IdentityNamespace(next(iter(namespaces))) if len(namespaces) == 1 else None
+
+
 def uses_metron_identity(evidence: dict[str, Any]) -> bool:
-    return evidence.get("primary_source") == "metron" or bool(
+    return evidence.get("primary_source") in {"metron", "gcd"} or bool(
         evidence.get("problems")
-        and any(ref.get("namespace") == "metron" for ref in evidence.get("identities", []))
+        and any(ref.get("namespace") in {"metron", "gcd"} for ref in evidence.get("identities", []))
     )
 
 
@@ -115,13 +131,14 @@ async def _verified_metron_series(session: AsyncSession, item: ImportedSeries) -
     if not isinstance(evidence, dict):
         return None
     refs = evidence.get("identities", [])
-    metron_ids = {ref["id"] for ref in refs if ref["namespace"] == "metron"}
+    namespace = import_identity_namespace(evidence)
+    native_ids = {ref["id"] for ref in refs if ref["namespace"] == namespace}
     owner = None
-    if len(metron_ids) == 1:
+    if namespace is not None and len(native_ids) == 1:
         owner = await session.scalar(
             select(SeriesExternalIdentity).where(
-                SeriesExternalIdentity.identity_namespace == IdentityNamespace.METRON,
-                SeriesExternalIdentity.external_id == next(iter(metron_ids)),
+                SeriesExternalIdentity.identity_namespace == namespace,
+                SeriesExternalIdentity.external_id == next(iter(native_ids)),
                 SeriesExternalIdentity.verification_state == IdentityVerificationState.VERIFIED,
             )
         )
@@ -145,20 +162,23 @@ async def _verified_metron_series(session: AsyncSession, item: ImportedSeries) -
 
 
 async def match_local_metron_series(session: AsyncSession, item: ImportedSeries) -> bool:
-    """Handle Metron-bearing groups before legacy name/CV matching can select them."""
+    """Handle native XML identities before legacy name/CV matching can select them."""
     if not isinstance((item.diagnostics or {}).get("metron_import"), dict):
         return False
     series = await _verified_metron_series(session, item)
+    namespace = import_identity_namespace(item.diagnostics["metron_import"])
+    identity_label = "GCD" if namespace == IdentityNamespace.GCD else "Metron"
+    identity_key = namespace.value if namespace else "provider"
     if series is None:
         item.status = ImportSeriesStatus.NO_MATCH
         item.diagnostics = {
             **(item.diagnostics or {}),
             "kind": "series_conflict",
-            "reason": "metron_identity_needs_review",
+            "reason": f"{identity_key}_identity_needs_review",
             "rejection_reason": (
-                "The embedded Metron series identity is not linked to one verified library series. "
-                "Add or link the correct series through Metron, then recheck its linked metadata, "
-                "or skip it for now."
+                f"The embedded {identity_label} series identity is not linked to one verified "
+                f"library series. Add or link the correct series through {identity_label}, "
+                "then recheck its linked metadata, or skip it for now."
             ),
         }
         await session.execute(
@@ -177,15 +197,19 @@ async def match_local_metron_series(session: AsyncSession, item: ImportedSeries)
     item.cv_year = series.year_start
     item.cv_issue_count = series.issue_count
     item.cv_match_score = 1.0
-    item.cv_match_method = "metron_id"
+    item.cv_match_method = f"{identity_key}_id"
     diagnostics = dict(item.diagnostics or {})
-    if diagnostics.get("reason") == "metron_identity_needs_review":
+    if diagnostics.get("reason") in {
+        "metron_identity_needs_review",
+        "gcd_identity_needs_review",
+        "provider_identity_needs_review",
+    }:
         diagnostics.pop("reason", None)
         diagnostics.pop("rejection_reason", None)
     item.diagnostics = {
         **diagnostics,
         "kind": "duplicate_series",
-        "duplicate_reason": "metron_id",
+        "duplicate_reason": item.cv_match_method,
         "existing_series_id": series.id,
         "existing_series_title": series.title,
         "duplicate_match_score": 1.0,
@@ -232,11 +256,13 @@ async def prepare_metron_series_recheck(
 ) -> ImportedSeries:
     """Prepare an explicit local-identity recheck without rescanning source files."""
     job, item = await _load_metron_review_scope(session, job_id, series_id)
+    namespace = import_identity_namespace((item.diagnostics or {}).get("metron_import") or {})
+    identity_label = "GCD" if namespace == IdentityNamespace.GCD else "Metron"
     target = await _verified_metron_series(session, item)
     if target is None:
         raise ValidationError(
             "The embedded identities still need one verified library series. "
-            "Add or link the correct Metron series, then recheck linked metadata. "
+            f"Add or link the correct {identity_label} series, then recheck linked metadata. "
             "Conflicting identities must be resolved first."
         )
     if item.series_id is not None and item.series_id != target.id:
@@ -251,8 +277,9 @@ async def prepare_metron_series_recheck(
             ImportedFile.status == ImportedFileStatus.NO_MATCH,
             and_(
                 ImportedFile.status == ImportedFileStatus.CONFLICT,
-                ImportedFile.diagnostics["conflict_type"].as_string()
-                == "metron_identity_needs_review",
+                ImportedFile.diagnostics["conflict_type"]
+                .as_string()
+                .in_(["metron_identity_needs_review", "gcd_identity_needs_review"]),
             ),
         ),
     )
@@ -335,28 +362,31 @@ def metron_file_candidate(
     from pullbox.services.import_file_match_candidates import FileMatchCandidate
 
     evidence = file_metron_evidence(file)
+    namespace = import_identity_namespace(evidence or {})
+    identity_label = "GCD" if namespace == IdentityNamespace.GCD else "Metron"
+    identity_key = namespace.value if namespace else "provider"
     error = {
         "kind": "metadata_conflict",
-        "conflict_type": "metron_identity_needs_review",
+        "conflict_type": f"{identity_key}_identity_needs_review",
         "preserve_series_match": True,
         "rejection_reason": (
-            "This file needs its own verified Metron series and issue identity. "
+            f"This file needs its own verified {identity_label} series and issue identity. "
             "Review the linked metadata and recheck it. If the source file changed, rescan it, "
             "or skip this file for now."
         ),
     }
-    if evidence is None:
+    if evidence is None or namespace is None:
         return None, error
     refs = [ref for ref in evidence.get("identities", []) if ref.get("kind") == "issue"]
     series_refs = [ref for ref in evidence.get("identities", []) if ref.get("kind") == "series"]
-    if not any(ref["namespace"] == "metron" for ref in series_refs) or any(
+    if not any(ref["namespace"] == namespace for ref in series_refs) or any(
         (ref["namespace"], ref["id"]) not in index.series_provider_ids for ref in series_refs
     ):
         return None, error
-    metron_refs = [ref for ref in refs if ref["namespace"] == "metron"]
-    if evidence.get("problems") or len(metron_refs) != 1:
+    native_refs = [ref for ref in refs if ref["namespace"] == namespace]
+    if evidence.get("problems") or len(native_refs) != 1:
         return None, error
-    target = index.provider_id_map.get(("metron", metron_refs[0]["id"]))
+    target = index.provider_id_map.get((namespace.value, native_refs[0]["id"]))
     if target is None or target[3] is None:
         return None, error
     issue = target[3]
@@ -380,7 +410,7 @@ def metron_file_candidate(
         issue,
         issue.title,
         "high",
-        "metron_id",
+        f"{identity_key}_id",
     ), None
 
 
@@ -390,7 +420,7 @@ async def revalidate_metron_import_target(
     issue: Issue,
 ) -> None:
     """A review-time provider link must still identify this issue before placement."""
-    if file.match_method != "metron_id":
+    if file.match_method not in {"metron_id", "gcd_id"}:
         return
     from pullbox.core.exceptions import ValidationError
     from pullbox.services.import_file_match_targets import FileMatchTargetIndex
@@ -414,6 +444,6 @@ async def revalidate_metron_import_target(
         candidate, _ = metron_file_candidate(file, index)
     if candidate is None or candidate.matched_issue_id != file.matched_issue_id:
         raise ValidationError(
-            "The verified Metron series or issue link changed after review. "
+            "The verified provider series or issue link changed after review. "
             "Recheck this file's match before retrying. The source file was left unchanged."
         )

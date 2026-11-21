@@ -1037,19 +1037,24 @@ async def _load_existing_series_page_target_index(
         identity_filters.append(Issue.comicvine_id.in_(sorted(requested_cv_ids)))
     if requested_issue_numbers:
         identity_filters.append(Issue.issue_number.in_(sorted(requested_issue_numbers)))
-    if imp_series.cv_match_method == "metron_id":
-        metron_ids = {
+    if imp_series.cv_match_method in {"metron_id", "gcd_id"}:
+        namespace = (
+            IdentityNamespace.GCD
+            if imp_series.cv_match_method == "gcd_id"
+            else IdentityNamespace.METRON
+        )
+        native_ids = {
             ref["id"]
             for file in files
             for ref in (file_metron_evidence(file) or {}).get("identities", [])
-            if ref.get("namespace") == "metron" and ref.get("kind") == "issue"
+            if ref.get("namespace") == namespace and ref.get("kind") == "issue"
         }
-        if metron_ids:
+        if native_ids:
             identity_filters.append(
                 Issue.id.in_(
                     sa_select(IssueExternalIdentity.issue_id).where(
-                        IssueExternalIdentity.identity_namespace == IdentityNamespace.METRON,
-                        IssueExternalIdentity.external_id.in_(metron_ids),
+                        IssueExternalIdentity.identity_namespace == namespace,
+                        IssueExternalIdentity.external_id.in_(native_ids),
                     )
                 )
             )
@@ -1075,7 +1080,7 @@ async def _load_existing_series_page_target_index(
 
     ambiguous_issue_numbers: set[float] = set()
     for issue, owned in target_rows:
-        if imp_series.cv_match_method == "metron_id":
+        if imp_series.cv_match_method in {"metron_id", "gcd_id"}:
             target_index.issue_entries.append((issue, bool(owned)))
         entry = (issue.id, issue.comicvine_id, bool(owned), issue, issue.title)
         if issue.comicvine_id is not None:
@@ -1088,7 +1093,7 @@ async def _load_existing_series_page_target_index(
             ambiguous_issue_numbers.add(issue.issue_number)
             continue
         target_index.number_map[issue.issue_number] = entry
-    if imp_series.cv_match_method == "metron_id":
+    if imp_series.cv_match_method in {"metron_id", "gcd_id"}:
         await load_metron_issue_targets(session, target_index, files)
     return target_index
 
@@ -2097,7 +2102,7 @@ def _evaluate_file_match_candidate(
     series_high_confidence: bool,
 ) -> tuple[FileMatchCandidate | None, dict[str, Any] | None]:
     if (
-        imp_series.cv_match_method == "metron_id"
+        imp_series.cv_match_method in {"metron_id", "gcd_id"}
         or (imp_series.diagnostics or {}).get("metron_import") is not None
     ):
         return metron_file_candidate(imp_file, target_index)

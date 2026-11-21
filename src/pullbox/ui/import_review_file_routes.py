@@ -58,6 +58,7 @@ async def metron_preview_context(
     )
 
 
+@router.post("/import/{job_id}/series/{series_id}/identity-recheck", include_in_schema=False)
 @router.post("/import/{job_id}/series/{series_id}/metron-recheck", include_in_schema=False)
 async def recheck_metron_identity(
     job_id: int,
@@ -69,20 +70,25 @@ async def recheck_metron_identity(
 
     from pullbox.core.exceptions import ValidationError
     from pullbox.models.import_job import ImportJobLog
-    from pullbox.services.import_metron_matching import prepare_metron_series_recheck
+    from pullbox.services.import_metron_matching import (
+        import_identity_namespace,
+        prepare_metron_series_recheck,
+    )
     from pullbox.tasks.import_task import trigger_import_series_rematch
 
     try:
-        await prepare_metron_series_recheck(session, job_id, series_id)
+        item = await prepare_metron_series_recheck(session, job_id, series_id)
     except ValidationError as exc:
         await session.rollback()
         raise HTTPException(status_code=409, detail=exc.message) from exc
+    namespace = import_identity_namespace((item.diagnostics or {}).get("metron_import") or {})
+    identity_key = namespace.value if namespace else "provider"
     session.add(
         ImportJobLog(
             import_job_id=job_id,
             level="INFO",
-            event="import_metron_identity_recheck_requested",
-            message="Rechecking saved Metron identities against the linked library metadata.",
+            event=f"import_{identity_key}_identity_recheck_requested",
+            message="Rechecking saved provider identities against the linked library metadata.",
             data={"imported_series_id": series_id, "actor_user_id": user.id},
         )
     )

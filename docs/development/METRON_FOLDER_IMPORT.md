@@ -1,4 +1,4 @@
-# Metron Folder Import Checkpoint
+# Native Provider Folder Import Checkpoint
 
 ## Available Behavior
 
@@ -131,13 +131,35 @@ dark, and Tron themes. The modal also passes the automated accessibility check.
 
 ## Remaining Scope
 
-This is not the complete provider-aware importer. GCD matching, automatic
-split-folder regrouping, and provider-neutral issue reassignment/recovery remain
-separate milestones.
+### GCD Exact-Identity Extension
+
+GCD-primary `MetronInfo.xml` archives now use the same local exact-identity path.
+Both `GCD` and `Grand Comics Database` source names are accepted by the existing
+XML reader. The file must supply its own native series and issue identities,
+and both must agree with verified links already saved in Pullbox. ComicVine IDs
+are not required. Matching and rechecking do not contact a provider.
+
+Step 3 labels these rows **GCD identity**. For an unknown series, **Add or link
+GCD series** opens the existing Add Series page in a separate tab. After adding
+or correcting the linked catalog, return and use **Recheck linked metadata**.
+Rechecking does not select or import files. The inline exact GCD preview/add
+shortcut is not part of this checkpoint.
+
+Integration coverage exercises numeric and lettered issue numbers, absent
+Number with exact identity proof, conflicting and stale links, already-owned
+files, final placement revalidation, source preservation, and rollback. Browser
+coverage checks GCD labels and same-job rechecking in all three themes. Live
+GCD import acceptance testing remains separate from the completed Metron
+browser checks above.
+
+This is not the complete provider-aware importer. Inline GCD preview/add,
+automatic split-folder regrouping, and provider-neutral issue
+reassignment/recovery remain separate milestones.
 This checkpoint targets CBZ folder imports, not additional archive formats.
 It does not qualify PostgreSQL or change Anna's verification work.
 
 Regression coverage is in `tests/integration/test_metron_folder_import.py`,
+`tests/integration/test_gcd_folder_import.py`,
 `tests/integration/test_metron_import_recheck.py`,
 `tests/api/test_source_series_add_api.py`, `tests/e2e/test_metron_import_review.py`,
 `tests/unit/test_import_scan_materialization.py`, and

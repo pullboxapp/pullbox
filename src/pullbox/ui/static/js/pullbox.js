@@ -8392,7 +8392,7 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
     },
 
     recheckMetronIdentity: function (seriesId, button) {
-      return this.applyReviewAction("/import/" + this.jobId + "/series/" + seriesId + "/metron-recheck", "POST", {}, button);
+      return this.applyReviewAction("/import/" + this.jobId + "/series/" + seriesId + "/identity-recheck", "POST", {}, button);
     },
 
     selectReviewPage: async function (checked, checkbox) {

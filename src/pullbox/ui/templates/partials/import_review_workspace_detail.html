@@ -27,10 +27,10 @@
     </section>
     <section class="min-w-0 space-y-3">
       {% if metron_row and reason_key in ('needs_series', 'series_conflict') %}
-      <h3 class="text-[11px] font-semibold uppercase tracking-wider text-pb-text-dim">Metron identity</h3>
-      <p class="text-xs text-pb-text-sec">Add the series through Metron, or correct its linked metadata, then recheck here without starting another import. Titles alone cannot replace conflicting identities. Changed source files still need a source recheck or rescan.</p>
+      <h3 class="text-[11px] font-semibold uppercase tracking-wider text-pb-text-dim">{{ identity_label }} identity</h3>
+      <p class="text-xs text-pb-text-sec">Add the series through {{ identity_label }}, or correct its linked metadata, then recheck here without starting another import. Titles alone cannot replace conflicting identities. Changed source files still need a source recheck or rescan.</p>
       {% set metron_ids = series_diagnostics.get('metron_import', {}).get('identities', [])|selectattr('namespace', 'equalto', 'metron')|map(attribute='id')|unique|list %}
-      {% if metron_ids|length == 1 %}<button type="button" class="btn-ghost btn-sm" data-testid="import-review-metron-preview" :disabled="reviewActionPending || {{ 'true' if row.updating else 'false' }}" @click="$dispatch('import:metron-preview', {jobId: {{ job.id }}, seriesId: {{ item.id }}, trigger: $event.currentTarget})">Preview Metron series</button>{% endif %}
+      {% if gcd_row %}<a class="btn-ghost btn-sm" href="/series/add" target="_blank" rel="noopener noreferrer">Add or link GCD series</a>{% elif metron_ids|length == 1 %}<button type="button" class="btn-ghost btn-sm" data-testid="import-review-metron-preview" :disabled="reviewActionPending || {{ 'true' if row.updating else 'false' }}" @click="$dispatch('import:metron-preview', {jobId: {{ job.id }}, seriesId: {{ item.id }}, trigger: $event.currentTarget})">Preview Metron series</button>{% endif %}
       <button type="button" class="btn-primary btn-sm" data-testid="import-review-metron-recheck" :disabled="reviewActionPending || {{ 'true' if row.updating else 'false' }}" @click="recheckMetronIdentity({{ item.id }}, $event.currentTarget)">Recheck linked metadata</button>
       {% elif reason_key in ('needs_series', 'series_conflict') %}
       <h3 class="text-[11px] font-semibold uppercase tracking-wider text-pb-text-dim">ComicVine candidates</h3>
@@ -49,7 +49,7 @@
         <div class="flex flex-wrap items-center justify-between gap-2"><span class="font-mono text-xs text-pb-text [overflow-wrap:anywhere]">{{ file.file_name }}</span><span class="text-xs text-pb-text-dim">{{ file.file_size|filesize }}</span></div>
         {% if file.status == 'skipped' %}<span class="pill pill-neutral" data-import-review-file-outcome="{{ file.id }}">Skipped</span>{% else %}
         {% if metron_row %}
-        <p class="mt-2 text-xs text-pb-text-sec">Correct the linked Metron series or issue metadata, then recheck here. If the source file changed, recheck its source or rescan it. You can also skip it for now.</p>
+        <p class="mt-2 text-xs text-pb-text-sec">Correct the linked {{ identity_label }} series or issue metadata, then recheck here. If the source file changed, recheck its source or rescan it. You can also skip it for now.</p>
         <div class="mt-2 flex flex-wrap gap-2">{% if item.series_id %}<a class="btn-ghost btn-sm" href="/series/{{ item.series_id }}" target="_blank" rel="noopener noreferrer">Review linked metadata</a>{% endif %}<button type="button" class="btn-ghost btn-sm" :disabled="reviewActionPending" @click="skipReviewFile({{ item.id }}, {{ file.id }}, $event.currentTarget)">Skip this file</button></div>
         {% else %}
         {% set issue_choices_url = ('/import/' ~ job.id ~ '/files/' ~ file.id ~ '/assign?cv_id=' ~ known_cv_id ~ '&inline=true') if known_cv_id else none %}

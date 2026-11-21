@@ -27,7 +27,11 @@ if TYPE_CHECKING:
 
 
 async def _setup(
-    session: AsyncSession, root: Path, *, number: str = "3"
+    session: AsyncSession,
+    root: Path,
+    *,
+    number: str = "3",
+    namespace: IdentityNamespace = IdentityNamespace.METRON,
 ) -> tuple[LibraryRoot, Series, Issue]:
     library = root / "library"
     library.mkdir()
@@ -50,14 +54,14 @@ async def _setup(
         [
             SeriesExternalIdentity(
                 series_id=series.id,
-                identity_namespace=IdentityNamespace.METRON,
+                identity_namespace=namespace,
                 external_id="21",
                 verification_state=IdentityVerificationState.VERIFIED,
                 evidence_kind=IdentityEvidenceKind.PROVIDER_RESULT,
             ),
             IssueExternalIdentity(
                 issue_id=issue.id,
-                identity_namespace=IdentityNamespace.METRON,
+                identity_namespace=namespace,
                 external_id="101",
                 verification_state=IdentityVerificationState.VERIFIED,
                 evidence_kind=IdentityEvidenceKind.PROVIDER_RESULT,

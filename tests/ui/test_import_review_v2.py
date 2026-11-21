@@ -234,16 +234,18 @@ async def test_v2_ready_table_and_gate_preserve_file_selection(authenticated_cli
 
 
 @pytest.mark.parametrize("series_id", ["21", "999"])
+@pytest.mark.parametrize("namespace", ["metron", "gcd"])
 async def test_metron_folder_review_is_selectable_without_comicvine_controls(
-    authenticated_client, sec_db, tmp_path, series_id
+    authenticated_client, sec_db, tmp_path, series_id, namespace
 ):
+    from pullbox.core.metadata_identity import IdentityNamespace
     from pullbox.schemas.import_job import ImportJobCreate
     from tests.integration.test_metron_folder_import import _archive, _service, _setup
 
     async with sec_db() as session:
-        root, _, _ = await _setup(session, tmp_path)
+        root, _, _ = await _setup(session, tmp_path, namespace=IdentityNamespace(namespace))
         source = tmp_path / "source"
-        _archive(source / "Unsorted" / "unidentified.cbz", series_id=series_id)
+        _archive(source / "Unsorted" / "unidentified.cbz", series_id=series_id, primary=namespace)
         service = _service()
         job = await service.create_job(
             session,
@@ -262,7 +264,7 @@ async def test_metron_folder_review_is_selectable_without_comicvine_controls(
     assert "Change ComicVine match" not in workspace
     assert 'data-testid="import-review-cv-id-link"' not in workspace
     if series_id == "21":
-        assert "Metron identity" in workspace
+        assert f"{'GCD' if namespace == 'gcd' else 'Metron'} identity" in workspace
         assert "data-import-review-duplicate-selectable" in workspace
         assert 'data-testid="import-review-file-select"' in workspace
         assert "1 ready" in workspace
@@ -271,11 +273,65 @@ async def test_metron_folder_review_is_selectable_without_comicvine_controls(
         assert "Skip series" in workspace
         assert "Recheck linked metadata" in workspace
         assert 'data-testid="import-review-metron-recheck"' in workspace
-        assert 'data-testid="import-review-metron-preview"' in workspace
-        assert "Preview Metron series" in workspace
-        assert "Metron identity needs review" in workspace
+        if namespace == "metron":
+            assert 'data-testid="import-review-metron-preview"' in workspace
+            assert "Preview Metron series" in workspace
+            assert 'href="/series/add"' not in workspace
+        else:
+            assert 'data-testid="import-review-metron-preview"' not in workspace
+            assert "Add or link GCD series" in workspace
+            assert "Metron identity" not in workspace
+        assert f"{'GCD' if namespace == 'gcd' else 'Metron'} identity needs review" in workspace
         assert "More than one series fits" not in workspace
-        assert 'href="/series/add"' not in workspace
+
+
+async def test_gcd_review_recheck_uses_corrected_local_identity(
+    authenticated_client, sec_db, tmp_path, monkeypatch
+):
+    from unittest.mock import Mock
+
+    from sqlalchemy import select
+
+    from pullbox.core.metadata_identity import IdentityNamespace
+    from pullbox.core.metadata_identity_state import IdentityVerificationState
+    from pullbox.models.import_job import ImportedFile, ImportedFileStatus
+    from pullbox.models.metadata_identity import SeriesExternalIdentity
+    from pullbox.schemas.import_job import ImportJobCreate
+    from tests.integration.test_metron_folder_import import _archive, _service, _setup
+    from tests.ui.test_import_safety_bulk_ui import _csrf_header_for
+
+    trigger = Mock()
+    monkeypatch.setattr("pullbox.tasks.import_task.trigger_import_series_rematch", trigger)
+    async with sec_db() as session:
+        root, _, issue = await _setup(session, tmp_path, namespace=IdentityNamespace.GCD)
+        link = (await session.scalars(select(SeriesExternalIdentity))).one()
+        link.verification_state = IdentityVerificationState.STALE
+        source = tmp_path / "source"
+        _archive(source / "Unsorted" / "test.cbz", primary="GCD")
+        service = _service()
+        job = await service.create_job(
+            session,
+            ImportJobCreate(
+                source_path=str(source), source_type="filesystem", target_library_root_id=root.id
+            ),
+        )
+        await service.start_scan(session, job.id)
+        file = (await session.scalars(select(ImportedFile))).one()
+        job_id, group_id, file_id, issue_id = job.id, file.import_series_id, file.id, issue.id
+        assert file.status == ImportedFileStatus.NO_MATCH
+        link.verification_state = IdentityVerificationState.VERIFIED
+        await session.commit()
+    response = await authenticated_client.post(
+        f"/import/{job_id}/series/{group_id}/identity-recheck",
+        headers=_csrf_header_for(authenticated_client),
+    )
+    assert response.status_code == 202, response.text
+    trigger.assert_called_once_with(job_id, group_id)
+    async with sec_db() as session:
+        await service.rematch_imported_series_files(session, job_id, group_id)
+        file = await session.get(ImportedFile, file_id)
+        assert file.status == ImportedFileStatus.MATCHED
+        assert file.matched_issue_id == issue_id and not file.include_in_import
 
 
 async def test_metron_review_recheck_queues_local_rematch(
