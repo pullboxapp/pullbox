@@ -1,13 +1,21 @@
 """Fresh release observations request confirmation, never guess an automatic Add."""
 
 import asyncio
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select
 
 from pullbox.config import get_settings
-from pullbox.models import Series, SeriesInterest, SeriesInterestState
+from pullbox.models import (
+    Issue,
+    LibraryRoot,
+    Series,
+    SeriesExternalIdentity,
+    SeriesInterest,
+    SeriesInterestState,
+)
+from pullbox.models.issue import IssueStatus
 from pullbox.schemas.whats_new import WhatsNewWatchRequest
 from pullbox.services.series_interest import cancel_watch, save_watch
 from pullbox.services.whats_new_refresh_queue import run_whats_new_refresh
@@ -49,6 +57,126 @@ async def saved_watch(factory, tmp_path):
             session, WhatsNewWatchRequest(selection=contexts[0].selection), actor
         )
         return interest.id, actor
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "tracked",
+        "previous_confirmation",
+        "corroborated",
+        "published_next_issue_upcoming",
+        "cross_feed_disagreement",
+        "cancelled",
+        "paused",
+        "wrong_root",
+        "disabled_root",
+        "offline_root",
+        "stale_link",
+        "unknown_publication",
+        "yesterday",
+        "conflicting_variant",
+        "foreign_disagreement",
+        "malformed_id",
+        "flag_off",
+    ],
+)
+async def test_refresh_settles_only_verified_published_local_watch(
+    identity_probe_db, tmp_path, watch_refresh_enabled, monkeypatch, case
+):
+    _, factory, _ = identity_probe_db
+    interest_id, actor = await saved_watch(factory, tmp_path)
+    async with factory.begin() as session:
+        interest = await session.get(SeriesInterest, interest_id)
+        if case == "previous_confirmation":
+            interest.state = SeriesInterestState.NEEDS_CONFIRMATION
+        if case == "cancelled":
+            await cancel_watch(session, interest_id, actor)
+        root = await session.get(LibraryRoot, interest.target_library_root_id)
+        series = Series(
+            title="Different display title",
+            sort_title="different",
+            monitored=case != "paused",
+            preferred_library_root_id=None if case == "wrong_root" else root.id,
+        )
+        session.add(series)
+        await session.flush()
+        series_id = series.id
+        session.add(Issue(series_id=series_id, issue_number=1, status=IssueStatus.SKIPPED))
+        for namespace, identity in [("locg", interest.source_series_id), ("metron", "998")]:
+            session.add(
+                SeriesExternalIdentity(
+                    series_id=series.id,
+                    identity_namespace=namespace,
+                    external_id=identity,
+                    verification_state="stale"
+                    if case == "stale_link" and namespace == "locg"
+                    else "verified",
+                    evidence_kind="user_selection",
+                )
+            )
+        if case == "disabled_root":
+            root.enabled = False
+    if case == "offline_root":
+        (tmp_path / "root").rmdir()
+    if case == "flag_off":
+        monkeypatch.setenv("PULLBOX_METADATA_WHATS_NEW_ACTIONS_ENABLED", "false")
+        get_settings.cache_clear()
+    today = datetime.now(UTC).date()
+    release = _issue_summary()
+    release["store_date"] = date.today().isoformat()
+    fields = dict(
+        release["series"], publication_state="published", publication_as_of=today.isoformat()
+    )
+    if case == "yesterday":
+        fields["publication_as_of"] = (today - timedelta(days=1)).isoformat()
+    if case == "unknown_publication":
+        fields["publication_state"] = "unknown"
+    if case in {"corroborated", "foreign_disagreement", "malformed_id"}:
+        fields["metron_series_id"] = {
+            "corroborated": 998,
+            "foreign_disagreement": 999,
+            "malformed_id": True,
+        }[case]
+    release["series"] = fields
+    if case == "published_next_issue_upcoming":
+        release["store_date"] = (today + timedelta(days=30)).isoformat()
+    other = {**release, "locg_series_id": 123} if case == "conflicting_variant" else release
+    client = ReleaseClient([release, other], upcoming=case == "published_next_issue_upcoming")
+    if case == "cross_feed_disagreement":
+
+        class ContradictoryClient(ReleaseClient):
+            async def get_upcoming(self):
+                variant = {**release, "series": {**fields, "publication_state": "unknown"}}
+                return {"weeks": [{"store_date": today.isoformat(), "issues": [variant]}]}
+
+        client = ContradictoryClient([release])
+    for _ in range(2):
+        await run_whats_new_refresh(session_factory=factory, client=client)
+    async with factory() as session:
+        interest = await session.get(SeriesInterest, interest_id)
+        promoted = case in {
+            "tracked",
+            "previous_confirmation",
+            "corroborated",
+            "published_next_issue_upcoming",
+        }
+        expected = {
+            "cancelled": SeriesInterestState.CANCELLED,
+            "flag_off": SeriesInterestState.WATCHING,
+        }
+        assert interest.state is (
+            SeriesInterestState.PROMOTED
+            if promoted
+            else expected.get(case, SeriesInterestState.NEEDS_CONFIRMATION)
+        )
+        assert interest.resolved_series_id == (series_id if promoted else None)
+        assert interest.last_actor_user_id == actor
+        assert (await session.get(Series, series_id)).monitored == (case != "paused")
+        assert await session.scalar(select(Issue.status)) == IssueStatus.SKIPPED
+        assert await session.scalar(select(func.count()).select_from(Series)) == 1
+        assert await session.scalar(select(func.count()).select_from(SeriesExternalIdentity)) == 2
+    assert not list((tmp_path / "root").glob("*"))
 
 
 @pytest.mark.parametrize("upcoming", [False, True])

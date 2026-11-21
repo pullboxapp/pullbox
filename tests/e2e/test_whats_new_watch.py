@@ -1,7 +1,7 @@
 """Real Watch save/cancel and explicit completion, without replacing page content."""
 # ruff: noqa: F811 - reuse the owning discovery/browser fixture.
 
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -12,6 +12,8 @@ from sqlalchemy import delete, select
 from pullbox.database import get_session_factory
 from pullbox.models.config import SystemConfig
 from pullbox.models.library import LibraryRoot
+from pullbox.models.metadata_identity import SeriesExternalIdentity
+from pullbox.models.series import Series
 from pullbox.models.series_interest import SeriesInterest, SeriesInterestState
 from pullbox.models.whats_new import WhatsNewReleaseCache
 from pullbox.services.whats_new_refresh_queue import run_whats_new_refresh
@@ -105,7 +107,7 @@ def test_watch_reload_pull_list_cancel_and_rewatch(watch_page, seeded_server):
     expect(row).to_contain_text("Watching")
 
 
-async def publish_watched_fixture():
+async def publish_watched_fixture(*, publication_confirmed=False):
     factory = get_session_factory()
     async with factory.begin() as session:
         cached = await session.scalar(select(WhatsNewReleaseCache))
@@ -113,6 +115,13 @@ async def publish_watched_fixture():
             {**release, "store_date": date.today().isoformat()}
             for release in cached.payload["issues"]
         ]
+        if publication_confirmed:
+            for release in releases:
+                release["series"] = {
+                    **release["series"],
+                    "publication_state": "published",
+                    "publication_as_of": datetime.now(UTC).date().isoformat(),
+                }
         await session.execute(delete(WhatsNewReleaseCache))
 
     class Client:
@@ -124,9 +133,61 @@ async def publish_watched_fixture():
 
     await run_whats_new_refresh(session_factory=factory, client=Client())
     async with factory() as session:
-        assert (
-            await session.scalar(select(SeriesInterest))
-        ).state is SeriesInterestState.NEEDS_CONFIRMATION
+        assert (await session.scalar(select(SeriesInterest))).state is (
+            SeriesInterestState.PROMOTED
+            if publication_confirmed
+            else SeriesInterestState.NEEDS_CONFIRMATION
+        )
+
+
+def test_refresh_moves_already_tracked_watch_out_of_pull_list(watch_page, seeded_server):
+    page = watch_page
+    page.goto(f"{seeded_server}/whats-new")
+    row = page.get_by_test_id("whats-new-release-row").filter(has_text="Atlas Deluxe")
+    row.get_by_role("button", name="Watch", exact=True).click()
+    expect(row).to_contain_text("Watching")
+    page.goto(f"{seeded_server}/pull-list")
+    watched = page.get_by_test_id("pull-list-watch-row").filter(has_text="Atlas Deluxe")
+    expect(watched).to_be_visible()
+
+    async def add_verified_owner():
+        async with get_session_factory().begin() as session:
+            watch = await session.scalar(select(SeriesInterest))
+            series = Series(
+                title="Atlas Library Edition",
+                sort_title="atlas library edition",
+                monitored=True,
+                preferred_library_root_id=watch.target_library_root_id,
+            )
+            session.add(series)
+            await session.flush()
+            session.add(
+                SeriesExternalIdentity(
+                    series_id=series.id,
+                    identity_namespace="locg",
+                    external_id=watch.source_series_id,
+                    verification_state="verified",
+                    evidence_kind="user_selection",
+                )
+            )
+            return series.id
+
+    async def remove_fixture(series_id):
+        async with get_session_factory().begin() as session:
+            await session.execute(delete(Series).where(Series.id == series_id))
+
+    owner = _run_async_blocking(add_verified_owner())
+    try:
+        _run_async_blocking(publish_watched_fixture(publication_confirmed=True))
+        page.reload()
+        expect(watched).to_have_count(0)
+        page.goto(f"{seeded_server}/whats-new")
+        expect(row).to_contain_text("Tracked")
+        expect(row.get_by_test_id("whats-new-local-series")).to_have_attribute(
+            "href", f"/series/{owner}"
+        )
+    finally:
+        _run_async_blocking(remove_fixture(owner))
 
 
 @pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 390), ("monitor", 320)])

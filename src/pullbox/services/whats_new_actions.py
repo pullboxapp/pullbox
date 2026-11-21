@@ -38,7 +38,7 @@ from pullbox.services.metadata_identity_review import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Iterator
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -150,31 +150,82 @@ def _release_date(value: object) -> date | None:
         return None
 
 
-def available_release_series_ids(payload: dict[str, object], *, as_of: date) -> set[str]:
-    """Observed release dates invite confirmation, not proof of provider identity."""
+def _release_rows(payload: dict[str, object]) -> Iterator[tuple[dict[str, object], object]]:
     groups = [(payload.get("issues"), payload.get("store_date"))]
     weeks = payload.get("weeks")
     if isinstance(weeks, list):
         groups.extend(
             (week.get("issues"), week.get("store_date")) for week in weeks if isinstance(week, dict)
         )
-    available = set()
     for releases, group_date in groups:
         if not isinstance(releases, list):
             continue
         for release in releases:
-            if not isinstance(release, dict) or not positive_id(release.get("locg_issue_id")):
-                continue
-            observed_date = _release_date(release.get("store_date") or group_date)
-            if observed_date is None or observed_date > as_of:
-                continue
-            try:
-                identity = release_series_id(release)
-            except WhatsNewSelectionError:
-                continue
-            if identity:
-                available.add(identity)
+            if isinstance(release, dict):
+                yield release, group_date
+
+
+def available_release_series_ids(payload: dict[str, object], *, as_of: date) -> set[str]:
+    """Observed release dates invite confirmation, not proof of provider identity."""
+    available = set()
+    for release, group_date in _release_rows(payload):
+        if not positive_id(release.get("locg_issue_id")):
+            continue
+        observed_date = _release_date(release.get("store_date") or group_date)
+        if observed_date is None or observed_date > as_of:
+            continue
+        try:
+            identity = release_series_id(release)
+        except WhatsNewSelectionError:
+            continue
+        if identity:
+            available.add(identity)
     return available
+
+
+def published_watch_evidence(
+    *payloads: dict[str, object], as_of: date
+) -> dict[str, dict[IdentityNamespace, str]]:
+    """Agree across both feeds; a scheduled issue date cannot prove publication."""
+    evidence: dict[str, dict[IdentityNamespace, str]] = {}
+    disputed: set[str] = set()
+    issue_owners: dict[str, str] = {}
+    for payload in payloads:
+        for release, _ in _release_rows(payload):
+            series = release.get("series")
+            direct = positive_id(release.get("locg_series_id"))
+            nested = positive_id(series.get("locg_series_id")) if isinstance(series, dict) else None
+            if (
+                not isinstance(series, dict)
+                or not nested
+                or (release.get("locg_series_id") is not None and direct != nested)
+            ):
+                disputed.update(identity for identity in (direct, nested) if identity)
+                continue
+            issue = positive_id(release.get("locg_issue_id"))
+            if issue and (other := issue_owners.setdefault(issue, nested)) != nested:
+                disputed.update((other, nested))
+            if (
+                not issue
+                or series.get("publication_state") != "published"
+                or series.get("publication_as_of") != as_of.isoformat()
+            ):
+                disputed.add(nested)
+                continue
+            claims = evidence.setdefault(nested, {})
+            for namespace in (
+                IdentityNamespace.COMICVINE,
+                IdentityNamespace.METRON,
+                IdentityNamespace.GCD,
+            ):
+                value = series.get(f"{namespace.value}_series_id")
+                if value is not None and (
+                    type(value) is not int
+                    or not 0 < value < 2**63
+                    or claims.setdefault(namespace, str(value)) != str(value)
+                ):
+                    disputed.add(nested)
+    return {identity: claims for identity, claims in evidence.items() if identity not in disputed}
 
 
 async def validate_release_selection(

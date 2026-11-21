@@ -9,7 +9,9 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 from pullbox.core.metadata_identity import IdentityNamespace
+from pullbox.core.metadata_identity_state import IdentityVerificationState
 from pullbox.models.issue import Issue, IssueStatus
+from pullbox.models.library import LibraryRoot
 from pullbox.models.metadata_identity import SeriesExternalIdentity
 from pullbox.models.series import Series
 from pullbox.models.series_interest import SeriesInterest, SeriesInterestState
@@ -152,6 +154,76 @@ async def request_watch_confirmation(session: AsyncSession, identities: Iterable
         )
         .values(state=SeriesInterestState.NEEDS_CONFIRMATION)
     )
+
+
+async def reconcile_tracked_watches(
+    session: AsyncSession, evidence: dict[str, dict[IdentityNamespace, str]]
+) -> None:
+    """Settle existing tracked owners only. No provider, monitoring or issue mutations."""
+    if not evidence:
+        return
+    link = SeriesExternalIdentity
+    owners = (
+        select(SeriesInterest.id, SeriesInterest.source_series_id, Series.id, LibraryRoot.id)
+        .select_from(SeriesInterest)
+        .join(link, link.external_id == SeriesInterest.source_series_id)
+        .join(Series, Series.id == link.series_id)
+        .join(LibraryRoot, LibraryRoot.id == SeriesInterest.target_library_root_id)
+        .where(
+            SeriesInterest.state.in_(ACTIVE_STATES),
+            SeriesInterest.source_namespace == "locg",
+            link.identity_namespace == IdentityNamespace.LOCG,
+            link.verification_state == IdentityVerificationState.VERIFIED,
+            Series.monitored.is_(True),
+            Series.preferred_library_root_id == LibraryRoot.id,
+            LibraryRoot.enabled.is_(True),
+            LibraryRoot.allow_managed_writes.is_(True),
+        )
+    )
+    matches = [r for r in await session.execute(owners) if r[1] in evidence]
+    if not matches:
+        return
+    paths = {
+        r["id"]: r["path"] for r in await available_add_series_roots(session, require_default=False)
+    }
+    for watch_id, identity, series_id, root_id in matches:
+        if root_id not in paths:
+            continue
+        # Recheck the entire binding at the write, including cancellation and root changes.
+        eligible = owners.where(
+            SeriesInterest.id == watch_id,
+            SeriesInterest.source_series_id == identity,
+            Series.id == series_id,
+            LibraryRoot.id == root_id,
+            LibraryRoot.path == paths[root_id],
+        )
+        for namespace, value in evidence[identity].items():
+            eligible = eligible.where(
+                select(link.id)
+                .where(
+                    link.series_id == series_id,
+                    link.identity_namespace == namespace,
+                    link.external_id == value,
+                    link.verification_state == IdentityVerificationState.VERIFIED,
+                )
+                .correlate(None)
+                .exists()
+            )
+            if namespace == IdentityNamespace.COMICVINE:
+                eligible = eligible.where(
+                    Series.comicvine_id.is_(None) | (Series.comicvine_id == int(value))
+                )
+        await session.execute(
+            update(SeriesInterest)
+            .where(
+                SeriesInterest.id == watch_id,
+                SeriesInterest.state.in_(ACTIVE_STATES),
+                SeriesInterest.target_library_root_id == root_id,
+                eligible.correlate(None).exists(),
+            )
+            .values(state=SeriesInterestState.PROMOTED, resolved_series_id=series_id)
+            .execution_options(synchronize_session=False)
+        )
 
 
 async def promote_confirmed_watch(

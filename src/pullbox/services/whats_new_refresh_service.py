@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Protocol
 
 from pullbox.config import get_settings
-from pullbox.services.series_interest import request_watch_confirmation
-from pullbox.services.whats_new_actions import available_release_series_ids
+from pullbox.services.series_interest import reconcile_tracked_watches, request_watch_confirmation
+from pullbox.services.whats_new_actions import (
+    available_release_series_ids,
+    published_watch_evidence,
+)
 from pullbox.services.whats_new_cache_service import WhatsNewCacheService
 from pullbox.services.whats_new_data_client import PullboxDataClientError, WhatsNewDataClient
 
@@ -53,6 +56,16 @@ class WhatsNewRefreshService:
         upcoming_payload = await self.client.get_upcoming()
         store_date = _payload_store_date(current_payload)
 
+        actions_enabled = get_settings().metadata_whats_new_actions_enabled
+        published = (
+            published_watch_evidence(
+                current_payload, upcoming_payload, as_of=datetime.now(UTC).date()
+            )
+            if actions_enabled
+            else {}
+        )
+        if published:
+            await reconcile_tracked_watches(session, published)
         await self.cache.upsert_current_week(
             session,
             store_date=store_date,
@@ -60,10 +73,11 @@ class WhatsNewRefreshService:
         )
         await self.cache.upsert_upcoming(session, payload=upcoming_payload)
 
-        if get_settings().metadata_whats_new_actions_enabled:
+        if actions_enabled:
             as_of = date.today()
             available = available_release_series_ids(current_payload, as_of=as_of)
             available.update(available_release_series_ids(upcoming_payload, as_of=as_of))
+            available.update(published)
             await request_watch_confirmation(session, available)
 
         return WhatsNewRefreshResult(
