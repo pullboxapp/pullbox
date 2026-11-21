@@ -153,9 +153,10 @@ Coverage includes Metron/GCD catalogs, untagged and ComicInfo-only archives,
 lettered issues, stale/contradictory identities, CSRF, actor-bound previews,
 rematching, unchosen neighbors, source-preserving import and rollback, paged
 library search, all three themes, and automated accessibility checks. Local
-browser acceptance for the generated untagged archive is staged as import #52;
-it is not yet recorded as completed. PostgreSQL and broader provider-aware
-import/recovery qualification remain separate release requirements.
+browser acceptance for the generated untagged archive completed as import #52,
+including the cross-catalog correction above, import and rollback. PostgreSQL
+and broader provider-aware import/recovery qualification remain separate release
+requirements.
 
 Validation for this checkpoint passed `make validate`: 16,627 tests passed,
 1,778 were skipped, and one was an expected failure. The focused selection
@@ -241,7 +242,7 @@ PostgreSQL parity and broader Mylar/native recovery remain separate requirements
 The local lab has three separate synthetic scenarios under `sources/compiled-sidecar`:
 series-only Metron evidence needing per-file choice, exact GCD issue evidence
 with its series supplied by the sidecar, and a conflicting issue number. They
-do not alter the existing review job. Finish or cancel that review before
+do not alter other review jobs. Finish or cancel an active review before
 starting a new scenario, and roll back successful synthetic imports afterward.
 
 The combined review, native search/add and series-choice browser suite passed
@@ -261,6 +262,21 @@ The subsequent unchanged `make validate` run passed CSS build, lint, formatting,
 strict typing and 16,688 tests, with 1,778 skipped and one expected failure.
 Both runs are retained in the local evidence directory; this does not qualify
 PostgreSQL or replace live acceptance of the staged fixtures.
+
+Local 8585 acceptance then completed on `66c533e3` using the existing review
+#52 and new sidecar-backed import #53. The first explicitly chose Superman:
+Red Son #1 from its Metron issue catalog after selecting the library series
+through GCD. The second matched Superman: Secret Identity #1 through its compiled
+GCD series sidecar and embedded GCD issue ID, with no ComicVine identity required.
+Both required explicit user action, imported one generated file, and displayed
+one imported file and zero added series in Step 4 and results. Browser rollback
+restored both issues to Skipped. No direct status repair was used.
+
+All 1,088 pre-existing library-file rows, all series/issue provider-link rows,
+and all fixture hashes remained unchanged after rollback. No import remains
+active. Local 8585 is healthy; schema `i6c7d8e9f012` did not change. The home-server
+and parked verification work were untouched. Live sidecar conflict/series-only
+scenarios remain available for user testing; their automated coverage passed.
 
 ## Rollback Status
 
