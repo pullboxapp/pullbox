@@ -20,13 +20,17 @@ pytest_plugins = ["conftest_security"]
 
 @pytest.mark.parametrize("namespace", ["metron", "gcd"])
 @pytest.mark.parametrize("correction", ["none", "links", "file"])
-@pytest.mark.parametrize("in_place", [False, True])
+@pytest.mark.parametrize("source_mode", ["copy", "mapped_copy", "in_place"])
 async def test_recorded_mylar_conflict_recheck_keeps_ownership_and_checks_fresh_evidence(
-    authenticated_client, sec_db, tmp_path, monkeypatch, namespace, correction, in_place
+    authenticated_client, sec_db, tmp_path, monkeypatch, namespace, correction, source_mode
 ):
     async with sec_db() as session:
         job, service, _, _, legacy, issue, originals, extra = await seed_mylar_native_extra(
-            session, tmp_path, namespace, in_place=in_place, mapped_source=not in_place
+            session,
+            tmp_path,
+            namespace,
+            in_place=source_mode == "in_place",
+            mapped_source=source_mode == "mapped_copy",
         )
         tracked = extra.parent / "Old Harbor 001.cbz"
         originals[tracked] = _archive(tracked, primary=namespace, number="1")

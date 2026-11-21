@@ -54,6 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed Step 3 source rechecks for confirmed Mylar copy imports whose paths need
+  no translation. Recheck uses the exact saved source path without granting a
+  directory root, bypassing archive safety, or changing the original file.
 - Used matched series names for import selection controls, so files grouped
   from a mixed source folder remain distinguishable to screen-reader users.
 - Included the visible background activity count in its accessible button label.

@@ -196,6 +196,7 @@ def inspect_review_source(
     accept_replaced_files: bool,
     sidecars: dict[str, dict[str, Any]],
     allowed_extensions: frozenset[str] | set[str] = DEFAULT_ALLOWED_EXTENSIONS,
+    allow_recorded_path: bool = False,
 ) -> tuple[SourceMetadata, dict[str, Any], dict[str, int | str]]:
     """Inspect only explicitly permitted paths; no providers or page extraction."""
     current_signature: dict[str, int | str] = {}
@@ -207,12 +208,22 @@ def inspect_review_source(
             raise ReferencedFileValidationError("source_path_unsafe", "Unsafe source path")
         lexical = path.expanduser().absolute()
         resolved = path.expanduser().resolve(strict=False)
-        if not any(
+        within_root = any(
             lexical.is_relative_to(root) and resolved.is_relative_to(real) for root, real in roots
-        ):
-            raise ReferencedFileValidationError("source_outside_root", "Outside approved root")
+        )
+        if not within_root:
+            if not (
+                allow_recorded_path
+                and path.is_absolute()
+                and signature.get("resolved_path") == str(resolved)
+            ):
+                raise ReferencedFileValidationError("source_outside_root", "Outside approved root")
+            # The saved scan grants this exact path, not its containing directory.
+            validate_file_identity_signature(signature, signature)
         resolve_preview_source(path)
         current_signature = build_file_identity_signature(path)
+        if not within_root and current_signature["resolved_path"] != signature["resolved_path"]:
+            raise ReferencedFileValidationError("source_outside_root", "Recorded source redirected")
         if not accept_replaced_files:
             validate_file_identity_signature(signature, current_signature)
         extractor = SourceMetadataExtractor()

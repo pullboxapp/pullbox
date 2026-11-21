@@ -226,12 +226,16 @@ this file** is always available. The legacy issue-assignment action cannot
 override a recorded conflict without a recheck. Execution checks the saved
 owners again before placement, including links changed after Step 3.
 
-Source rechecks retain existing access boundaries: a keep-in-place source must
-remain under its approved reference root; a copy-mode Mylar source must have a
-saved mapping. An identity-only copy import without such a boundary can still
-import valid matches or skip a conflict, but repairing its source requires a
-new scan. This checkpoint does not grant a broader filesystem boundary to make
-that recheck pass. Improving that admission/recheck case remains separate work.
+Step 3 source rechecks retain existing access boundaries: a keep-in-place source
+must remain under its approved reference root, and mapped sources must remain
+under their saved mappings. A confirmed identity-only Mylar copy import can
+recheck the exact resolved path in its complete saved scan signature, including
+an explicitly corrected replacement at that same path. This grants no directory
+root or permission to inspect a redirected path. Missing scan proof, symlink
+redirection, sensitive paths and revoked confirmation remain blocked. A changed
+extension/path still requires an approved mapping or a new scan. Completed-import
+bulk recovery retains its existing explicit-root requirement; this change is
+limited to the individual Step 3 Recheck action.
 
 Tests cover agreeing, unknown, stale and proven conflicting identities, both
 providers, copy/in-place import and rollback, changing links before placement,
@@ -244,6 +248,13 @@ regressions passed. Chromium and Firefox each passed 12 browser cases covering
 both providers, those theme preferences, recheck/skip and accessibility. Scoped strict
 typing, repository lint/format checks and the generated CSS build passed.
 This is not full CI or PostgreSQL qualification.
+
+The identity-only Step 3 recheck follow-up passed 385 focused import/recovery
+checks and 24 browser cases in each of Chromium and Firefox, including mapped
+and untranslated paths. Negative coverage keeps missing proof, symlink/path
+redirection, sensitive sources, disabled confirmation and new dangerous archive
+content blocked. Rechecking a corrected source does not itself approve its
+identity: matching still has to confirm it.
 
 ### Step 3 Selection
 

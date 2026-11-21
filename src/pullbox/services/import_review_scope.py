@@ -27,6 +27,7 @@ def review_scope(job: ImportJob, parent: ImportedSeries, file: ImportedFile) -> 
         job.control_request.value,
         job.source_path,
         job.mylar3_path_map,
+        job.mylar3_path_map_confirmed,
         job.file_handling_mode.value,
         parent.id,
         parent.cv_id,

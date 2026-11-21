@@ -14,7 +14,7 @@ from tests.integration.test_mylar_native_extras import seed_mylar_native_extra
 pytestmark = pytest.mark.e2e
 
 
-async def _seed(root, namespace, theme, action):
+async def _seed(root, namespace, theme, action, mapped_source):
     from pullbox.database import get_session_factory
 
     base = (
@@ -22,10 +22,11 @@ async def _seed(root, namespace, theme, action):
         + ["light", "dark", "system"].index(theme) * 10000
         + ["metron", "gcd"].index(namespace) * 1000
         + (1000000 if action == "skip" else 0)
+        + (2000000 if not mapped_source else 0)
     )
     async with get_session_factory()() as session:
         job, service, *_, extra = await seed_mylar_native_extra(
-            session, root, namespace, identity_base=base, mapped_source=True, admit=False
+            session, root, namespace, identity_base=base, mapped_source=mapped_source, admit=False
         )
         tracked = extra.parent / "Old Harbor 001.cbz"
         _archive(
@@ -42,11 +43,14 @@ async def _seed(root, namespace, theme, action):
 @pytest.mark.parametrize("namespace", ["metron", "gcd"])
 @pytest.mark.parametrize("theme", ["light", "dark", "system"])
 @pytest.mark.parametrize("action", ["recheck", "skip"])
+@pytest.mark.parametrize("mapped_source", [True, False])
 def test_recorded_mylar_conflict_recheck_or_skip_preserves_review_shell(
-    authed_page, seeded_server, tmp_path, namespace, theme, action, browser_name
+    authed_page, seeded_server, tmp_path, namespace, theme, action, browser_name, mapped_source
 ):
     page = authed_page
-    job_id, tracked, base = _run_async_blocking(_seed(tmp_path, namespace, theme, action))
+    job_id, tracked, base = _run_async_blocking(
+        _seed(tmp_path, namespace, theme, action, mapped_source)
+    )
     if theme == "system":
         page.emulate_media(color_scheme="light")
         page.add_init_script("localStorage.removeItem('pullbox-theme')")
@@ -71,7 +75,9 @@ def test_recorded_mylar_conflict_recheck_or_skip_preserves_review_shell(
     screenshots = Path(__file__).resolve().parents[2] / "test-results/mylar-native-conflict"
     screenshots.mkdir(parents=True, exist_ok=True)
     conflict.scroll_into_view_if_needed()
-    page.screenshot(path=str(screenshots / f"{browser_name}-{namespace}-{theme}-{action}.png"))
+    page.screenshot(
+        path=str(screenshots / f"{browser_name}-{namespace}-{theme}-{action}-{mapped_source}.png")
+    )
     if action == "recheck":
         _archive(
             tracked,

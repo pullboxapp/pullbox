@@ -20,9 +20,11 @@ from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
     ImportedSeries,
+    ImportFileHandlingMode,
     ImportJob,
     ImportJobStatus,
     ImportSeriesStatus,
+    ImportSourceType,
 )
 from pullbox.models.library import LibraryFile
 from pullbox.models.operation_progress import OperationProgressState, OperationProgressType
@@ -272,6 +274,12 @@ async def process_source_action(
         recorded_path = Path(file.file_path)
         signature = dict(inspected.source_signature)
         roots = await _retry_source_roots(session, job, file_ids=[inspected.id])
+        allow_recorded_path = (
+            job.source_type is ImportSourceType.MYLAR3
+            and job.file_handling_mode is ImportFileHandlingMode.MANAGED_COPY
+            and job.mylar3_path_map_confirmed
+            and not job.mylar3_path_map
+        )
         block_dangerous = await is_dangerous_file_blocking_enabled(session)
         limit = await get_archive_size_limit_bytes(session)
         allowed_extensions = frozenset(await get_allowed_extensions(session))
@@ -313,6 +321,7 @@ async def process_source_action(
                 accept_replaced_files=candidate is None,
                 sidecars={},
                 allowed_extensions=allowed_extensions,
+                allow_recorded_path=allow_recorded_path,
             )
             if candidate:
                 metadata, content, _signature = result
