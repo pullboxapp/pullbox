@@ -108,3 +108,68 @@ def group_native_folder_files(discovered: DiscoveredSeries) -> list[DiscoveredSe
             )
         )
     return result
+
+
+def group_mylar_native_extras(discovered: DiscoveredSeries) -> list[DiscoveredSeries]:
+    """Partition unrecorded native archives without moving Mylar-owned references."""
+    extras, recorded = [], []
+    for file in discovered.files:
+        evidence = file.metadata_diagnostics.get("metron_import")
+        eligible = (
+            isinstance(file.metadata_diagnostics.get("mylar3_unrecorded_file"), dict)
+            and not file.metadata_diagnostics.get("mylar3_issue")
+            and not file.metadata_diagnostics.get("mylar3_path_reconciliation")
+            and not file.metadata_diagnostics.get("mylar3_cross_folder_reconciliation")
+            and isinstance(evidence, dict)
+            and uses_metron_identity(evidence)
+        )
+        if eligible and isinstance(evidence, dict):
+            # A folder's inferred Mylar owner is not evidence for an unrecorded
+            # extra. Explicit sidecar claims still must agree with its XML.
+            sidecar = file.metadata_diagnostics.get("sidecar_identity")
+            if isinstance(sidecar, dict):
+                refs = list(evidence.get("identities", []))
+                for field, kind in (
+                    ("comicvine_series_id", "series"),
+                    ("comicvine_issue_id", "issue"),
+                ):
+                    value = sidecar.get(field)
+                    if isinstance(value, int) and value > 0:
+                        refs.append({"namespace": "comicvine", "kind": kind, "id": str(value)})
+                evidence = {**evidence, "identities": refs, "mylar_sidecar_identity": sidecar}
+                file = replace(
+                    file,
+                    metadata_diagnostics={**file.metadata_diagnostics, "metron_import": evidence},
+                )
+            extras.append(file)
+        else:
+            recorded.append(file)
+    if not extras:
+        return [discovered]
+
+    # The original source series remains, including an empty wanted-only series.
+    original = replace(
+        discovered,
+        files=recorded,
+        file_count=len(recorded),
+        sample_paths=[file.file_path for file in recorded[:5]],
+        has_files=discovered.has_files and bool(recorded),
+    )
+    native = replace(
+        discovered,
+        files=extras,
+        file_count=len(extras),
+        sample_paths=[file.file_path for file in extras[:5]],
+        mylar3_cv_id=None,
+        folder_cv_id=None,
+        comicinfo_cv_id=None,
+        comicinfo_source=None,
+        diagnostics={
+            **discovered.diagnostics,
+            "mylar3_native_extra": {
+                "source_series_name": discovered.raw_series_name,
+                "source_cv_id": discovered.mylar3_cv_id,
+            },
+        },
+    )
+    return [original, *group_native_folder_files(native)]

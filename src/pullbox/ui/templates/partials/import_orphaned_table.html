@@ -60,7 +60,9 @@
       </thead>
       <tbody>
         {% for item in items %}
-          {% set issue_recovery_only = item.status.value == 'imported' and (item.files_no_match or 0) > 0 %}
+          {% set display_title = (item.cv_title or item.raw_series_name) if item.cv_match_method in ['metron_id', 'gcd_id', 'library_review'] else item.raw_series_name %}
+          {% set native_existing = item.status.value == 'duplicate' and item.cv_match_method in ['metron_id', 'gcd_id', 'library_review'] %}
+          {% set issue_recovery_only = (item.status.value == 'imported' or native_existing) and (item.files_no_match or 0) > 0 %}
           {% set known_series_no_match = item.status.value == 'no_match' and (item.cv_id or item.user_selected_cv_id or item.series_id) and (item.files_no_match or 0) > 0 %}
           {% set direct_issue_recovery = issue_recovery_only or known_series_no_match %}
           {% set visible_file_count = item.files_no_match if direct_issue_recovery else item.file_count %}
@@ -68,7 +70,7 @@
             <td>
               <div class="min-w-0">
                 <span class="downloads-release-name tooltip-wrap" data-tooltip-auto data-tip-size="wide">
-                  <span class="block truncate" data-tooltip-measure>{{ item.raw_series_name }}</span>
+                  <span class="block truncate" data-tooltip-measure>{{ display_title }}</span>
                 </span>
                 <span class="downloads-mono-cell mt-1 block sm:hidden">
                   {{ item.raw_publisher or "Unknown publisher" }}
@@ -109,7 +111,7 @@
                     @click="openRecovery({{ item.id }})"
                     data-tip="Resolve files"
                     data-tip-pos="left"
-        aria-label="Resolve unresolved files for {{ item.raw_series_name }}"
+        aria-label="Resolve unresolved files for {{ display_title }}"
       ><span>Match issues</span>
                     <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                       <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5L21 12l-7.5 7.5M3 12h17.25"/>
@@ -127,7 +129,7 @@
                     hx-swap="innerHTML"
                     data-tip="Find series"
                     data-tip-pos="left"
-        aria-label="Find series for {{ item.raw_series_name }}"
+        aria-label="Find series for {{ display_title }}"
       ><span>Find series</span>
                     <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                       <path stroke-linecap="round" stroke-linejoin="round" d="m21 21-4.35-4.35m1.85-5.15a7 7 0 11-14 0 7 7 0 0114 0z"/>
@@ -137,11 +139,11 @@
                     type="button"
                     class="downloads-action-btn is-danger"
                     data-testid="import-orphaned-dismiss-{{ item.id }}"
-                    @click='dismissOrphan({{ item.id }}, {{ item.raw_series_name|tojson }}, {{ "Hide this series? It won't appear here again unless you re-import."|tojson }})'
+                    @click='dismissOrphan({{ item.id }}, {{ display_title|tojson }}, {{ "Hide this series? It won't appear here again unless you re-import."|tojson }})'
                     :disabled="isDismissingOrphan({{ item.id }})"
                     data-tip="Dismiss"
                     data-tip-pos="left"
-                    aria-label="Dismiss {{ item.raw_series_name }} from import follow-up"
+                    aria-label="Dismiss {{ display_title }} from import follow-up"
                   >
                     <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                       <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
@@ -157,7 +159,7 @@
                     @click="openRecovery({{ item.id }})"
                     data-tip="Continue recovery"
                     data-tip-pos="left"
-        aria-label="Continue recovery for {{ item.raw_series_name }}"
+        aria-label="Continue recovery for {{ display_title }}"
       ><span>Review suggestions</span>
                     <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                       <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5L21 12l-7.5 7.5M3 12h17.25"/>
@@ -172,7 +174,7 @@
                     hx-swap="innerHTML"
                     data-tip="Change series"
                     data-tip-pos="left"
-        aria-label="Change series for {{ item.raw_series_name }}"
+        aria-label="Change series for {{ display_title }}"
       ><span>Change series</span>
                     <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                       <path stroke-linecap="round" stroke-linejoin="round" d="m21 21-4.35-4.35m1.85-5.15a7 7 0 11-14 0 7 7 0 0114 0z"/>
@@ -182,11 +184,11 @@
                     type="button"
                     class="downloads-action-btn is-danger"
                     data-testid="import-orphaned-dismiss-{{ item.id }}"
-                    @click='dismissOrphan({{ item.id }}, {{ item.raw_series_name|tojson }}, {{ "Stop recovering this series for now? It will move to dismissed."|tojson }})'
+                    @click='dismissOrphan({{ item.id }}, {{ display_title|tojson }}, {{ "Stop recovering this series for now? It will move to dismissed."|tojson }})'
                     :disabled="isDismissingOrphan({{ item.id }})"
                     data-tip="Dismiss"
                     data-tip-pos="left"
-                    aria-label="Dismiss unmatched series {{ item.raw_series_name }}"
+                    aria-label="Dismiss unmatched series {{ display_title }}"
                   >
                     <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                       <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>

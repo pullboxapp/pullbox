@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added library selection and Metron/GCD search, preview and Add to **Find series**
   in folder-import Follow-up. Users can finish deferred files without rescanning;
   series selection still requires explicit issue choices before recovery.
+- Added separate Metron/GCD review groups for exact-identity archives found in
+  Mylar folders but absent from Mylar's issue records. Recorded Mylar issues and
+  untagged neighbors retain their existing matching paths.
 - Added opt-in Metron API and read-only GCD Local series search, provider linking,
   and reviewed metadata refresh alongside the existing ComicVine sources.
 - Added explicit existing-CBZ metadata review and coordinated ComicInfo.xml and
@@ -45,6 +48,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Kept unresolved native files for existing library series visible in completed
+  import Follow-up, showing their matched series rather than the source folder's
+  title. Recovery retains explicit issue choices and original-file protection.
 - Extended Follow-up's Recheck files action to recover exact Metron/GCD folder
   identities after their library links are verified, including compiled sidecars.
   Recovery preserves original files, rejects changed identities, and keeps

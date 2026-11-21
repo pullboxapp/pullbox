@@ -328,7 +328,13 @@ async def _prepare_terminal_follow_up(
 def _active_issue_recovery_clause() -> ColumnElement[bool]:
     """Return the query clause for issue-only follow-up under imported series."""
     return and_(
-        ImportedSeries.status == ImportSeriesStatus.IMPORTED,
+        or_(
+            ImportedSeries.status == ImportSeriesStatus.IMPORTED,
+            and_(
+                ImportedSeries.status == ImportSeriesStatus.DUPLICATE,
+                ImportedSeries.cv_match_method.in_(["metron_id", "gcd_id", "library_review"]),
+            ),
+        ),
         sa_select(ImportedFile.id)
         .where(
             ImportedFile.import_series_id == ImportedSeries.id,
@@ -457,10 +463,10 @@ async def recover_orphan(
     require_retained_import_destination(job)
     job_id = job.id
     item_id = item.id
-    from pullbox.models.import_job import ImportSourceType
+    from pullbox.services.import_metron_matching import native_review_source
     from pullbox.services.import_native_recovery import native_recovery_row
 
-    native = job.source_type == ImportSourceType.FILESYSTEM and native_recovery_row(item)
+    native = native_review_source(job, item) and native_recovery_row(item)
     has_identified_series = (
         (item.status == ImportSeriesStatus.RECOVERY_PENDING and item.cv_id is not None)
         or (item.status == ImportSeriesStatus.IMPORTED and item.series_id is not None)

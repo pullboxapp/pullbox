@@ -188,6 +188,15 @@ async def verified_native_import_series(
     return await _verified_metron_series(session, item)
 
 
+def native_review_source(job: ImportJob, item: ImportedSeries) -> bool:
+    """Mylar native review is limited to separately staged unrecorded archives."""
+    return job.source_type == ImportSourceType.FILESYSTEM or (
+        job.source_type == ImportSourceType.MYLAR3
+        and isinstance((item.diagnostics or {}).get("mylar3_native_extra"), dict)
+        and isinstance((item.diagnostics or {}).get("metron_import"), dict)
+    )
+
+
 async def match_local_metron_series(session: AsyncSession, item: ImportedSeries) -> bool:
     """Handle native XML identities before legacy name/CV matching can select them."""
     if not isinstance((item.diagnostics or {}).get("metron_import"), dict):
@@ -257,7 +266,7 @@ async def _load_metron_review_scope(
     if (
         job.status != ImportJobStatus.REVIEW
         or job.control_request != ImportControlRequest.NONE
-        or job.source_type != ImportSourceType.FILESYSTEM
+        or not native_review_source(job, item)
         or item.status not in {ImportSeriesStatus.NO_MATCH, ImportSeriesStatus.DUPLICATE}
         or item.user_selected_cv_id is not None
         or (item.diagnostics or {}).get("rematch_pending")

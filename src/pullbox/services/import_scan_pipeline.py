@@ -892,10 +892,19 @@ async def _load_mylar3_discovered_series(
         incompatible_series=incompatible_series,
     )
     job.scan_total_files = file_count
-    job.series_found = series_count
+    job.series_found = (
+        int(
+            await session.scalar(
+                select(func.count(ImportedSeries.id)).where(ImportedSeries.import_job_id == job_id)
+            )
+            or 0
+        )
+        if materialize_discovered_scan_results is not None
+        else series_count
+    )
     job.scan_completed_at = datetime.now(UTC)
     await session.commit()
-    return series_count
+    return job.series_found
 
 
 async def _read_mylar3_collection_snapshot(reader: Any) -> Mylar3CollectionSnapshot:

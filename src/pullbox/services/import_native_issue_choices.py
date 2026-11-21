@@ -18,7 +18,6 @@ from pullbox.models.import_job import (
     ImportJob,
     ImportJobStatus,
     ImportSeriesStatus,
-    ImportSourceType,
 )
 from pullbox.models.issue import Issue
 from pullbox.models.metadata_identity import IssueExternalIdentity
@@ -28,6 +27,7 @@ from pullbox.services.import_metron_matching import (
     import_identity_namespace,
     load_metron_issue_targets,
     metron_file_candidate,
+    native_review_source,
     verified_native_import_series,
 )
 from pullbox.services.import_review_file_assignment import (
@@ -83,7 +83,7 @@ async def native_review_context(
         series = await verified_native_import_series(session, parent)
         namespace = import_identity_namespace(parent.diagnostics.get("metron_import", {}))
     if (
-        job.source_type != ImportSourceType.FILESYSTEM
+        not native_review_source(job, parent)
         or (not follow_up and parent.status != ImportSeriesStatus.DUPLICATE)
         or parent.user_selected_cv_id is not None
         or series is None

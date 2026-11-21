@@ -16,7 +16,6 @@ from pullbox.models.import_job import (
     ImportJob,
     ImportJobStatus,
     ImportSeriesStatus,
-    ImportSourceType,
 )
 from pullbox.models.issue import Issue
 from pullbox.models.library import LibraryRoot
@@ -43,7 +42,10 @@ async def load_orphan_recovery_item(
     if job.status != ImportJobStatus.COMPLETED:
         raise ValidationError("Import follow-up is only available for completed imports.")
     has_live_issue_recovery = False
-    if item.status == ImportSeriesStatus.IMPORTED:
+    if item.status == ImportSeriesStatus.IMPORTED or (
+        item.status == ImportSeriesStatus.DUPLICATE
+        and item.cv_match_method in {"metron_id", "gcd_id", "library_review"}
+    ):
         has_live_issue_recovery = bool(
             await session.scalar(
                 select(ImportedFile.id).where(
@@ -75,9 +77,10 @@ async def build_orphan_recovery_context(
     )
     files = list(files_result.scalars().all())
 
+    from pullbox.services.import_metron_matching import native_review_source
     from pullbox.services.import_native_recovery import native_recovery_row
 
-    native = job.source_type == ImportSourceType.FILESYSTEM and native_recovery_row(item)
+    native = native_review_source(job, item) and native_recovery_row(item)
     issue_options = (
         [] if native else await _load_recovery_issue_options(session, item, metadata_service)
     )

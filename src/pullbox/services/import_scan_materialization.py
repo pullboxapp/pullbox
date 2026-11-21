@@ -16,7 +16,10 @@ from pullbox.models.import_job import (
     ImportSourceType,
 )
 from pullbox.services.import_metron_matching import series_evidence, uses_metron_identity
-from pullbox.services.import_native_grouping import group_native_folder_files
+from pullbox.services.import_native_grouping import (
+    group_mylar_native_extras,
+    group_native_folder_files,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -79,6 +82,12 @@ async def materialize_discovered_scan_results(
             for discovered in discovered_list
             for group in group_native_folder_files(discovered)
         ]
+    elif job.source_type == ImportSourceType.MYLAR3:
+        discovered_list = [
+            group
+            for discovered in discovered_list
+            for group in group_mylar_native_extras(discovered)
+        ]
     series_pairs: list[tuple[DiscoveredSeries, ImportedSeries]] = []
     for discovered in discovered_list:
         mylar_path_incompatible = (
@@ -105,7 +114,9 @@ async def materialize_discovered_scan_results(
                     "rejection_reason": _NATIVE_FOLDER_REVIEW_MESSAGE,
                 }
             )
-        if job.source_type == ImportSourceType.FILESYSTEM:
+        if job.source_type == ImportSourceType.FILESYSTEM or series_diagnostics.get(
+            "mylar3_native_extra"
+        ):
             metron_files = [
                 evidence
                 for file in discovered.files
@@ -196,7 +207,9 @@ async def materialize_discovered_scan_results(
             safety_block = metadata_diagnostics.pop("file_safety", None)
             source_layout_review = _requires_source_layout_review(metadata_diagnostics)
             volume_leaf_review = _requires_volume_leaf_review(metadata_diagnostics)
-            mylar_folder_scope_review = _requires_mylar_folder_scope_review(metadata_diagnostics)
+            mylar_folder_scope_review = _requires_mylar_folder_scope_review(
+                metadata_diagnostics
+            ) and not discovered.diagnostics.get("mylar3_native_extra")
             if isinstance(safety_block, dict):
                 file_status = ImportedFileStatus.SAFETY_BLOCKED
             elif (
@@ -264,7 +277,10 @@ async def materialize_discovered_scan_results(
             raw_number = df.issue_number_raw
             metron = metadata_diagnostics.get("metron_import")
             if (
-                job.source_type == ImportSourceType.FILESYSTEM
+                (
+                    job.source_type == ImportSourceType.FILESYSTEM
+                    or discovered.diagnostics.get("mylar3_native_extra")
+                )
                 and isinstance(metron, dict)
                 and uses_metron_identity(metron)
                 and isinstance(metron.get("number"), str)

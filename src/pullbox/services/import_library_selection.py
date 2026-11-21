@@ -20,7 +20,6 @@ from pullbox.models.import_job import (
     ImportJob,
     ImportJobStatus,
     ImportSeriesStatus,
-    ImportSourceType,
 )
 from pullbox.models.metadata_identity import SeriesExternalIdentity
 from pullbox.models.series import Series
@@ -79,14 +78,21 @@ async def library_selection_context(
     )
     allowed = {ImportSeriesStatus.NO_MATCH, ImportSeriesStatus.DUPLICATE}
     if follow_up:
-        allowed = {ImportSeriesStatus.NO_MATCH, ImportSeriesStatus.RECOVERY_PENDING}
+        allowed = {
+            ImportSeriesStatus.NO_MATCH,
+            ImportSeriesStatus.RECOVERY_PENDING,
+            ImportSeriesStatus.DUPLICATE,
+        }
+    from pullbox.services.import_metron_matching import native_review_source
+
     if (
-        job.source_type != ImportSourceType.FILESYSTEM
+        not native_review_source(job, parent)
         or parent.status not in allowed
         or (parent.diagnostics.get("metron_import") and not follow_up)
         or (
             parent.status == ImportSeriesStatus.DUPLICATE
             and not parent.diagnostics.get("manual_library_series")
+            and not (follow_up and parent.diagnostics.get("metron_import"))
         )
     ):
         raise ValidationError("Use the existing identity review for this series.")

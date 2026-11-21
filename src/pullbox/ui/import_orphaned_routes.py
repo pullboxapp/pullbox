@@ -39,12 +39,12 @@ async def find_orphaned_series(
     user: InteractiveOperatorUser,
     session: DbSession,
 ) -> Response:
-    from pullbox.models.import_job import ImportSourceType
+    from pullbox.services.import_metron_matching import native_review_source
     from pullbox.services.import_orphan_recovery_context import load_orphan_recovery_item
     from pullbox.ui.import_review_file_routes import preview_library_series
 
     job, item = await load_orphan_recovery_item(session, imported_series_id)
-    if job.source_type == ImportSourceType.FILESYSTEM:
+    if native_review_source(job, item):
         return await preview_library_series(
             job.id,
             item.id,

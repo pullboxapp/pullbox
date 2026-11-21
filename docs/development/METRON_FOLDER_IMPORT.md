@@ -69,7 +69,8 @@ synthetic identities only in a disposable database.
   are equal. A missing Number can match only through verified exact issue IDs.
 - Execution rechecks provider links. Existing source-signature, archive safety,
   ownership, collision, transfer, and rollback handling still applies.
-- Mylar matching and ComicVine-primary paired archives keep their existing path.
+- Recorded Mylar issues and ComicVine-primary paired archives keep their existing
+  path. Unrecorded native Mylar extras use the bounded workflow below.
 - There is no database migration or new production default/feature flag.
 
 ## Native Issue Choices
@@ -135,8 +136,9 @@ Untagged groups retain **Search ComicVine**. Switching an undecided group betwee
 a native library selection and ComicVine clears the previous selection rather
 than mixing their catalogs. The transition rechecks durable state after provider
 I/O and refuses a group changed by another request. Embedded native claims cannot
-be overridden through the legacy ComicVine assignment API. Mylar continues to use
-its existing ComicVine recovery route; this is not native Mylar matching.
+be overridden through the legacy ComicVine assignment API. Recorded Mylar issues
+continue to use their existing ComicVine recovery route. Only separately staged
+native extras use the native recovery workflow described below.
 
 To test: finish a folder import with an unidentified group left for Follow-up,
 open Find series, search/add or choose its native library series, and confirm
@@ -149,6 +151,38 @@ fixture-dependent skip. The new Follow-up checks cover both native catalogs,
 existing-series selection, search/add, cancellation, focus, accessibility, and
 recovery without a page reload. Provider responses are controlled test fixtures;
 these results do not qualify live provider availability or PostgreSQL.
+
+### Unrecorded Native Mylar Extras
+
+Mylar imports can stage separate Metron/GCD groups for archives present in a
+source folder but absent from Mylar's issue records. Each archive must carry its
+own exact native identity. Recorded or reconciled Mylar references and untagged
+neighbors remain in the original Mylar group; the source database is not edited.
+
+The native groups use the existing local identity checks, review, explicit file
+selection, and import paths in both copy and keep-in-place modes. The original
+Mylar folder's owner does not determine an extra archive's identity. Explicit
+sidecar claims must still agree with its embedded identities. Stale links,
+unknown issue IDs, contradictory numbers, and already-owned issues cannot become
+ready solely because a filename or neighboring file matches.
+
+Scanning reports the resulting review-group count, which can exceed the number
+of source series recorded in Mylar. A native group for an existing library series
+with unresolved files remains in completed-import Follow-up with **Match issues**.
+Its row shows the identified series while retaining the physical source folder
+in the source column. Closing recovery makes no changes; saving still requires
+eligible, explicit issue choices. Import and rollback preserve the original
+comics and Mylar database.
+
+This checkpoint does not replace recorded Mylar matching or add live provider
+calls during scanning. Broader native Mylar sidecar matching and PostgreSQL
+qualification remain separate work.
+
+Checkpoint validation: 216 focused import/recovery checks passed. Chromium and
+Firefox each passed six browser checks covering Metron/GCD, all three themes,
+cancellation, accessibility, mobile footer visibility, and recovery without a
+page reload. The tests use synthetic archives and local identities, not live
+provider availability.
 
 ### Step 3 Selection
 

@@ -41,6 +41,7 @@ async def series_choice_scope(
         if action != "library" or series.status not in {
             ImportSeriesStatus.NO_MATCH,
             ImportSeriesStatus.RECOVERY_PENDING,
+            ImportSeriesStatus.DUPLICATE,
         }:
             raise ValidationError("This series is no longer waiting for a follow-up match.")
     elif action == "restore":
