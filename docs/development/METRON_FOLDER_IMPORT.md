@@ -56,6 +56,14 @@ required MetronInfo Series/Name field: matching can succeed, but paired writing
 must still request metadata review. Separate schema-complete fixtures exercise
 the successful writing path rather than weakening XML validation.
 
+When file placement finishes before background metadata writing, Step 5 shows
+the number of imported files still awaiting a write. **Check status** reads the
+latest results without starting any work. Pending writes do not count as
+follow-up decisions. A failed write opens the existing Follow-up path; a
+success with no other outstanding work shows a clean finish. For a manual
+negative case, use one identity-only fixture and review the metadata failure
+after the worker finishes; a fast write may finish before Step 5 opens.
+
 Qualification: 270 focused converter, paired-writer and native/legacy import
 regressions passed, along with focused Ruff and strict mypy. This is not full CI
 or PostgreSQL qualification.

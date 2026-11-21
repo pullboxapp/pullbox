@@ -54,6 +54,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Import Results now distinguishes pending file metadata updates from failures.
+  Use **Check status** to see the latest outcome without retrying or reimporting files.
 - Preserved the import page shell and working follow-up and rollback controls
   when using browser Back after reviewing an issue. History restoration reloads
   current import state without duplicating the application's script runtime.

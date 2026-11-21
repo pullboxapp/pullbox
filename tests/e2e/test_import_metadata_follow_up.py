@@ -145,6 +145,57 @@ def test_back_from_issue_preserves_follow_up_and_results_actions(
     page.screenshot(path=f"test-results/import-history-restore-{evict_history}.png")
 
 
+@pytest.mark.parametrize("outcome", ["complete", "failed"])
+def test_results_check_pending_metadata_without_reimporting(
+    authed_page, seeded_server, metadata_follow_up_job, outcome
+):
+    from sqlalchemy import update
+
+    from pullbox.database import get_session_factory
+
+    job_id, calls = metadata_follow_up_job
+
+    async def set_write_state(status):
+        async with get_session_factory().begin() as session:
+            await session.execute(
+                update(ImportedFile)
+                .where(ImportedFile.import_job_id == job_id)
+                .values(diagnostics={"comicinfo_enrichment": {"status": status}})
+            )
+
+    _run_async_blocking(set_write_state("pending"))
+    page = authed_page
+    url = f"{seeded_server}/import?tab=collection&resume_job_id={job_id}&resume_step=5"
+    page.goto(url)
+    results = page.get_by_test_id("import-collection-results")
+    expect(results).to_contain_text("26 files still need a metadata update")
+    expect(results).not_to_contain_text("finished cleanly")
+    follow_up = results.get_by_role("link", name="Review follow-up", exact=True)
+    expect(follow_up).to_have_count(0)
+    page.evaluate("window.importStatusProbe = true")
+
+    _run_async_blocking(set_write_state(outcome))
+    check = results.get_by_role("button", name="Check status", exact=True)
+    check.focus()
+    page.keyboard.press("Enter")
+    expect(check).to_have_count(0)
+    expect(page.locator("#import-results-summary")).to_be_focused()
+    expect(results.get_by_role("button", name="Archive results")).to_be_visible()
+    if outcome == "failed":
+        expect(follow_up).to_be_visible()
+        follow_up.click()
+        expect(page.get_by_test_id("import-follow-up-archive-metadata")).to_contain_text(
+            "26 files need a metadata retry"
+        )
+    else:
+        expect(results).to_contain_text("The import finished cleanly.")
+        expect(results).not_to_contain_text("new series")
+        expect(follow_up).to_have_count(0)
+        expect(page).to_have_url(url)
+    assert page.evaluate("window.importStatusProbe") is True
+    assert calls == []
+
+
 def test_metadata_follow_up_paginates_and_retries_without_navigation(
     authed_page,
     seeded_server,

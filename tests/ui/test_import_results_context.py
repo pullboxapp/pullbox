@@ -47,6 +47,49 @@ from pullbox.services.import_safety_diagnostics import (
 
 
 @pytest.mark.asyncio
+async def test_pending_metadata_is_not_an_actionable_failure(db_session) -> None:  # type: ignore[no-untyped-def]
+    from pullbox.ui.import_results_context import load_import_results_context
+
+    job = ImportJob(
+        source_path="/imports",
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.COMPLETED,
+    )
+    db_session.add(job)
+    await db_session.flush()
+    series = ImportedSeries(
+        import_job_id=job.id, raw_series_name="Existing", status=ImportSeriesStatus.IMPORTED
+    )
+    db_session.add(series)
+    await db_session.flush()
+    for index, (state, write) in enumerate(
+        [
+            (ImportedFileStatus.IMPORTED, "pending"),
+            (ImportedFileStatus.IMPORTED, "failed"),
+            (ImportedFileStatus.IMPORTED, "complete"),
+            (ImportedFileStatus.IMPORTED, None),
+            (ImportedFileStatus.SKIPPED, "pending"),
+        ]
+    ):
+        db_session.add(
+            ImportedFile(
+                import_job_id=job.id,
+                import_series_id=series.id,
+                file_path=f"/imports/{index}.cbz",
+                file_name=f"{index}.cbz",
+                file_format="cbz",
+                status=state,
+                diagnostics={"comicinfo_enrichment": {"status": write}} if write else {},
+            )
+        )
+    await db_session.flush()
+    context = await load_import_results_context(db_session, job)
+    assert context["archive_metadata_pending_count"] == 1
+    assert context["archive_metadata_failed_count"] == 1
+    assert context["follow_up_group_count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_results_context_counts_optional_mylar_source_cleanup(db_session) -> None:  # type: ignore[no-untyped-def]
     from pullbox.ui.import_results_context import load_import_results_context
 

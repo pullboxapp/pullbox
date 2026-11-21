@@ -42,6 +42,21 @@ async def count_failed_metadata_writes(session: AsyncSession, job_id: int) -> in
     )
 
 
+async def outstanding_metadata_write_counts(session: AsyncSession, job_id: int) -> dict[str, int]:
+    """Count unfinished archive updates without loading individual file diagnostics."""
+    status = ImportedFile.diagnostics["comicinfo_enrichment"]["status"].as_string()
+    rows = await session.execute(
+        select(status, func.count())
+        .where(
+            ImportedFile.import_job_id == job_id,
+            ImportedFile.status == ImportedFileStatus.IMPORTED,
+            status.in_(("pending", "failed")),
+        )
+        .group_by(status)
+    )
+    return {state: count for state, count in rows}
+
+
 async def load_metadata_write_follow_up(
     session: AsyncSession,
     job_id: int,

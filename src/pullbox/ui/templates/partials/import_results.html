@@ -73,7 +73,7 @@
   {% else %}
   {% set follow_up_group_count = follow_up_group_count|default(0) %}
   {% if follow_up_group_count > 0 %}
-  <section data-testid="import-results-follow-up-action" class="section-card overflow-hidden">
+  <section id="import-results-follow-up-entry" data-testid="import-results-follow-up-action" class="section-card overflow-hidden">
     <div class="section-header">
       <div class="section-header-copy">
         <p class="section-eyebrow">Follow-up ready</p>
@@ -92,6 +92,8 @@
       </div>
     </div>
   </section>
+  {% else %}
+  <div hidden id="import-results-follow-up-entry"></div>
   {% endif %}
   {% if job.removed_library_root_snapshot %}
   <div class="info-panel" role="status">
@@ -195,29 +197,33 @@
   {% set catalog_sync_pending_count = catalog_sync_pending_count|default(0) %}
   {% set catalog_sync_failed_count = catalog_sync_failed_count|default(0) %}
   {% set catalog_sync_series = catalog_sync_series|default([]) %}
-  {% if catalog_sync_pending_count > 0 %}
-  <div data-testid="import-results-catalog-sync-note">
-    {% call inline_alert(tone="info", icon="info") %}
-      <span>
-        <strong>{{ catalog_sync_pending_count }} series {{ 'is' if catalog_sync_pending_count == 1 else 'are' }} still syncing metadata in the background.</strong>
-        You can leave this page; catalog hydration will continue independently.
-      </span>
-    {% endcall %}
-  </div>
-  {% endif %}
+  {% set pending_writes = archive_metadata_pending_count|default(0) %}
 
   <div class="section-card">
     <div class="section-body space-y-5">
-      <div class="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
-        <div class="space-y-2">
+      <div id="import-results-summary" role="group" aria-labelledby="import-results-headline" tabindex="-1" class="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+        <div id="import-results-status" class="space-y-2">
           <p class="section-eyebrow">Import results</p>
-          <h2 class="text-2xl font-semibold tracking-tight text-pb-text">
-            {% if failed_count == 0 and files_failed == 0 and follow_up_group_count|default(0) == 0 %}
-              The import finished cleanly and the new series are now in Pullbox.
-            {% else %}
+          <h2 id="import-results-headline" aria-live="polite" class="text-2xl font-semibold tracking-tight text-pb-text">
+            {% if failed_count or files_failed or follow_up_group_count|default(0) or job.status.value == 'failed' %}
               The import finished with follow-up still worth checking.
+            {% elif pending_writes or catalog_sync_pending_count %}
+              The import finished. Metadata updates are pending.
+            {% else %}
+              The import finished cleanly.
             {% endif %}
           </h2>
+          {% if catalog_sync_pending_count > 0 %}
+          <p class="section-copy" data-testid="import-results-catalog-sync-note">{{ catalog_sync_pending_count }} series {{ 'is' if catalog_sync_pending_count == 1 else 'are' }} still syncing metadata in the background.</p>
+          {% endif %}
+          {% if pending_writes %}
+          <p class="section-copy">{{ "{:,}".format(pending_writes) }} {{ 'file still needs' if pending_writes == 1 else 'files still need' }} a metadata update. You can leave this page and check back later.</p>
+          {% endif %}
+          {% if (pending_writes or catalog_sync_pending_count) and job.status.value == 'completed' %}
+          <button type="button" class="btn-secondary btn-sm" @click="document.getElementById('import-results-summary').focus({preventScroll: true})"
+                  hx-get="/import/{{ job.id }}/results-partial" hx-select="#import-results-status" hx-target="#import-results-status"
+                  hx-select-oob="#import-results-follow-up-entry" hx-swap="outerHTML" hx-push-url="false" hx-disabled-elt="this">Check status</button>
+          {% endif %}
         </div>
       </div>
 

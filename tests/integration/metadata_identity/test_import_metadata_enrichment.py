@@ -279,11 +279,17 @@ async def test_failed_archive_write_remains_visible_in_import_follow_up(
             imported_series.status = ImportSeriesStatus.IMPORTED
             root = await session.get(LibraryRoot, plan.target.binding.library_root_id)
             root.allow_managed_writes = False
+        async with factory() as session:
+            job = await session.get(ImportJob, ids[0])
+            context = await load_import_results_context(session, job, include_clean_library=False)
+            assert context["archive_metadata_pending_count"] == 1
+            assert context["follow_up_group_count"] == 0
         await import_service().recover_pending_comicinfo_enrichment(factory)
         async with factory() as session:
             assert await count_import_follow_up_jobs(session) == 1
             job = await session.get(ImportJob, ids[0])
             context = await load_import_results_context(session, job, include_clean_library=False)
+            assert context["archive_metadata_pending_count"] == 0
             assert context["archive_metadata_failed_count"] == 1
             assert context["follow_up_group_count"] == 1
 

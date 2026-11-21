@@ -1083,9 +1083,10 @@ async def load_import_results_context(
         files_no_match - orphaned_file_no_match_count,
         0,
     )
-    from pullbox.services.import_metadata_follow_up import count_failed_metadata_writes
+    from pullbox.services.import_metadata_follow_up import outstanding_metadata_write_counts
 
-    archive_metadata_failed_count = await count_failed_metadata_writes(session, job_id)
+    write_counts = await outstanding_metadata_write_counts(session, job_id)
+    archive_metadata_failed_count = write_counts.get("failed", 0)
     catalog_sync_series = await _load_catalog_sync_series(session, job_id)
     catalog_sync_failed_count = sum(
         1
@@ -1138,6 +1139,7 @@ async def load_import_results_context(
         "identified_series_file_no_match_count": identified_series_file_no_match_count,
         "catalog_sync_pending_count": catalog_sync_pending_count,
         "archive_metadata_failed_count": archive_metadata_failed_count,
+        "archive_metadata_pending_count": write_counts.get("pending", 0),
         "catalog_sync_failed_count": catalog_sync_failed_count,
         "catalog_sync_attention_count": len(catalog_sync_series),
         "catalog_sync_series": catalog_sync_series,

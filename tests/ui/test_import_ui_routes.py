@@ -2713,7 +2713,9 @@ class TestImportUnmatchedTab:
         assert "Review suggestions" in html
         assert 'data-tip="Continue recovery"' in html
         assert 'data-testid="import-orphaned-recover-7"' in html
-        assert 'data-tip="Change ComicVine match"' in html
+        assert 'data-tip="Change series"' in html
+        assert 'aria-label="Change series for Henchgirl"' in html
+        assert 'hx-get="/import/orphaned/7/find-series"' in html
         assert 'class="btn-ghost btn-sm"' in html
 
     def test_orphaned_table_routes_imported_issue_recovery_rows_directly_to_file_resolution(
@@ -2997,9 +2999,10 @@ class TestImportUnmatchedTab:
             "inline-flex min-h-8 items-center justify-center whitespace-normal "
             "text-center leading-tight" in html
         )
-        assert 'data-tip="Search ComicVine"' in html
+        assert 'data-tip="Find series"' in html
+        assert 'hx-get="/import/orphaned/8/find-series"' in html
         assert 'data-tip="Dismiss"' in html
-        assert 'aria-label="Search ComicVine for Persephone"' in html
+        assert 'aria-label="Find series for Persephone"' in html
         assert 'aria-label="Dismiss Persephone from import follow-up"' in html
         assert "Search CV" not in html
 
