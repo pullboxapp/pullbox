@@ -20,6 +20,16 @@ override keeps the current value until configured refresh supplies a replacement
 Missing source values cannot silently erase data. Required values cannot be
 cleared. User choices remain available after validation errors.
 
+**Add Series** and **What's New > Find & Add** offer **Create series.json in
+the new folder**. The choice applies to that add only and starts unchecked.
+Only after the series and catalog commit can the writer create the file, using
+the new folder's recorded identity and the saved provider identities. An
+already-tracked series, pre-existing sidecar, replaced directory, changed
+identity or active import never triggers a replacement write. If output is
+blocked, **Review series folder** opens the saved series for sidecar review;
+do not repeat Add. Import review, automatic Watch additions, and legacy/API-key
+adds do not create sidecars. This option is independent of manual refresh.
+
 **Settings > Metadata > Refresh policy > Write series.json on manual refresh** is
 off by default. When enabled, clicking **Refresh metadata** on a series saves
 the library metadata first, then updates eligible managed folders from the same

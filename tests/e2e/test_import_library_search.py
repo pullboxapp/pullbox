@@ -8,7 +8,7 @@ from playwright.sync_api import expect
 from pullbox.core.metadata_identity import MetadataSource as Source
 from tests.e2e.accessibility import assert_no_axe_violations
 from tests.e2e.conftest import _run_async_blocking
-from tests.e2e.test_metron_import_review import _add_verified_series
+from tests.e2e.test_metron_import_review import _add_verified_series, browser_identity_offset
 from tests.e2e.test_source_series_add import preview
 from tests.ui.test_import_library_search import discovery
 from tests.ui.test_import_library_selection import seed_library_choice
@@ -34,9 +34,10 @@ def test_search_preview_add_and_explicit_choices(
     authed_page, seeded_server, tmp_path, monkeypatch, namespace, theme, browser_name
 ):
     page = authed_page
-    job_id, _ = _run_async_blocking(_seed(tmp_path, namespace, theme))
+    offset = browser_identity_offset(browser_name)
+    job_id, _ = _run_async_blocking(_seed(tmp_path, namespace, theme, offset=offset))
     source = Source.METRON_API if namespace == "metron" else Source.GCD_LOCAL
-    identifier = str(49000001 + ["light", "dark", "tron"].index(theme))
+    identifier = str(49000001 + offset + ["light", "dark", "tron"].index(theme))
     search_calls = []
 
     async def search(query, *args, **kwargs):
@@ -80,6 +81,11 @@ def test_search_preview_add_and_explicit_choices(
     screenshots.mkdir(parents=True, exist_ok=True)
     page.screenshot(path=str(screenshots / f"{browser_name}-{namespace}-{theme}-search.png"))
     dialog = search_modal.get_by_test_id("add-series-dialog")
+    expect(
+        dialog.get_by_role(
+            "checkbox", name="Create series.json in the new folder", include_hidden=True
+        )
+    ).to_have_count(0)
     for cancel in ("button", "escape"):
         trigger.click()
         expect(dialog).to_be_visible()
@@ -147,9 +153,11 @@ def test_search_preview_add_and_explicit_choices(
     assert not errors
 
 
-def test_cancel_search_aborts_late_response(authed_page, seeded_server, tmp_path):
+def test_cancel_search_aborts_late_response(authed_page, seeded_server, tmp_path, browser_name):
     page = authed_page
-    job_id, _ = _run_async_blocking(_seed(tmp_path, "metron", "light", offset=100000))
+    job_id, _ = _run_async_blocking(
+        _seed(tmp_path, "metron", "light", offset=100000 + browser_identity_offset(browser_name))
+    )
     page.goto(f"{seeded_server}/import?tab=collection&resume_job_id={job_id}&resume_step=3")
     page.get_by_test_id("import-review-choose-library").click()
     page.get_by_role("button", name="Search Metron / GCD", exact=True).click()
@@ -174,7 +182,9 @@ def test_mobile_search_keeps_title_field_and_actions_usable(
     authed_page, seeded_server, tmp_path, browser_name
 ):
     page = authed_page
-    job_id, _ = _run_async_blocking(_seed(tmp_path, "metron", "light", offset=200000))
+    job_id, _ = _run_async_blocking(
+        _seed(tmp_path, "metron", "light", offset=200000 + browser_identity_offset(browser_name))
+    )
     page.set_viewport_size({"width": 390, "height": 844})
     page.goto(f"{seeded_server}/import?tab=collection&resume_job_id={job_id}&resume_step=3")
     page.get_by_test_id("import-review-choose-library").click()

@@ -101,6 +101,36 @@ def test_preview_then_add_sends_only_source_identity_revision_and_root(
     assert isinstance(adds[0]["library_root_id"], int)
 
 
+def test_blocked_sidecar_offers_folder_review_not_another_add(authed_page, seeded_server):
+    page = authed_page
+    calls = []
+
+    def blocked(route):
+        calls.append(route.request.post_data_json)
+        route.fulfill(
+            status=201,
+            json={"id": 1, "title": "Fixture"},
+            headers={"X-Pullbox-Series-Json": "review"},
+        )
+
+    page.route("**/api/v1/metadata/series/preview", lambda route: route.fulfill(json=preview()))
+    page.route("**/api/v1/series", blocked)
+    page.goto(f"{seeded_server}/series/add")
+    open_result(page)
+    dialog = page.get_by_test_id("add-series-dialog")
+    dialog.get_by_role("checkbox", name="Create series.json in the new folder").check()
+    dialog.get_by_role("button", name="Add series", exact=True).click()
+    expect(
+        dialog.get_by_text("Series added. Pullbox could not create series.json in its folder.")
+    ).to_be_visible()
+    expect(dialog.get_by_role("button", name="Add series", exact=True)).not_to_be_visible()
+    review = dialog.get_by_role("link", name="Review series folder")
+    expect(review).to_be_focused()
+    review.click()
+    expect(page.get_by_role("button", name="Review series.json folders")).to_be_visible()
+    assert len(calls) == 1 and calls[0]["create_series_json"] is True
+
+
 def test_partial_preview_keeps_profile_and_requires_successful_retry(authed_page, seeded_server):
     page = authed_page
     calls = []
@@ -204,8 +234,9 @@ def test_rejected_add_requires_new_preview_and_does_not_double_submit(authed_pag
     assert len(previews) == 2
 
 
+@pytest.mark.parametrize("write_on_add", [False, True])
 def test_real_local_search_preview_add_refresh_and_existing_owner(
-    authed_page, seeded_server, monkeypatch, tmp_path, request
+    authed_page, seeded_server, monkeypatch, tmp_path, request, write_on_add
 ):
     from pullbox.api.v1 import series as series_api
     from pullbox.providers.metadata import sources
@@ -229,6 +260,10 @@ def test_real_local_search_preview_add_refresh_and_existing_owner(
     button = dialog.get_by_role("button", name="Add series", exact=True)
     expect(button).to_be_enabled()
     folder = page.get_by_test_id("add-series-folder-preview").inner_text()
+    choice = dialog.get_by_role("checkbox", name="Create series.json in the new folder")
+    expect(choice).not_to_be_checked()
+    if write_on_add:
+        choice.check()
     with page.expect_response(
         lambda response: (
             response.url.endswith("/api/v1/series") and response.request.method == "POST"
@@ -258,6 +293,13 @@ def test_real_local_search_preview_add_refresh_and_existing_owner(
         "href", f"/series/{record['id']}"
     )
     assert events.emit.await_count == 1
+    sidecar = Path(record["path"]) / "series.json"
+    if write_on_add:
+        assert (
+            json.loads(sidecar.read_bytes())["pullbox"]["snapshot"]["values"]["title"] == "Batman"
+        )
+        return
+    assert not sidecar.exists()
     page.goto(f"{seeded_server}/settings?tab=metadata")
     control = page.get_by_role("switch", name="Write series.json on manual refresh")
     expect(control).not_to_be_checked()

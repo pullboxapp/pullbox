@@ -49,12 +49,17 @@ class SourceSeriesCreate(BaseModel):
     external_id: str = Field(..., min_length=1, max_length=320)
     source_revision: int = Field(..., ge=0, strict=True)
     library_root_id: int | None = Field(None, gt=0)
+    create_series_json: bool = Field(
+        False, strict=True, description="Create the first series.json in the new managed folder."
+    )
     search_on_add: bool | None = None
     catalog_review_token: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     whats_new_selection: WhatsNewSeriesSelection | None = None
 
     @model_validator(mode="after")
     def canonical_identity(self) -> "SourceSeriesCreate":
+        if self.create_series_json and self.library_root_id is None:
+            raise ValueError("Choose a managed library root to create series.json.")
         self.external_id = ExternalIdentityRef(
             self.source.identity_namespace, MetadataEntityKind.SERIES, self.external_id
         ).external_id

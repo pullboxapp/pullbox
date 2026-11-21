@@ -1,5 +1,6 @@
 """Discovery is an inline explicit choice, with the normal verified Add preview."""
 
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -186,6 +187,9 @@ def test_real_local_find_preview_add_link_reload_and_paused_status(
     dialog = page.get_by_test_id("add-series-dialog")
     add = dialog.get_by_role("button", name="Add series", exact=True)
     expect(add).to_be_enabled()
+    create = dialog.get_by_role("checkbox", name="Create series.json in the new folder")
+    expect(create).not_to_be_checked()
+    create.check()
     with page.expect_response(
         lambda response: (
             response.url.endswith("/api/v1/series") and response.request.method == "POST"
@@ -199,6 +203,7 @@ def test_real_local_find_preview_add_link_reload_and_paused_status(
     assert Path(record["path"]).is_dir() and bus.emit.await_count == 1
 
     def cleanup():
+        (Path(record["path"]) / "series.json").unlink(missing_ok=True)
         result = page.request.delete(
             f"{seeded_server}/api/v1/series/{record['id']}",
             headers={"X-CSRF-Token": page.evaluate("readCsrfTokenFromBody()")},
@@ -207,6 +212,8 @@ def test_real_local_find_preview_add_link_reload_and_paused_status(
         Path(record["path"]).rmdir()
 
     request.addfinalizer(cleanup)
+    sidecar = json.loads((Path(record["path"]) / "series.json").read_bytes())
+    assert sidecar["pullbox"]["snapshot"]["values"]["title"] == "Batman"
     page.reload()
     row = page.get_by_test_id("whats-new-release-row").filter(has_text="Atlas Deluxe")
     expect(row.get_by_test_id("whats-new-local-series")).to_have_attribute(

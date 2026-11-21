@@ -84,6 +84,7 @@ async def source_series_add_transaction(
                             bundle.series.external_id,
                         ),
                     )
+                    result = replace(result, created_folder=folder)
                 await purge_series_cover_cache(session, series.id)
                 await session.flush()
             yield result

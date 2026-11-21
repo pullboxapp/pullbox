@@ -1,5 +1,6 @@
 """Source-aware Add Series uses server metadata, real auth and committed side effects."""
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -126,6 +127,7 @@ async def test_add_native_series_uses_full_server_catalog_and_is_repeat_safe(
     assert data["issue_count"] == 3 and data["issue_catalog_state"] == "complete"
     assert data["wanted_count"] == 3 and data["monitored"] is True
     assert Path(data["path"]).is_dir() and len(fixture["events"]) == 1
+    assert not (Path(data["path"]) / "series.json").exists()
     again = await authenticated_client.post(
         "/api/v1/series", json=fixture["body"], headers=csrf(authenticated_client)
     )
@@ -134,6 +136,106 @@ async def test_add_native_series_uses_full_server_catalog_and_is_repeat_safe(
     async with sec_db() as session:
         assert await session.scalar(select(func.count()).select_from(Series)) == 1
         assert await session.scalar(select(func.count()).select_from(Issue)) == 3
+
+
+@pytest.mark.parametrize("interruption", ["none", "sidecar", "folder", "import", "identity"])
+async def test_add_writes_only_first_sidecar_in_original_committed_folder(
+    authenticated_client, source_add_setup, sec_db, interruption
+):
+    from pullbox.api.v1 import series as routes
+    from pullbox.models.import_job import ImportJob, ImportJobStatus, ImportSourceType
+    from pullbox.models.metadata_baseline import SeriesMetadataBaseline
+    from pullbox.models.metadata_identity import SeriesExternalIdentity
+
+    fixture = source_add_setup
+    bus = routes.get_event_bus()
+    committed = []
+
+    async def between_commit_and_output(event):
+        async with sec_db.begin() as session:
+            folder = Path((await session.get(Series, event.series_id)).path)
+            assert not (folder / "series.json").exists()
+            if interruption == "sidecar":
+                (folder / "series.json").write_text('{"custom":"other writer"}')
+            elif interruption == "folder":
+                folder.rename(folder.with_name(folder.name + ".original"))
+                folder.mkdir()
+            elif interruption == "identity":
+                verified = await session.scalar(
+                    select(SeriesExternalIdentity).where(
+                        SeriesExternalIdentity.series_id == event.series_id
+                    )
+                )
+                verified.external_id = "9"
+                baseline = await session.scalar(
+                    select(SeriesMetadataBaseline).where(
+                        SeriesMetadataBaseline.series_id == event.series_id
+                    )
+                )
+                saved = json.loads(baseline.snapshot_json)
+                saved["identities"][0]["external_id"] = "9"
+                saved["origins"] = []
+                baseline.snapshot_json = json.dumps(saved)
+            elif interruption == "import":
+                session.add(
+                    ImportJob(
+                        source_path=str(folder),
+                        source_type=ImportSourceType.FILESYSTEM,
+                        status=ImportJobStatus.IMPORTING,
+                    )
+                )
+        committed.append(event.series_id)
+
+    bus.subscribe(SeriesAdded, between_commit_and_output)
+    body = {**fixture["body"], "create_series_json": True}
+    result = await authenticated_client.post(
+        "/api/v1/series", json=body, headers=csrf(authenticated_client)
+    )
+    assert result.status_code == 201, result.text
+    folder = Path(result.json()["path"])
+    assert committed == [result.json()["id"]]
+    sidecar = folder / "series.json"
+    if interruption == "none":
+        assert sidecar.is_file()
+        assert result.headers["X-Pullbox-Series-Json"] == "created"
+        data = json.loads(sidecar.read_bytes())["pullbox"]["snapshot"]
+        assert data["values"]["title"] == "Fixture 8"
+        assert {ref["namespace"]: ref["external_id"] for ref in data["identities"]} == {
+            "metron": "8"
+        }
+        sidecar.unlink()
+    else:
+        assert result.headers["X-Pullbox-Series-Json"] == "review"
+    if interruption == "identity":
+        assert not sidecar.exists()
+        return
+    again = await authenticated_client.post(
+        "/api/v1/series", json=body, headers=csrf(authenticated_client)
+    )
+    assert again.status_code == 201 and again.json()["id"] == result.json()["id"]
+    assert again.headers["X-Pullbox-Series-Json"] == "existing"
+    assert len(fixture["events"]) == 1
+    if interruption == "sidecar":
+        assert sidecar.read_text() == '{"custom":"other writer"}'
+    else:
+        assert not sidecar.exists()
+    assert not list(fixture["root"].rglob(".pullbox-series-*.tmp"))
+
+
+async def test_sidecar_add_requires_operator_and_root_before_provider_reads(
+    authenticated_client, unauthenticated_client, source_add_setup, sec_api_key
+):
+    fixture = source_add_setup
+    body = {**fixture["body"], "create_series_json": True}
+    forbidden = await unauthenticated_client.post(
+        "/api/v1/series", json=body, headers={"X-API-Key": sec_api_key}
+    )
+    assert forbidden.status_code in {401, 403}, forbidden.text
+    missing_root = await authenticated_client.post(
+        "/api/v1/series", json={**body, "library_root_id": None}, headers=csrf(authenticated_client)
+    )
+    assert missing_root.status_code == 422
+    assert not fixture["calls"] and not list(fixture["root"].iterdir())
 
 
 async def test_untagged_review_add_uses_real_catalog_then_explicit_issue_and_rollback(
@@ -374,13 +476,14 @@ async def test_rejects_client_metadata_or_ambiguous_identity(
     assert not fixture["calls"]
 
 
+@pytest.mark.parametrize("output", [{}, {"create_series_json": True}])
 async def test_failed_catalog_does_not_create_partial_library(
-    authenticated_client, source_add_setup, sec_db
+    authenticated_client, source_add_setup, sec_db, output
 ):
     fixture = source_add_setup
     fixture["responses"].append(httpx.Response(404))
     response = await authenticated_client.post(
-        "/api/v1/series", json=fixture["body"], headers=csrf(authenticated_client)
+        "/api/v1/series", json={**fixture["body"], **output}, headers=csrf(authenticated_client)
     )
     assert response.status_code == 409
     assert not fixture["events"] and not list(fixture["root"].iterdir())

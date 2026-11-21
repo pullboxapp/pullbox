@@ -290,10 +290,11 @@ async def test_add_update_refresh_and_folder_routes_delegate(
             _user(),
             db_session,
             Request({"type": "http"}),
+            Response(),
         )
 
     added = await series_api.add_series(
-        SeriesCreate(comicvine_id=1234), _user(), db_session, Request({"type": "http"})
+        SeriesCreate(comicvine_id=1234), _user(), db_session, Request({"type": "http"}), Response()
     )
     assert added.id == 10
     service.add_from_comicvine.assert_awaited_once_with(

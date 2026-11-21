@@ -46,7 +46,10 @@ from pullbox.services.metadata_service import MetadataService
 from pullbox.services.metadata_sources import load_source_runtime
 from pullbox.services.search_targets import load_series_wanted_search_targets
 from pullbox.services.series_service import SeriesService
-from pullbox.services.series_sidecar import sync_refreshed_series_sidecars
+from pullbox.services.series_sidecar import (
+    create_added_series_sidecar,
+    sync_refreshed_series_sidecars,
+)
 from pullbox.services.whats_new_actions import (
     WhatsNewSelectionError,
     link_confirmed_release,
@@ -395,6 +398,7 @@ async def add_series(
     _user: AuthenticatedUser,
     session: DbSession,
     request: Request,
+    response: Response,
 ) -> SeriesResponse:
     """Add a source-selected series, retaining the legacy ComicVine request."""
     search_on_add = await load_search_on_add_default(session)
@@ -402,6 +406,8 @@ async def add_series(
         raise ValidationError("Search on add is now controlled by the global import policy.")
 
     if isinstance(body, SourceSeriesCreate):
+        if body.create_series_json:
+            await require_interactive_auth(request, _user)
         actor_user_id = _user.id
         if body.whats_new_selection is not None:
             if not get_settings().metadata_whats_new_actions_enabled:
@@ -440,8 +446,16 @@ async def add_series(
                     await link_confirmed_release(
                         session, body.whats_new_selection, result.series.id, actor_user_id
                     )
-                response = await _load_series_response(session, result.series.id)
-            return response
+                record = await _load_series_response(session, result.series.id)
+            if body.create_series_json:
+                outcome = (
+                    await create_added_series_sidecar(session, result)
+                    if result.created
+                    else "existing"
+                )
+                response.headers["X-Pullbox-Series-Json"] = outcome
+                logger.info("series_add_sidecar_result", series_id=record.id, outcome=outcome)
+            return record
         except SeriesAdoptionError as exc:
             raise HTTPException(409, str(exc)) from exc
         except (

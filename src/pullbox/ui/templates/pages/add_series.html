@@ -119,7 +119,7 @@
 
   {% include "partials/add_series_results.html" %}
 
-  {% include "partials/add_series_preview_dialog.html" %}
+  {% with offer_initial_sidecar=true %}{% include "partials/add_series_preview_dialog.html" %}{% endwith %}
 </div>
 {% endblock %}
 

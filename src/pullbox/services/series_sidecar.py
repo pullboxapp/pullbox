@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
 from pydantic import TypeAdapter
@@ -39,6 +39,9 @@ from pullbox.services.library_mutation_coordination import (
 from pullbox.services.metadata_assembly import assemble_metadata
 from pullbox.services.metadata_series_refresh_state import read_series_refresh_state
 from pullbox.utilities.import_guards import ensure_no_active_import_file_mutation
+
+if TYPE_CHECKING:
+    from pullbox.services.metadata_series_adoption import SeriesAdoptionResult
 
 _MAX_FILES = 10000
 _MAX_FOLDERS = 50
@@ -567,6 +570,38 @@ async def write_series_sidecar(
     if not prepared.preview.ready:
         raise ValueError("No writable series sidecars need updating. Review the preview first.")
     return await _write_targets(session, prepared.binding, prepared.targets)
+
+
+async def create_added_series_sidecar(
+    session: AsyncSession, added: "SeriesAdoptionResult"
+) -> Literal["created", "review"]:
+    """Create only in the exact leaf created by the committed Add, never replace."""
+    receipt = added.created_folder
+    if not added.created or receipt is None or not added.snapshot or not added.snapshot.identities:
+        return "review"
+    try:
+        binding = await _binding(session, added.series.id)
+        await session.commit()
+        if not set(added.snapshot.identities) <= set(binding.snapshot.identities):
+            return "review"
+        for location in binding.locations:
+            if not location.managed or (Path(location.directory), Path(location.root)) != (
+                receipt.folder_path,
+                receipt.ownership_boundary_path,
+            ):
+                continue
+            target = await asyncio.to_thread(_inspect, binding, location)
+            if (
+                target.read.action != "create"
+                or (receipt.folder_path, *target.directories[-1][:2])
+                not in receipt.created_directory_identities
+            ):
+                return "review"
+            result = await _write_targets(session, binding, (target,))
+            return "created" if result.written else "review"
+    except (ValueError, ValidationError, NotFoundError, OSError, SQLAlchemyError):
+        await session.rollback()
+    return "review"
 
 
 async def sync_refreshed_series_sidecars(

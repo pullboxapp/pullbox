@@ -72,6 +72,8 @@ function addSeries(config = {}) {
     disposed: false,
     trigger: null,
     addError: '',
+    createSeriesJson: false,
+    sidecarReviewId: null,
     selectedSource: '',
     selectedExternalId: '',
     sourceRevision: null,
@@ -124,7 +126,10 @@ function addSeries(config = {}) {
 
     closeModal() {
       if (!this.showModal || this.adding) return;
+      const refreshAfterReview = !!this.sidecarReviewId;
       this.showModal = false;
+      this.createSeriesJson = false;
+      this.sidecarReviewId = null;
       this.previewSequence++;
       this.previewController?.abort();
       this.previewLoading = false;
@@ -133,6 +138,12 @@ function addSeries(config = {}) {
         ? this.trigger : document.querySelector('[data-testid="add-series-search-input"]');
       trigger?.focus({ preventScroll: true });
       this.processSeriesCovers();
+      if (refreshAfterReview) this.refreshAddResults();
+    },
+
+    refreshAddResults() {
+      const form = document.getElementById('add-series-search-form');
+      if (!this.afterSeriesAdded && form && window.htmx) htmx.trigger(form, 'submit');
     },
 
     trapFocus(event) {
@@ -236,7 +247,7 @@ function addSeries(config = {}) {
     },
 
     addSeriesToLibrary() {
-      if (this.adding || !this.previewReady || !this.libraryRootId || (this.catalogReview && !this.catalogReview.supported_count)) return;
+      if (this.adding || this.sidecarReviewId || !this.previewReady || !this.libraryRootId || (this.catalogReview && !this.catalogReview.supported_count)) return;
       this.adding = true;
       this.addError = '';
 
@@ -247,6 +258,7 @@ function addSeries(config = {}) {
         library_root_id: this.libraryRootId ? parseInt(this.libraryRootId, 10) : null,
       };
       if (this.catalogReview) body.catalog_review_token = this.catalogReview.token;
+      if (this.createSeriesJson) body.create_series_json = true;
       if (this.releaseContext?.selection) body.whats_new_selection = this.releaseContext.selection;
 
       fetch('/api/v1/series', {
@@ -257,23 +269,26 @@ function addSeries(config = {}) {
         },
         body: JSON.stringify(body),
       })
-        .then(res => {
-          if (res.ok) return res.json();
-          return res.json().then(data => {
-            throw new Error((data.error && data.error.message) || (typeof data.detail === 'string' ? data.detail : 'Failed to add series.'));
-          });
+        .then(async res => {
+          const data = await res.json();
+          if (!res.ok) throw new Error((data.error && data.error.message) || (typeof data.detail === 'string' ? data.detail : 'Failed to add series.'));
+          return { data, sidecar: res.headers.get('X-Pullbox-Series-Json') };
         })
-        .then(data => {
+        .then(({ data, sidecar }) => {
           this.adding = false;
           if (this.disposed) return;
           if (typeof this.afterSeriesAdded === 'function') this.afterSeriesAdded(data);
-          this.closeModal();
-          if (typeof showToast === 'function') {
-            showToast({ message: '"' + (data.title || this.selectedTitle) + '" is in your library.', level: 'success' });
-          }
-          const form = document.getElementById('add-series-search-form');
-          if (!this.afterSeriesAdded && form && window.htmx) {
-            htmx.trigger(form, 'submit');
+          if (body.create_series_json && sidecar !== 'created' && sidecar !== 'existing' && Number.isSafeInteger(data.id) && data.id > 0) {
+            this.sidecarReviewId = data.id;
+            this.$nextTick(() => requestAnimationFrame(() => {
+              if (this.showModal && this.sidecarReviewId) this.$refs.sidecarReviewLink?.focus();
+            }));
+          } else {
+            this.closeModal();
+            const suffix = sidecar === 'created' ? ' Created series.json.' :
+              sidecar === 'existing' ? ' No new folder or series.json was created.' : '';
+            if (typeof showToast === 'function') showToast({ message: '"' + (data.title || this.selectedTitle) + '" is in your library.' + suffix, level: 'success' });
+            this.refreshAddResults();
           }
         })
         .catch(err => {

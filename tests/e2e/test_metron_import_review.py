@@ -15,6 +15,11 @@ from tests.integration.test_metron_folder_import import _archive, _service
 pytestmark = pytest.mark.e2e
 
 
+def browser_identity_offset(browser_name: str) -> int:
+    # Combined browser runs share a seeded server; each must start with an unowned ID.
+    return ["chromium", "firefox", "webkit"].index(browser_name) * 1_000_000
+
+
 async def _seed_review(
     root: Path, identifier: str, namespace: str = "metron"
 ) -> tuple[int, int, int]:
@@ -84,10 +89,12 @@ async def _add_verified_series(identifier: str, namespace: str = "metron") -> in
 @pytest.mark.parametrize("theme", ["light", "dark", "tron"])
 @pytest.mark.parametrize("namespace", ["metron", "gcd"])
 def test_metron_preview_cancel_add_and_recheck_stay_in_review(
-    authed_page, seeded_server, tmp_path, monkeypatch, theme, namespace
+    authed_page, seeded_server, tmp_path, monkeypatch, theme, namespace, browser_name
 ):
     page = authed_page
-    identifier = str(29000001 + ["light", "dark", "tron"].index(theme))
+    identifier = str(
+        29000001 + browser_identity_offset(browser_name) + ["light", "dark", "tron"].index(theme)
+    )
     job_id, group_id, root_id = _run_async_blocking(_seed_review(tmp_path, identifier, namespace))
     source_name = "metron_api" if namespace == "metron" else "gcd_local"
     if namespace == "gcd":
@@ -130,6 +137,11 @@ def test_metron_preview_cancel_add_and_recheck_stay_in_review(
     shell.evaluate("el => { window.metronReviewShell = el; }")
     trigger.click()
     dialog = page.get_by_test_id("add-series-dialog")
+    expect(
+        dialog.get_by_role(
+            "checkbox", name="Create series.json in the new folder", include_hidden=True
+        )
+    ).to_have_count(0)
     expect(dialog).to_be_visible()
     expect(dialog.get_by_test_id("add-series-preview-status")).to_be_visible()
     expect(dialog.get_by_role("button", name="Add series", exact=True)).to_be_disabled()
@@ -181,10 +193,12 @@ def test_metron_preview_cancel_add_and_recheck_stay_in_review(
 
 @pytest.mark.parametrize("theme", ["light", "dark", "tron"])
 def test_gcd_recheck_uses_same_review_surface_without_metron_or_cv_controls(
-    authed_page, seeded_server, tmp_path, monkeypatch, theme
+    authed_page, seeded_server, tmp_path, monkeypatch, theme, browser_name
 ):
     page = authed_page
-    identifier = str(39000001 + ["light", "dark", "tron"].index(theme))
+    identifier = str(
+        39000001 + browser_identity_offset(browser_name) + ["light", "dark", "tron"].index(theme)
+    )
     job_id, group_id, _ = _run_async_blocking(_seed_review(tmp_path, identifier, "gcd"))
 
     async def local_service(_session):

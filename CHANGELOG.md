@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add Series and What's New > Find & Add can now create the first `series.json`
+  in the new managed folder. Check the option in the Add dialog. Existing
+  files are never replaced; if the write is blocked, the series stays in your
+  library and the dialog offers folder review.
 - Series Details can now update `series.json` in all eligible managed folders
   when you click **Refresh metadata**. Turn it on in **Settings > Metadata >
   Refresh policy**. Skipped folders can be reviewed without refreshing again;

@@ -6,6 +6,7 @@ import json
 from copy import copy
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 import structlog
@@ -65,6 +66,9 @@ from pullbox.services.metadata_writer_identity import metadata_write_scope
 
 logger = structlog.get_logger(__name__)
 
+if TYPE_CHECKING:
+    from pullbox.services.series_service import SeriesFolderCreationResult
+
 
 def _metadata_label(source: MetadataSource) -> str:
     # Existing refresh precedence depends on these legacy ComicVine labels.
@@ -117,6 +121,7 @@ class SeriesAdoptionResult:
     created: bool
     snapshot: MetadataSnapshot | None = None
     issue_snapshots: tuple[MetadataSnapshot, ...] = ()
+    created_folder: "SeriesFolderCreationResult | None" = None
 
 
 async def fetch_source_series_bundle(

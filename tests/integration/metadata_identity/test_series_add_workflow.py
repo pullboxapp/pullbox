@@ -1,6 +1,7 @@
 """Real catalog adoption plus filesystem and transaction boundaries on both DBs."""
 
 import asyncio
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -226,6 +227,27 @@ async def test_existing_owner_is_not_moved_or_remonitored(add_setup):
         baseline = await session.scalar(select(SeriesMetadataBaseline))
         assert baseline.revision == 1
         assert "Operator title" not in baseline.snapshot_json
+
+
+async def test_initial_sidecar_uses_committed_catalog_and_only_the_new_collision_folder(add_setup):
+    from pullbox.services.series_sidecar import create_added_series_sidecar
+
+    factory, root_id, root_path, bus, _ = add_setup
+    old = root_path / "Fixture Press/Source series (2024)"
+    old.mkdir(parents=True)
+    original = old / "series.json"
+    original.write_text('{"custom":"keep"}')
+    async with factory() as session:
+        async with source_series_add_transaction(
+            session, titled_bundle(), library_root_id=root_id, search_on_add=False, event_bus=bus
+        ) as result:
+            folder = Path(result.series.path)
+            assert result.created_folder.folder_path == folder != old
+            assert not (folder / "series.json").exists()
+        assert await create_added_series_sidecar(session, result) == "created"
+    assert original.read_text() == '{"custom":"keep"}'
+    snapshot = json.loads((folder / "series.json").read_bytes())["pullbox"]["snapshot"]
+    assert snapshot["values"]["title"] == "Source series"
 
 
 async def test_final_classification_is_reflected_in_the_committed_baseline(add_setup):

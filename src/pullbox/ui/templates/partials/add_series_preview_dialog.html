@@ -107,6 +107,16 @@
             class="add-series-modal-preview"
             x-text="folderPreview || 'Folder preview unavailable until a root is selected.'"
           ></div>
+          {% if offer_initial_sidecar|default(false) %}
+          <label x-show="!sidecarReviewId" class="flex items-center gap-2 text-sm text-pb-text">
+            <input type="checkbox" class="checkbox-pb" x-model="createSeriesJson" :disabled="adding || !previewReady">
+            <span>Create series.json in the new folder</span>
+          </label>
+          <div x-show="sidecarReviewId" x-cloak class="space-y-2">
+            <p role="status" class="text-sm text-pb-text">Series added. Pullbox could not create series.json in its folder.</p>
+            <a class="btn-ghost btn-sm" hx-boost="false" :href="sidecarReviewId ? '/series/' + sidecarReviewId + '?series-json=review' : null" x-ref="sidecarReviewLink">Review series folder</a>
+          </div>
+          {% endif %}
         </section>
 
         <div x-show="addError" x-cloak role="alert" class="inline-alert inline-alert-danger">
@@ -121,9 +131,10 @@
       <div class="modal-footer">
         <div class="settings-footer-actions ml-auto">
           <button @click="loadPreview()" x-show="previewFailed" :disabled="previewLoading || adding" class="btn-ghost">Retry preview</button>
-          <button @click="closeModal()" :disabled="adding" class="btn-ghost">Cancel</button>
+          <button @click="closeModal()" :disabled="adding" class="btn-ghost" x-text="sidecarReviewId ? 'Close' : 'Cancel'">Cancel</button>
           <button
             @click="addSeriesToLibrary()"
+            x-show="!sidecarReviewId"
             :disabled="adding || !previewReady || !libraryRootId || (catalogReview && !catalogReview.supported_count)"
             class="btn-primary gap-2"
           >
