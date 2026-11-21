@@ -1007,7 +1007,7 @@ async def _scan_collection_discovered_series(
         )
 
     async def flush_scan_batch(*, force: bool = False) -> None:
-        nonlocal last_batch_flush_at
+        nonlocal last_batch_flush_at, series_found
         if not batch:
             return
 
@@ -1056,8 +1056,11 @@ async def _scan_collection_discovered_series(
                 await validate_discovered_files_safety(session, batch_for_validation)
 
         persistence_started_at = time.monotonic()
+        review_rows_in_batch = len(batch_to_flush)
         if materialize_discovered_scan_results is not None:
-            await materialize_discovered_scan_results(session, job, batch_to_flush)
+            pairs = await materialize_discovered_scan_results(session, job, batch_to_flush)
+            review_rows_in_batch = len(pairs)
+            series_found += review_rows_in_batch - len(batch_to_flush)
             # The shared materializer also supports one-shot callers and sets
             # this counter to the size of the list it receives. Restore the
             # cumulative scanner count after each incremental batch so large
@@ -1070,8 +1073,8 @@ async def _scan_collection_discovered_series(
                 job.id,
                 "DEBUG",
                 "import_scan_batch_discovered",
-                message=f"Discovered {len(batch_to_flush)} series ({series_found} total so far)",
-                series_found_in_batch=len(batch_to_flush),
+                message=f"Discovered {review_rows_in_batch} series ({series_found} total so far)",
+                series_found_in_batch=review_rows_in_batch,
                 total_series_found=series_found,
                 inspection_duration_ms=round(
                     (persistence_started_at - inspection_started_at) * 1000

@@ -119,10 +119,14 @@ def series_evidence(files: list[dict[str, Any]]) -> dict[str, Any]:
         for ref in evidence.get("identities", [])
         if ref.get("kind") == "series"
     }
+    primaries = {
+        namespace for evidence in files if (namespace := import_identity_namespace(evidence))
+    }
     return {
+        "primary_source": next(iter(primaries)).value if len(primaries) == 1 else None,
         "identities": [
             {"namespace": namespace, "id": value} for namespace, value in sorted(identities)
-        ]
+        ],
     }
 
 

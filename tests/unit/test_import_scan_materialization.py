@@ -20,6 +20,7 @@ from pullbox.models.import_job import (
 )
 from pullbox.models.issue import IssueType
 from pullbox.services.import_scan_materialization import materialize_discovered_scan_results
+from pullbox.ui.import_review_lanes import ReviewFacts, classify_review_row
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -153,6 +154,81 @@ async def test_mylar_keeps_existing_identity_path_with_metron_archive_evidence(d
     row = (await db_session.scalars(select(ImportedFile))).one()
     assert row.parsed_issue_number == 19
     assert row.issue_number_raw == "019"
+
+
+@pytest.mark.parametrize("source_type", [ImportSourceType.FILESYSTEM, ImportSourceType.MYLAR3])
+async def test_native_grouping_preserves_source_inventory_and_safety(db_session, source_type):
+    job = await _create_job(db_session)
+    job.source_type = source_type
+    files = [_discovered_file(name=f"file-{index}.cbz") for index in range(5)]
+    for index, file in enumerate(files[:4]):
+        file.source_ordinal = index
+        file.metadata_diagnostics["metron_import"] = {
+            "primary_source": "gcd" if index == 2 else "metron",
+            "number": "13a",
+            "identities": [
+                {
+                    "namespace": "gcd" if index == 2 else "metron",
+                    "kind": "series",
+                    "id": "22" if index == 2 else "21",
+                }
+            ],
+            "problems": [],
+        }
+    files[1].metadata_diagnostics["file_safety"] = {
+        "code": "dangerous_archive",
+        "reason": "Unsafe path",
+    }
+    files[3].metadata_diagnostics["source_layout"] = {
+        "review_required": True,
+        "review_reason": "selected_layout_no_match",
+    }
+    discovered = DiscoveredSeries(
+        raw_series_name="Mixed",
+        raw_year=2024,
+        raw_publisher=None,
+        file_count=5,
+        sample_paths=[file.file_path for file in files],
+        source_folder="/tmp/comics",
+        source_folder_relative=".",
+        files=files,
+        mylar3_cv_id=111 if source_type == ImportSourceType.MYLAR3 else None,
+    )
+    pairs = await materialize_discovered_scan_results(db_session, job, [discovered])
+    assert len(pairs) == (3 if source_type == ImportSourceType.FILESYSTEM else 1)
+    assert job.series_found == len(pairs)
+    assert sum(item.files_total for _, item in pairs) == 5
+    rows = {file.file_name: file for file in (await db_session.scalars(select(ImportedFile))).all()}
+    assert rows[files[1].file_name].status == ImportedFileStatus.SAFETY_BLOCKED
+    assert rows[files[3].file_name].status == ImportedFileStatus.NO_MATCH
+    for file in files:
+        row = rows[file.file_name]
+        assert row.source_signature == file.source_signature
+        assert row.source_ordinal == file.source_ordinal
+        assert row.source_folder_cohort_key == file.source_folder_cohort_key
+        assert not row.include_in_import
+    if source_type == ImportSourceType.FILESYSTEM:
+        untagged = rows[files[4].file_name]
+        assert untagged.status == ImportedFileStatus.NO_MATCH
+        group = await db_session.get(ImportedSeries, untagged.import_series_id)
+        assert group.status == ImportSeriesStatus.NO_MATCH
+        assert group.diagnostics["reason"] == "mixed_folder_identity_required"
+        review = classify_review_row(
+            ReviewFacts(
+                status=group.status.value,
+                kind=group.diagnostics["kind"],
+                unmatched_files=1,
+            )
+        )
+        assert review.label == "No series matched"
+        assert review.action == "Find series"
+        assert "metron_import" not in group.diagnostics
+        assert pairs[0][1].file_count == 3
+        assert pairs[0][1].sample_paths == [files[index].file_path for index in (0, 1, 3)]
+    else:
+        assert pairs[0][1].cv_id == 111
+        assert "native_folder_grouping" not in pairs[0][1].diagnostics
+    assert discovered.files == files and discovered.file_count == 5
 
 
 def _discovered_file(

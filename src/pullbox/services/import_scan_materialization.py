@@ -16,6 +16,7 @@ from pullbox.models.import_job import (
     ImportSourceType,
 )
 from pullbox.services.import_metron_matching import series_evidence, uses_metron_identity
+from pullbox.services.import_native_grouping import group_native_folder_files
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -37,6 +38,10 @@ _VOLUME_LEAF_REVIEW_REASON = "volume_leaf_identity_unconfirmed"
 _VOLUME_LEAF_REVIEW_MESSAGE = (
     "The volume folder does not provide enough agreeing evidence for this file. "
     "Confirm its series using the filename or embedded metadata before importing."
+)
+_NATIVE_FOLDER_REVIEW_MESSAGE = (
+    "These files do not have their own series identity. Other files in this folder cannot "
+    "determine their match. Choose a series or skip them."
 )
 
 
@@ -68,6 +73,12 @@ async def materialize_discovered_scan_results(
     log_event: Callable[..., Awaitable[None]] | None = None,
 ) -> list[tuple[DiscoveredSeries, ImportedSeries]]:
     """Persist discovered scanner output as import review series/file rows."""
+    if job.source_type == ImportSourceType.FILESYSTEM:
+        discovered_list = [
+            group
+            for discovered in discovered_list
+            for group in group_native_folder_files(discovered)
+        ]
     series_pairs: list[tuple[DiscoveredSeries, ImportedSeries]] = []
     for discovered in discovered_list:
         mylar_path_incompatible = (
@@ -82,6 +93,18 @@ async def materialize_discovered_scan_results(
             discovered.files
         )
         series_diagnostics = dict(discovered.diagnostics)
+        native_grouping = series_diagnostics.get("native_folder_grouping")
+        native_identity_required = (
+            isinstance(native_grouping, dict) and native_grouping.get("identity_required") is True
+        )
+        if native_identity_required:
+            series_diagnostics.update(
+                {
+                    "kind": "source_scope_review",
+                    "reason": "mixed_folder_identity_required",
+                    "rejection_reason": _NATIVE_FOLDER_REVIEW_MESSAGE,
+                }
+            )
         if job.source_type == ImportSourceType.FILESYSTEM:
             metron_files = [
                 evidence
@@ -136,7 +159,10 @@ async def materialize_discovered_scan_results(
             has_files=discovered.has_files,
             status=(
                 ImportSeriesStatus.NO_MATCH
-                if all_files_require_layout_review or mylar_path_incompatible or release_review
+                if all_files_require_layout_review
+                or mylar_path_incompatible
+                or release_review
+                or native_identity_required
                 else ImportSeriesStatus.PENDING
             ),
             diagnostics=series_diagnostics,
@@ -161,6 +187,10 @@ async def materialize_discovered_scan_results(
     file_rows: list[dict[str, object]] = []
     for discovered, series_item in series_pairs:
         series_file_count = 0
+        native_grouping = discovered.diagnostics.get("native_folder_grouping")
+        native_identity_required = (
+            isinstance(native_grouping, dict) and native_grouping.get("identity_required") is True
+        )
         for df in discovered.files:
             metadata_diagnostics = dict(df.metadata_diagnostics)
             safety_block = metadata_diagnostics.pop("file_safety", None)
@@ -169,7 +199,12 @@ async def materialize_discovered_scan_results(
             mylar_folder_scope_review = _requires_mylar_folder_scope_review(metadata_diagnostics)
             if isinstance(safety_block, dict):
                 file_status = ImportedFileStatus.SAFETY_BLOCKED
-            elif source_layout_review or mylar_folder_scope_review or volume_leaf_review:
+            elif (
+                source_layout_review
+                or mylar_folder_scope_review
+                or volume_leaf_review
+                or native_identity_required
+            ):
                 file_status = ImportedFileStatus.NO_MATCH
             else:
                 file_status = ImportedFileStatus.PENDING
@@ -214,6 +249,14 @@ async def materialize_discovered_scan_results(
                         "reason": "mylar3_folder_scope_conflict",
                         "rejection_reason": _MYLAR_FOLDER_SCOPE_REVIEW_MESSAGE,
                         "preserve_series_match": True,
+                    }
+                )
+            elif native_identity_required:
+                diagnostics.update(
+                    {
+                        "kind": "source_scope_review",
+                        "reason": "mixed_folder_identity_required",
+                        "rejection_reason": _NATIVE_FOLDER_REVIEW_MESSAGE,
                     }
                 )
             error_message = safety_block.get("reason") if isinstance(safety_block, dict) else None

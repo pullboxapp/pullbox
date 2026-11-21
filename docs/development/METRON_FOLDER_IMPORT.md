@@ -22,8 +22,8 @@ polling, and rechecking use saved evidence and local verified identities.
 
 Adding the series is independent of the import. Cancelling or rolling back the
 import does not delete that added library series. The dialog states this before
-confirmation. Mixed series IDs cannot use this shortcut, and conflicting issue
-evidence remains in review after the series has been added.
+confirmation. Competing series IDs within a single file cannot use this shortcut,
+and conflicting issue evidence remains in review after the series has been added.
 
 ## User Test
 
@@ -164,17 +164,53 @@ unchanged. GCD API and automatic acquisition remained disabled.
 
 ## Remaining Scope
 
-This is not the complete provider-aware importer. Automatic split-folder
-regrouping, compiled sidecar import identity, and provider-neutral issue
+This is not the complete provider-aware importer. Compiled sidecar import
+identity, broader provider-neutral mixed-folder recovery, and issue
 reassignment/recovery remain separate milestones.
 This checkpoint targets CBZ folder imports, not additional archive formats.
 It does not qualify PostgreSQL or change Anna's verification work.
 
 Regression coverage is in `tests/integration/test_metron_folder_import.py`,
 `tests/integration/test_gcd_folder_import.py`,
+`tests/integration/test_native_mixed_folder_import.py`,
 `tests/api/test_gcd_import_preview.py`,
 `tests/integration/test_metron_import_recheck.py`,
 `tests/api/test_source_series_add_api.py`, `tests/e2e/test_metron_import_review.py`,
 `tests/unit/test_import_scan_materialization.py`, and
 `tests/ui/test_import_review_v2.py`, alongside existing import lifecycle,
 matching, paging, recheck, and archive-safety tests.
+
+## Native Mixed-Folder Review
+
+Folder scans now separate native identity groups within a physical folder before
+matching. Each group retains all of its own series identities, and each file
+still needs its own verified issue identity. Unknown native groups can use the
+existing in-review Preview/Add workflow independently. Untagged neighbors stay
+under **No series matched**, with the existing series search and Skip available;
+another file's tag cannot authorize their import. Conflicting cross-identities stay separate
+from clean files rather than blocking every file in the folder.
+
+This uses already-inspected XML evidence, not another archive read or provider
+request. File paths, source signatures, source ordinals, folder cohorts, safety
+blocks, and explicit layout-review requirements are retained. A mixed folder's
+aggregate ComicVine hint does not identify its native subgroups; their own
+embedded cross-identities must still agree with the local verified links.
+Mylar and folders without native identity evidence keep their existing paths.
+Scan totals count the resulting review groups across incremental batches.
+
+Local browser import #50 tested a single folder containing generated Metron
+Superman: Red Son #1 and GCD Superman: Secret Identity #1 archives plus an
+untagged neighbor. The two native groups appeared independently under Ready,
+unselected. Explicit selection imported two files, with zero newly added series
+and one file left in Follow-up. Rollback restored both issues to Skipped,
+removed only the generated library copies, and left all three source hashes and
+the 1,088 pre-existing library-file records unchanged.
+
+A review-only rescan verified the untagged row's **No series matched** label and
+Skip action. Skipping it completed one decision without selecting or removing
+either Ready group. Cancelling that test left no active import.
+
+Validation for this checkpoint passed `make validate` (16,597 passed, 1,778
+skipped, one expected failure), the focused native/Mylar/split-series regressions,
+and nine existing provider-review browser tests in each of Chromium and Firefox.
+The skipped PostgreSQL cases are not PostgreSQL qualification evidence.
