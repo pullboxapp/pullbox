@@ -1,7 +1,7 @@
 """Exact Metron/GCD folder matches using saved XML evidence and verified links.
 
-The durable ``metron_import`` key remains compatible with existing review jobs;
-it describes evidence read from MetronInfo, not necessarily the Metron provider.
+The durable ``metron_import`` key remains compatible with existing review jobs.
+Compiled series-sidecar claims are marked separately from per-file XML evidence.
 """
 
 from __future__ import annotations
@@ -100,9 +100,15 @@ def import_identity_namespace(evidence: dict[str, Any]) -> IdentityNamespace | N
 
 
 def uses_metron_identity(evidence: dict[str, Any]) -> bool:
-    return evidence.get("primary_source") in {"metron", "gcd"} or bool(
-        evidence.get("problems")
-        and any(ref.get("namespace") in {"metron", "gcd"} for ref in evidence.get("identities", []))
+    return (
+        bool(evidence.get("series_sidecar"))
+        or evidence.get("primary_source") in {"metron", "gcd"}
+        or bool(
+            evidence.get("problems")
+            and any(
+                ref.get("namespace") in {"metron", "gcd"} for ref in evidence.get("identities", [])
+            )
+        )
     )
 
 
@@ -122,17 +128,27 @@ def series_evidence(files: list[dict[str, Any]]) -> dict[str, Any]:
     primaries = {
         namespace for evidence in files if (namespace := import_identity_namespace(evidence))
     }
-    return {
+    result: dict[str, Any] = {
         "primary_source": next(iter(primaries)).value if len(primaries) == 1 else None,
         "identities": [
             {"namespace": namespace, "id": value} for namespace, value in sorted(identities)
         ],
     }
+    if any(evidence.get("series_sidecar") for evidence in files):
+        result["series_sidecar"] = True
+        result["sidecar_problems"] = sorted(
+            {
+                problem
+                for evidence in files
+                for problem in (evidence.get("series_sidecar") or {}).get("problems", [])
+            }
+        )
+    return result
 
 
 async def _verified_metron_series(session: AsyncSession, item: ImportedSeries) -> Series | None:
     evidence = (item.diagnostics or {}).get("metron_import")
-    if not isinstance(evidence, dict):
+    if not isinstance(evidence, dict) or evidence.get("sidecar_problems"):
         return None
     refs = evidence.get("identities", [])
     namespace = import_identity_namespace(evidence)
@@ -187,7 +203,10 @@ async def match_local_metron_series(session: AsyncSession, item: ImportedSeries)
             "kind": "series_conflict",
             "reason": f"{identity_key}_identity_needs_review",
             "rejection_reason": (
-                f"The embedded {identity_label} series identity is not linked to one verified "
+                "Correct the source sidecar and rescan this folder, or skip this series. "
+                "series.json is invalid, unsupported, or exceeds the 1 MiB safety limit."
+                if item.diagnostics["metron_import"].get("sidecar_problems")
+                else f"The {identity_label} identity in the source metadata needs a verified "
                 f"library series. Add or link the correct series through {identity_label}, "
                 "then recheck its linked metadata, or skip it for now."
             ),
@@ -398,10 +417,19 @@ def metron_file_candidate(
         (ref["namespace"], ref["id"]) not in index.series_provider_ids for ref in series_refs
     ):
         return None, error
-    native_refs = [ref for ref in refs if ref["namespace"] == namespace]
-    if evidence.get("problems") or len(native_refs) != 1:
+    sidecar = evidence.get("series_sidecar")
+    native_refs = refs if sidecar else [ref for ref in refs if ref["namespace"] == namespace]
+    if evidence.get("problems") or not native_refs or (not sidecar and len(native_refs) != 1):
         return None, error
-    target = index.provider_id_map.get((namespace.value, native_refs[0]["id"]))
+    first = min(
+        native_refs,
+        key=lambda ref: (
+            ref["namespace"] != evidence.get("embedded_primary_source", namespace.value),
+            ref["namespace"],
+            ref["id"],
+        ),
+    )
+    target = index.provider_id_map.get((first["namespace"], first["id"]))
     if target is None or target[3] is None:
         return None, error
     issue = target[3]

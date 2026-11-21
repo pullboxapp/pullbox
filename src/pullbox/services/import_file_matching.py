@@ -1037,7 +1037,7 @@ async def _load_existing_series_page_target_index(
         identity_filters.append(Issue.comicvine_id.in_(sorted(requested_cv_ids)))
     if requested_issue_numbers:
         identity_filters.append(Issue.issue_number.in_(sorted(requested_issue_numbers)))
-    if imp_series.cv_match_method == "library_review":
+    if imp_series.cv_match_method in {"library_review", "metron_id", "gcd_id"}:
         reviewed_ids = {
             proof.get("issue_id")
             for file in files
@@ -1051,21 +1051,34 @@ async def _load_existing_series_page_target_index(
             if imp_series.cv_match_method == "gcd_id"
             else IdentityNamespace.METRON
         )
-        native_ids = {
-            ref["id"]
-            for file in files
-            for ref in (file_metron_evidence(file) or {}).get("identities", [])
-            if ref.get("namespace") == namespace and ref.get("kind") == "issue"
-        }
-        if native_ids:
-            identity_filters.append(
-                Issue.id.in_(
-                    sa_select(IssueExternalIdentity.issue_id).where(
-                        IssueExternalIdentity.identity_namespace == namespace,
-                        IssueExternalIdentity.external_id.in_(native_ids),
+        for candidate_namespace in (
+            IdentityNamespace.METRON,
+            IdentityNamespace.GCD,
+            IdentityNamespace.COMICVINE,
+        ):
+            native_ids = {
+                ref["id"]
+                for file in files
+                if (evidence := file_metron_evidence(file)) is not None
+                and (candidate_namespace == namespace or evidence.get("series_sidecar"))
+                for ref in evidence.get("identities", [])
+                if ref.get("namespace") == candidate_namespace and ref.get("kind") == "issue"
+            }
+            if not native_ids:
+                continue
+            if candidate_namespace == IdentityNamespace.COMICVINE:
+                identity_filters.append(
+                    Issue.comicvine_id.in_([int(value) for value in native_ids])
+                )
+            else:
+                identity_filters.append(
+                    Issue.id.in_(
+                        sa_select(IssueExternalIdentity.issue_id).where(
+                            IssueExternalIdentity.identity_namespace == candidate_namespace,
+                            IssueExternalIdentity.external_id.in_(native_ids),
+                        )
                     )
                 )
-            )
     if not identity_filters:
         return target_index
 
@@ -2109,7 +2122,9 @@ def _evaluate_file_match_candidate(
     build_import_metadata_conflict: BuildImportMetadataConflictFunc,
     series_high_confidence: bool,
 ) -> tuple[FileMatchCandidate | None, dict[str, Any] | None]:
-    if imp_series.cv_match_method == "library_review":
+    if imp_series.cv_match_method == "library_review" or imp_file.diagnostics.get(
+        "reviewed_library_issue"
+    ):
         from pullbox.services.import_library_selection import reviewed_library_candidate
 
         return reviewed_library_candidate(imp_series, imp_file, target_index)

@@ -15,6 +15,7 @@ from pullbox.core.comicinfo import ComicInfoData
 from pullbox.core.issue_numbers import format_issue_number, parse_issue_number_text
 from pullbox.core.naming import detect_issue_type
 from pullbox.core.release_parser import ParsedRelease, normalize_issue_number, parse_release_title
+from pullbox.core.series_sidecar import MAX_SIDECAR_BYTES, read_compiled_series_identity
 from pullbox.core.source_sidecars import parse_source_sidecar
 from pullbox.core.type_semantics import TypeFamily, issue_type_family
 from pullbox.models.issue import IssueType
@@ -531,6 +532,8 @@ class SourceMetadataExtractor:
             "archive_metadata_deferred": not include_archive_comicinfo,
         }
         diagnostics.update(metadata.diagnostics)
+        if isinstance(sidecar.get("series_sidecar"), dict):
+            diagnostics["series_sidecar"] = sidecar["series_sidecar"]
 
         if comicinfo:
             if comicinfo.series:
@@ -849,8 +852,32 @@ class SourceMetadataExtractor:
             if not path.exists():
                 continue
             payload["files_present"].append(sidecar_name)
-            raw_text = path.read_text(errors="replace")
+            raw_bytes = b""
+            if sidecar_name == "series.json":
+                with path.open("rb") as stream:
+                    raw_bytes = stream.read(MAX_SIDECAR_BYTES + 1)
+                if len(raw_bytes) > MAX_SIDECAR_BYTES:
+                    payload["series_sidecar"] = {
+                        "source": sidecar_name,
+                        "identities": [],
+                        "problems": ["invalid_series_sidecar"],
+                    }
+                    continue
+                raw_text = raw_bytes.decode("utf-8", errors="replace")
+            else:
+                raw_text = path.read_text(errors="replace")
             sidecar_data = self._parse_sidecar(raw_text)
+            if sidecar_name == "series.json" and (
+                "pullbox" in sidecar_data or re.search(r'"pullbox"\s*:', raw_text)
+            ):
+                try:
+                    payload["series_sidecar"] = read_compiled_series_identity(raw_bytes)
+                except ValueError:
+                    payload["series_sidecar"] = {
+                        "source": sidecar_name,
+                        "identities": [],
+                        "problems": ["invalid_series_sidecar"],
+                    }
             payload["identity_conflicts"].extend(sidecar_data.get("_identity_conflicts", []))
             sidecar_series_id = _as_int(sidecar_data.get("comicid"))
             if (

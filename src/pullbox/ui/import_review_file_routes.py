@@ -643,6 +643,7 @@ async def preview_native_assignment(
     issue_page: int = Query(1, ge=1),
     q: str = Query("", max_length=200),
 ) -> Response:
+    from pullbox.services.import_library_selection import has_compiled_series_choice
     from pullbox.services.import_native_issue_choices import (
         native_issue_choice,
         native_issue_page,
@@ -652,7 +653,12 @@ async def preview_native_assignment(
 
     job, parent, file, series, namespace = await native_review_context(session, job_id, file_id)
     issues, issue_page, pages = await native_issue_page(
-        session, series.id, namespace, issue_page, q
+        session,
+        series.id,
+        namespace,
+        issue_page,
+        q,
+        include_other_native=has_compiled_series_choice(file),
     )
     choices = {}
     for issue in issues:
@@ -675,6 +681,7 @@ async def preview_native_assignment(
             native_choices=choices,
             native_assignment=True,
             manual_library_choice=bool(parent.diagnostics.get("manual_library_series")),
+            sidecar_library_choice=has_compiled_series_choice(file),
         ),
     )
 

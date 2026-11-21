@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import func, or_, select, update
 
 from pullbox.core.exceptions import ValidationError
+from pullbox.core.metadata_identity import IdentityNamespace
 from pullbox.core.metadata_identity_state import IdentityVerificationState
 from pullbox.models.import_job import (
     ImportControlRequest,
@@ -38,7 +39,6 @@ from pullbox.services.import_review_scope import review_scope, verify_review_sco
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from pullbox.core.metadata_identity import IdentityNamespace
     from pullbox.models.series import Series
 
 
@@ -112,13 +112,17 @@ async def native_issue_choice(
     candidate, _ = metron_file_candidate(file, index)
     selection = None
     manual = parent.diagnostics.get("manual_library_series")
-    if manual:
-        from pullbox.services.import_library_selection import reviewed_issue_proof
+    from pullbox.services.import_library_selection import (
+        has_compiled_series_choice,
+        reviewed_issue_proof,
+    )
 
+    explicit_choice = bool(manual) or (candidate is None and has_compiled_series_choice(file))
+    if explicit_choice:
         selection = reviewed_issue_proof(file, issue, index)
     return NativeIssueChoice(
         issue,
-        (selection is not None if manual else candidate is not None)
+        (selection is not None if explicit_choice else candidate is not None)
         and issue.series_id == series.id,
         {
             "actor": actor_id,
@@ -142,9 +146,15 @@ async def native_issue_page(
     namespace: IdentityNamespace,
     page: int,
     query: str,
+    *,
+    include_other_native: bool = False,
 ) -> tuple[list[Issue], int, int]:
     verified = select(IssueExternalIdentity.issue_id).where(
-        IssueExternalIdentity.identity_namespace == namespace,
+        IssueExternalIdentity.identity_namespace.in_(
+            [IdentityNamespace.METRON, IdentityNamespace.GCD]
+        )
+        if include_other_native
+        else IssueExternalIdentity.identity_namespace == namespace,
         IssueExternalIdentity.verification_state == IdentityVerificationState.VERIFIED,
     )
     filters = [Issue.series_id == series_id, Issue.id.in_(verified)]
@@ -205,11 +215,18 @@ async def assign_native_issue(
     if claimed is None:
         raise ValidationError("This import is no longer available for review.")
     external_id = await session.scalar(
-        select(IssueExternalIdentity.external_id).where(
+        select(IssueExternalIdentity.external_id)
+        .where(
             IssueExternalIdentity.issue_id == issue.id,
-            IssueExternalIdentity.identity_namespace == namespace,
+            IssueExternalIdentity.identity_namespace.in_(
+                [IdentityNamespace.METRON, IdentityNamespace.GCD]
+            )
+            if choice.scope["selection"]
+            else IssueExternalIdentity.identity_namespace == namespace,
             IssueExternalIdentity.verification_state == IdentityVerificationState.VERIFIED,
         )
+        .order_by(IssueExternalIdentity.identity_namespace, IssueExternalIdentity.external_id)
+        .limit(1)
     )
     if external_id is None:
         raise ValidationError("This issue no longer has a verified provider identity. Recheck it.")

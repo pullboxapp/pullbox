@@ -28,8 +28,10 @@
   {% set compact_one_page = one_page and reason_key == 'single_page_comic' %}
   {% set series_diagnostics = item.diagnostics or {} %}
   {% set library_selection = series_diagnostics.get('manual_library_series') %}
+  {% set sidecar_identity = series_diagnostics.get('metron_import', {}).get('series_sidecar') %}
+  {% set invalid_sidecar = series_diagnostics.get('metron_import', {}).get('sidecar_problems') %}
   {% set metron_row = library_selection or item.cv_match_method == 'metron_id' or series_diagnostics.get('metron_import') is not none %}
-  {% set gcd_row = (library_selection and library_selection.namespace == 'gcd') or item.cv_match_method == 'gcd_id' or (series_diagnostics.get('metron_import', {}).get('identities', [])|selectattr('namespace', 'equalto', 'gcd')|list|length > 0) %}
+  {% set gcd_row = (library_selection and library_selection.namespace == 'gcd') or item.cv_match_method == 'gcd_id' or series_diagnostics.get('metron_import', {}).get('primary_source') == 'gcd' %}
   {% set identity_label = 'GCD' if gcd_row else 'Metron' %}
   {% set metron_series_review = metron_row and reason_key in ('needs_series', 'series_conflict') %}
   {% set known_cv_id = item.user_selected_cv_id or item.cv_id or library_series_cv_ids_by_imported_series_id.get(item.id) %}
@@ -54,11 +56,11 @@
         {% if item.files_already_owned %}<p class="mt-1 text-xs text-pb-text-dim">{{ item.files_already_owned }} already owned</p>{% endif %}
       </td>
       {% if ready_table %}
-      <td><p class="text-sm text-pb-text">{{ item.cv_title or 'Known series' }}{% if item.cv_year %} ({{ item.cv_year }}){% endif %}</p><p class="mt-1 text-xs text-pb-text-dim">{{ item.cv_publisher or '' }} {% if library_selection %}Library selection ({{ identity_label }}){% elif metron_row %}{{ identity_label }} identity{% elif item.cv_id or item.user_selected_cv_id %}<a data-testid="import-review-cv-id-link" class="text-pb-interactive hover:underline" href="https://comicvine.gamespot.com/volume/4050-{{ item.user_selected_cv_id or item.cv_id }}/" target="_blank" rel="noopener noreferrer">CV {{ item.user_selected_cv_id or item.cv_id }}</a>{% endif %}</p></td>
+      <td><p class="text-sm text-pb-text">{{ item.cv_title or 'Known series' }}{% if item.cv_year %} ({{ item.cv_year }}){% endif %}</p><p class="mt-1 text-xs text-pb-text-dim">{{ item.cv_publisher or '' }} {% if library_selection %}Library selection ({{ identity_label }}){% elif sidecar_identity %}series.json ({{ identity_label }}){% elif metron_row %}{{ identity_label }} identity{% elif item.cv_id or item.user_selected_cv_id %}<a data-testid="import-review-cv-id-link" class="text-pb-interactive hover:underline" href="https://comicvine.gamespot.com/volume/4050-{{ item.user_selected_cv_id or item.cv_id }}/" target="_blank" rel="noopener noreferrer">CV {{ item.user_selected_cv_id or item.cv_id }}</a>{% endif %}</p></td>
       <td><span class="font-mono text-xs text-pb-success">{% if item.cv_match_score is not none %}{{ (item.cv_match_score * 100)|round|int }}%{% else %}&mdash;{% endif %}</span></td>
       <td>{% include "partials/import_review_row_menu.html" %}{{ review_expander(item, row, false) }}</td>
       {% else %}
-      <td><p class="font-semibold text-pb-text">{{ (identity_label ~ ' identity needs review') if metron_series_review else review_reasons[reason_key][0] }}</p><p class="mt-0.5 text-xs leading-[18px] text-pb-text-sec">{{ 'Add or correct the linked series, then recheck the saved file identities.' if metron_series_review else reason_descriptions.get(reason_key, 'Review the saved evidence and choose the next step.') }}{% if active_review_view != 'fix_source' and not dangerous_row and row.lane in ('fix_source', 'blocked') %} {{ review_expander(item, row, compact_one_page, 'Technical detail') }}{% endif %}</p>
+      <td><p class="font-semibold text-pb-text">{{ 'series.json needs review' if invalid_sidecar else (identity_label ~ ' identity needs review') if metron_series_review else review_reasons[reason_key][0] }}</p><p class="mt-0.5 text-xs leading-[18px] text-pb-text-sec">{{ 'Correct the source sidecar and rescan this folder, or skip this series.' if invalid_sidecar else 'Add or correct the linked series, then recheck the saved file identities.' if metron_series_review else reason_descriptions.get(reason_key, 'Review the saved evidence and choose the next step.') }}{% if active_review_view != 'fix_source' and not dangerous_row and row.lane in ('fix_source', 'blocked') %} {{ review_expander(item, row, compact_one_page, 'Technical detail') }}{% endif %}</p>
       {% if row.updating %}<span class="pill pill-info" role="status"><svg class="h-3 w-3 animate-spin motion-reduce:animate-none" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2" opacity=".25"/><path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="2"/></svg>Updating match</span>{% endif %}</td>
       <td><div class="flex flex-wrap items-center gap-1.5">
         {% if compact_one_page %}

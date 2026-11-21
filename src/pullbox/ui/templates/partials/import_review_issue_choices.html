@@ -28,6 +28,6 @@
     {% if issue_page < issue_page_count %}<button type="button" class="btn-ghost btn-sm" hx-get="{{ choices_url }}?{{ choices_query }}issue_page={{ issue_page + 1 }}&q={{ query|urlencode }}" hx-target="#import-review-issue-choices-{{ file.id }}" hx-swap="outerHTML">Next</button>{% endif %}
   </nav>{% endif %}
   <p class="text-xs text-pb-text-dim">Verified issue list for {{ series.title }}. Only this file's match changes.</p>
-  {% if native_assignment %}<p class="text-xs text-pb-text-sec">Choices that disagree with embedded identities or issue numbers are disabled. {% if manual_library_choice %}This file has a user-selected series. Confirm its contents before choosing an issue. {% endif %}Review linked metadata or correct the source and recheck it; choosing an issue cannot override conflicting evidence.</p>{% endif %}
+  {% if native_assignment %}<p class="text-xs text-pb-text-sec">Choices that disagree with source identities or issue numbers are disabled. {% if manual_library_choice %}This file has a user-selected series. Confirm its contents before choosing an issue. {% elif sidecar_library_choice %}series.json identifies the series, not this individual issue. Confirm the file's contents before choosing an issue. {% endif %}Review linked metadata or correct the source and recheck it; choosing an issue cannot override conflicting evidence.</p>{% endif %}
   <p x-cloak x-show="error" x-text="error" role="alert" class="text-xs text-pb-error"></p>
 </div>

@@ -1,5 +1,6 @@
 """Bounded JSON output from the same canonical snapshot used by archive writers."""
 
+import hashlib
 import json
 import math
 import re
@@ -72,6 +73,32 @@ def read_series_sidecar(payload: bytes | None) -> dict[str, Any]:
         raise ValueError(
             "Existing series.json is invalid. Repair it before writing metadata."
         ) from None
+
+
+def read_compiled_series_identity(payload: bytes) -> dict[str, Any]:
+    """Return claims from our compiled block, never copied verification state."""
+    data = read_series_sidecar(payload)
+    compiled = data.get("pullbox")
+    if (
+        not isinstance(compiled, dict)
+        or type(compiled.get("schema_version")) is not int
+        or compiled.get("schema_version") != 1
+    ):
+        raise ValueError("Unsupported compiled series sidecar")
+    snapshot = MetadataSnapshot.model_validate(compiled.get("snapshot"))
+    if snapshot.entity_kind is not MetadataEntityKind.SERIES:
+        raise ValueError("Expected a series snapshot")
+    return {
+        "source": "series.json",
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "identities": [
+            {"namespace": ref.namespace.value, "kind": "series", "id": ref.external_id}
+            for ref in snapshot.identities
+            if ref.namespace
+            in {IdentityNamespace.COMICVINE, IdentityNamespace.METRON, IdentityNamespace.GCD}
+        ],
+        "problems": [],
+    }
 
 
 def render_series_sidecar(

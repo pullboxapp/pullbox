@@ -185,6 +185,16 @@ async def choose_library_series(
     await recompute_series_counters(session, job)
 
 
+def has_compiled_series_choice(file: ImportedFile) -> bool:
+    evidence = file_metron_evidence(file) or {}
+    sidecar = evidence.get("series_sidecar")
+    return (
+        isinstance(sidecar, dict)
+        and not sidecar.get("problems")
+        and any(ref.get("namespace") in {"metron", "gcd"} for ref in sidecar.get("identities", []))
+    )
+
+
 def reviewed_issue_proof(
     file: ImportedFile, issue: Issue, index: FileMatchTargetIndex
 ) -> dict[str, Any] | None:
@@ -263,14 +273,22 @@ async def revalidate_library_issue(session: AsyncSession, file: ImportedFile, is
         )
     await load_metron_issue_targets(session, index, [file])
     proof = reviewed_issue_proof(file, issue, index)
+    valid_series = False
+    if series is not None and parent is not None:
+        manual = parent.diagnostics.get("manual_library_series")
+        if manual:
+            valid_series = await library_series_identity(session, series) == manual
+        elif has_compiled_series_choice(file):
+            from pullbox.services.import_metron_matching import verified_native_import_series
+
+            valid_series = await verified_native_import_series(session, parent) is series
     if (
         series is None
         or parent is None
         or parent.series_id != series.id
         or proof is None
         or proof != file.diagnostics.get("reviewed_library_issue")
-        or await library_series_identity(session, series)
-        != parent.diagnostics.get("manual_library_series")
+        or not valid_series
     ):
         raise ValidationError(
             "The reviewed library issue or its source evidence changed. "
@@ -285,7 +303,12 @@ def reviewed_library_candidate(
 
     saved = file.diagnostics.get("reviewed_library_issue") or {}
     identity = parent.diagnostics.get("manual_library_series") or {}
-    if identity.get("links") == [list(key) for key in sorted(index.series_provider_ids)]:
+    valid_series = (
+        identity.get("links") == [list(key) for key in sorted(index.series_provider_ids)]
+        if identity
+        else bool(parent.diagnostics.get("metron_import")) and has_compiled_series_choice(file)
+    )
+    if valid_series:
         for issue, owned in index.issue_entries:
             if (
                 issue.id == saved.get("issue_id")

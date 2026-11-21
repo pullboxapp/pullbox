@@ -26,7 +26,10 @@
       </div>{% endif %}
     </section>
     <section class="min-w-0 space-y-3">
-      {% if metron_row and reason_key in ('needs_series', 'series_conflict') %}
+      {% if invalid_sidecar %}
+      <h3 class="text-[11px] font-semibold uppercase tracking-wider text-pb-text-dim">series.json</h3>
+      <p class="text-xs text-pb-text-sec">Correct the source sidecar and rescan this folder, or skip this series. Rechecking provider links cannot repair a sidecar file.</p>
+      {% elif metron_row and reason_key in ('needs_series', 'series_conflict') %}
       <h3 class="text-[11px] font-semibold uppercase tracking-wider text-pb-text-dim">{{ identity_label }} identity</h3>
       <p class="text-xs text-pb-text-sec">Add the series through {{ identity_label }}, or correct its linked metadata, then recheck here without starting another import. Titles alone cannot replace conflicting identities. Changed source files still need a source recheck or rescan.</p>
       {% set identity_namespace = 'gcd' if gcd_row else 'metron' %}
