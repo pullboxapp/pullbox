@@ -89,7 +89,7 @@ from pullbox.models.operation_progress import (
 from pullbox.models.pending_match import PendingMatch, PendingMatchStatus
 from pullbox.models.provider_cache import MetadataProviderCacheEntry
 from pullbox.models.publisher import Publisher
-from pullbox.models.reader import IssueReaderState
+from pullbox.models.reader import IssueReaderState, StoryArcReaderBookmark
 from pullbox.models.scheduler_task_stat import ScheduledTaskStat
 from pullbox.models.search_log import SearchLog, SearchType
 from pullbox.models.series import (
@@ -243,6 +243,7 @@ __all__ = [
     "StoryArcPlacementMode",
     "StoryArcPlacementOwnership",
     "StoryArcPlacementState",
+    "StoryArcReaderBookmark",
     "StoryArcResolutionState",
     "StoryArcSourceKind",
     "StoryArcSymlinkStyle",

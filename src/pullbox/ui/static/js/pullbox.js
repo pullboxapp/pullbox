@@ -18790,6 +18790,9 @@ function readerMixin(config) {
           !self.readerLastSettledCompletion
         ),
       };
+      if (manifest.story_arc) {
+        payload.story_arc = { id: manifest.story_arc.id, entry_id: manifest.story_arc.entry_id };
+      }
       var signature = JSON.stringify(payload);
       if (!self.readerProgressSaveFailed && signature === self.readerLastSavedSignature) {
         return manifest.state || null;
@@ -18814,6 +18817,9 @@ function readerMixin(config) {
         if (!response.ok) throw new Error("Reading position was not saved.");
         var canonical = await response.json();
         self.readerProgressSaveFailed = false;
+        if (canonical.arc_bookmark_saved === false && self.readerManifest === manifest) {
+          self.readerIssueSwitchError = "Your page was saved, but this arc entry changed. Open the story arc to choose a chapter.";
+        }
         if (canonical.state) manifest.state = canonical.state;
         if (
           payload.reread_started &&
@@ -18822,13 +18828,7 @@ function readerMixin(config) {
         ) {
           self.readerRereadPending = false;
           self.readerCompletionVisible = false;
-          self.readerLastSavedSignature = JSON.stringify({
-            revision: payload.revision,
-            page_index: payload.page_index,
-            page_count: payload.page_count,
-            completion_candidate: payload.completion_candidate,
-            reread_started: false,
-          });
+          self.readerLastSavedSignature = JSON.stringify(Object.assign({}, payload, { reread_started: false }));
         } else {
           self.readerLastSavedSignature = signature;
         }

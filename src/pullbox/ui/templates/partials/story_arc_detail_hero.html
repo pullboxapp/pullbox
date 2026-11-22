@@ -69,6 +69,11 @@
     >
       <p id="story-arc-detail-actions-title" data-testid="story-arc-detail-actions-title" class="series-domain-actions-title">Manage <span>story arc</span></p>
       <div class="series-domain-actions-buttons">
+        {% if arc_read_action and arc_read_action.issue_id %}
+          <a class="btn-primary" hx-boost="false" href="/issues/{{ arc_read_action.issue_id }}?read=1&amp;source=story-arc&amp;story_arc_id={{ story_arc.id }}&amp;entry_id={{ arc_read_action.entry_id }}&amp;story_arc_page={{ story_arc.page }}&amp;story_arc_per_page={{ story_arc.per_page }}">{{ 'Continue story arc' if arc_read_action.resume else 'Read story arc' }}</a>
+        {% elif arc_read_action and arc_read_action.notice %}
+          <p class="text-xs text-pb-text-sec">{{ arc_read_action.notice }}</p>
+        {% endif %}
         <form
           action="/story-arcs/{{ story_arc.id }}/monitor"
           method="post"

@@ -37,6 +37,7 @@ from pullbox.schemas.reader import (
     ReaderStoryArcResponse,
     ReaderWantToReadUpdate,
 )
+from pullbox.services.reader_arc_bookmarks import save_arc_bookmark
 from pullbox.services.reader_arc_order import ArcNeighbor, load_arc_reader_order
 from pullbox.services.reader_content_service import (
     ReaderContentService,
@@ -403,6 +404,15 @@ async def reader_progress(
                 expected_page_count=manifest.page_count,
                 reread_started=payload.reread_started,
             )
+            bookmark_saved = None
+            if payload.story_arc is not None:
+                bookmark_saved = await save_arc_bookmark(
+                    session,
+                    user_id=user.id,
+                    arc_id=payload.story_arc.id,
+                    entry_id=payload.story_arc.entry_id,
+                    issue_id=issue_id,
+                )
             await session.commit()
     except ReaderStateValidationError as exc:
         status_code = 409 if exc.code in {"stale_revision", "page_count_mismatch"} else 422
@@ -424,6 +434,7 @@ async def reader_progress(
         revision=snapshot.content_revision,
         completed_at=snapshot.completed_at,
         updated_at=snapshot.updated_at,
+        arc_bookmark_saved=bookmark_saved,
         state=_state_response(snapshot),
     )
 

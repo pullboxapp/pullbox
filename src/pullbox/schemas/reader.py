@@ -66,6 +66,11 @@ class ReaderManifestResponse(BaseModel):
     story_arc: ReaderStoryArcResponse | None = None
 
 
+class ReaderArcPosition(BaseModel):
+    id: int = Field(gt=0)
+    entry_id: int = Field(gt=0)
+
+
 class ReaderProgressUpdate(BaseModel):
     """Explicit settled-page state sent independently from page requests."""
 
@@ -74,6 +79,7 @@ class ReaderProgressUpdate(BaseModel):
     page_count: int = Field(ge=1)
     completion_candidate: bool = False
     reread_started: StrictBool = False
+    story_arc: ReaderArcPosition | None = None
 
 
 class ReaderProgressResponse(BaseModel):
@@ -85,6 +91,7 @@ class ReaderProgressResponse(BaseModel):
     completed_at: datetime | None
     updated_at: datetime
     state: ReaderStateResponse
+    arc_bookmark_saved: bool | None = None
 
 
 class ReaderCompletionUpdate(BaseModel):

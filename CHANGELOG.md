@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Read story arc** opens the first chapter. Once a page has been displayed
+  and its progress saved, **Continue story arc** opens your bookmarked chapter
+  using that comic's normal page progress. Each user and arc has a separate
+  bookmark. A removed or unavailable chapter is never silently replaced.
 - Opening an issue from a Story Arc now follows the arc's saved reading order,
   even across series. The reader shows your position and identifies unavailable
   neighboring entries. Opening an issue directly still uses series order.

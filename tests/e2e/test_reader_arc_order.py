@@ -13,6 +13,7 @@ from pullbox.database import get_session_factory
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
 from pullbox.models.story_arc import IssueStoryArc, StoryArc, StoryArcResolutionState
+from tests.e2e.accessibility import assert_no_axe_violations
 from tests.e2e.conftest import _TEST_COVER_PNG, _run_async_blocking
 from tests.e2e.pages.issue_detail import IssueDetailPage
 
@@ -25,6 +26,7 @@ def arc_reader(seeded_server: str, tmp_path: Path) -> Iterator[int]:
     with ZipFile(path, "w") as cbz:
         cbz.writestr("001.png", _TEST_COVER_PNG)
         cbz.writestr("002.png", _TEST_COVER_PNG)
+        cbz.writestr("003.png", _TEST_COVER_PNG)
 
     async def seed() -> tuple[int, int, int, int]:
         async with get_session_factory().begin() as session:
@@ -103,3 +105,42 @@ def test_read_in_arc_order_then_open_independently(
     issue.open_reader()
     expect(context).not_to_be_visible()
     expect(next_issue).to_be_disabled()
+
+
+@pytest.mark.parametrize("theme", ["light", "dark", "tron"])
+def test_arc_action_resumes_bookmarked_chapter_and_shared_page(
+    authed_page: Page,
+    seeded_server: str,
+    seeded_reader_state_guard: None,
+    arc_reader: int,
+    theme: str,
+) -> None:
+    page = authed_page
+    page.add_init_script(f"localStorage.setItem('pullbox-theme', '{theme}')")
+    if theme == "dark":
+        page.set_viewport_size({"width": 390, "height": 844})
+    url = f"{seeded_server}/story-arcs/{arc_reader}?page=1&per_page=1"
+    page.goto(url)
+    page.get_by_role("link", name="Read story arc", exact=True).click(timeout=5000)
+    context = page.get_by_test_id("comic-reader-arc-position")
+    expect(context).to_have_text("Reading: Reader crossover · 1 of 3")
+    page.get_by_test_id("comic-reader-next-issue").click()
+    expect(context).to_have_text("Reading: Reader crossover · 2 of 3")
+    with page.expect_response(
+        lambda r: (
+            r.url.endswith("/progress")
+            and r.request.method == "PUT"
+            and r.request.post_data_json["page_index"] == 1
+        )
+    ) as saved:
+        page.get_by_test_id("comic-reader-next").click()
+    assert saved.value.ok
+    page.goto(url)
+    expect(page.locator("html")).to_have_attribute("data-theme", theme)
+    resume = page.get_by_role("link", name="Continue story arc", exact=True)
+    resume.focus()
+    expect(resume).to_be_focused()
+    assert_no_axe_violations(page, name=f"arc-resume-{theme}", include=['a[href*="read=1"]'])
+    resume.press("Enter")
+    expect(context).to_have_text("Reading: Reader crossover · 2 of 3")
+    expect(page.get_by_test_id("comic-reader-page-status")).to_have_text("Page 2 of 3")

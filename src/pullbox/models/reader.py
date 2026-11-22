@@ -10,6 +10,24 @@ from sqlalchemy.orm import Mapped, mapped_column
 from pullbox.models.base import Base, IdentityMixin, TimestampMixin, UTCDateTime
 
 
+class StoryArcReaderBookmark(Base, IdentityMixin, TimestampMixin):
+    """A user's sequence position, never a second copy of comic page progress."""
+
+    __tablename__ = "story_arc_reader_bookmarks"
+    __table_args__ = (
+        UniqueConstraint("user_id", "story_arc_id", name="uq_story_arc_reader_user_arc"),
+    )
+
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    story_arc_id: Mapped[int] = mapped_column(
+        ForeignKey("story_arcs.id", ondelete="CASCADE"), nullable=False
+    )
+    entry_id: Mapped[int | None] = mapped_column(
+        ForeignKey("issue_story_arcs.id", ondelete="SET NULL")
+    )
+    issue_id: Mapped[int | None] = mapped_column(ForeignKey("issues.id", ondelete="SET NULL"))
+
+
 class IssueReaderState(Base, IdentityMixin, TimestampMixin):
     """Private reader state, intentionally separate from acquisition status."""
 

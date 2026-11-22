@@ -948,6 +948,16 @@ not suppress failures in those checks.
 
 ## 6. Migration Standards
 
+Story Arc reader bookmarks are unique per user and arc. A bookmark
+stores the stable membership and the issue the user actually read, not a page
+number or a sequence offset. Progress remains in `issue_reader_states`.
+Deleting either the issue or membership clears that reference; a dangling or
+reassigned bookmark must not reopen a different comic. Deleting the user or
+arc removes the bookmark. Page and manifest GETs never advance it.
+Diagnostic DB copies strip both tables' private reading data. The bookmark
+migration does not infer history from existing page progress and will not
+downgrade a database with saved bookmarks.
+
 ### 6.1 Alembic Rules
 
 **Current Pullbox implementation**

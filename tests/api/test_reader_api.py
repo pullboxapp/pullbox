@@ -445,6 +445,52 @@ async def test_manifest_builds_server_owned_adjacent_issue_links(
 
 
 @pytest.mark.asyncio
+async def test_shared_page_save_advances_only_an_exact_arc_bookmark(
+    authenticated_client: AsyncClient,
+    sec_db: async_sessionmaker[AsyncSession],
+    sec_app: object,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "chapter.cbz"
+    _write_cbz(path, page_count=3)
+    issue_id = await _seed_reader_issue(sec_db, path)
+    sec_app.state.reader_content_service = ReaderContentService(cache_dir=tmp_path / "cache")
+    async with sec_db.begin() as session:
+        arc = StoryArc(name="Crossover")
+        session.add(arc)
+        await session.flush()
+        member = IssueStoryArc(
+            story_arc_id=arc.id,
+            issue_id=issue_id,
+            sequence_number=1,
+            source_ordinal=1,
+            resolution_state=StoryArcResolutionState.RESOLVED,
+        )
+        session.add(member)
+        await session.flush()
+        arc_id, entry_id = arc.id, member.id
+    manifest_url = f"/api/v1/reader/issues/{issue_id}/manifest"
+    manifest = (await authenticated_client.get(manifest_url)).json()
+    payload = {
+        "page_count": 3,
+        "page_index": 0,
+        "revision": manifest["revision"],
+        "story_arc": {"id": arc_id, "entry_id": entry_id},
+    }
+    resp = await authenticated_client.put(
+        manifest["progress_url"], json=payload, headers=_csrf_headers(authenticated_client)
+    )
+    assert resp.status_code == 200
+    assert resp.json().get("arc_bookmark_saved") is True
+    payload.update(page_index=1, story_arc={"id": arc_id, "entry_id": entry_id + 999})
+    stale = await authenticated_client.put(
+        manifest["progress_url"], json=payload, headers=_csrf_headers(authenticated_client)
+    )
+    assert stale.status_code == 200 and stale.json()["arc_bookmark_saved"] is False
+    assert (await authenticated_client.get(manifest_url)).json()["initial_page_index"] == 1
+
+
+@pytest.mark.asyncio
 async def test_arc_manifest_follows_saved_cross_series_order_without_skipping_gaps(
     authenticated_client: AsyncClient,
     sec_db: async_sessionmaker[AsyncSession],

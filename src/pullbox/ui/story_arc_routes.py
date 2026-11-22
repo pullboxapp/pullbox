@@ -32,6 +32,7 @@ from pullbox.models.story_arc import (
     StoryArcLifecycle,
     StoryArcSourceKind,
 )
+from pullbox.services.reader_arc_bookmarks import load_arc_read_action
 from pullbox.services.story_arc_editing_policy import (
     StoryArcManualEditingDisabledError,
     require_manual_arc_edit,
@@ -353,6 +354,11 @@ async def _render_story_arc_detail(
         request,
         _StoryArcTemplateUser(username=username),
         story_arc=detail,
+        arc_read_action=(
+            await load_arc_read_action(session, user_id=user_id, arc_id=story_arc_id)
+            if get_settings().reader_enabled
+            else None
+        ),
         placement_ui=placement_ui,
         placement_policy=placement_policy,
         pagination_base_url=f"/story-arcs/{story_arc_id}?{urlencode({'per_page': per_page})}",

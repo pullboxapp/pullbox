@@ -26,6 +26,9 @@ def _create_snapshot_source(path) -> None:  # type: ignore[no-untyped-def]
                 issue_id INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE
             );
             CREATE TABLE system_config (key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE story_arc_reader_bookmarks (
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, story_arc_id INTEGER
+            );
             CREATE TABLE download_client_configs (
                 id INTEGER PRIMARY KEY,
                 api_key TEXT,
@@ -42,6 +45,7 @@ def _create_snapshot_source(path) -> None:  # type: ignore[no-untyped-def]
         conn.execute("INSERT INTO issues (id) VALUES (10)")
         conn.execute("INSERT INTO audit_logs (user_id, detail) VALUES (1, 'preserve me')")
         conn.execute("INSERT INTO issue_reader_states (user_id, issue_id) VALUES (1, 10)")
+        conn.execute("INSERT INTO story_arc_reader_bookmarks VALUES (1, 20)")
         conn.execute(
             "INSERT INTO system_config (key, value) VALUES (?, ?)",
             ("comicvine_api_key", "cv-secret"),
@@ -81,6 +85,7 @@ def test_create_sanitized_db_copy_removes_auth_rows_and_redacts_secrets(tmp_path
             "preserve me",
         )
         assert conn.execute("SELECT count(*) FROM issue_reader_states").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM story_arc_reader_bookmarks").fetchone()[0] == 0
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         assert (
             conn.execute(

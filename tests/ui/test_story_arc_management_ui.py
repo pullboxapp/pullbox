@@ -16,6 +16,7 @@ from sqlalchemy import event, select
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from pullbox.config import get_settings
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
 from pullbox.models.publisher import Publisher
@@ -59,7 +60,7 @@ def _enable_manual_story_arc_creation(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         story_arc_routes,
         "get_settings",
-        lambda: SimpleNamespace(story_arc_manual_create_enabled=True),
+        lambda: get_settings().model_copy(update={"story_arc_manual_create_enabled": True}),
         raising=False,
     )
 
@@ -1054,7 +1055,7 @@ class TestStoryArcManagementUI:
         monkeypatch.setattr(
             story_arc_routes,
             "get_settings",
-            lambda: SimpleNamespace(story_arc_manual_create_enabled=False),
+            lambda: get_settings().model_copy(update={"story_arc_manual_create_enabled": False}),
             raising=False,
         )
 
