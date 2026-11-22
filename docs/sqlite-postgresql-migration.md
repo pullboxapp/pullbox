@@ -161,8 +161,9 @@ stopped and use the `checkpoint_sha256` you recorded above. Choose a **new**
 file in a trusted local directory you own, outside the source mounts:
 
 ```sh
-python scripts/check_sqlite_source_offline.py --container pullbox \
-  --compare-checkpoint "$OFFLINE_CHECKPOINT" --snapshot /private-backups/pullbox-offline.db
+(umask 077; set -C; python scripts/check_sqlite_source_offline.py --container pullbox \
+  --compare-checkpoint "$OFFLINE_CHECKPOINT" --snapshot /private-backups/pullbox-offline.db \
+  > /private-backups/capture.json)
 ```
 
 The command runs Python from the stopped container's exact local image without
@@ -429,13 +430,16 @@ encryption key, or token from a previous attempt:
 
 ```sh
 (umask 077; set -C; openssl rand -hex 32 > first-start.token)
-python scripts/stage_postgres_transfer.py --backup /backups/offline.db \
-  --create-offline-stage --review-library --first-start-token-file first-start.token
+python scripts/stage_postgres_transfer.py --backup /private-backups/pullbox-offline.db \
+  --create-offline-stage --review-library --first-start-token-file first-start.token \
+  --source-capture-report /private-backups/capture.json
 ```
 
 After you sign in and confirm the library, the report should say
-`first_start_bound: true`. The stage is still closed. Only its fingerprint
-is stored, never the secret. Cancelling review does not bind the target.
+`first_start_bound: true` and `source_capture_bound: true`. The stage is still
+closed. Only fingerprints are stored, never the secret. A capture report for
+different snapshot bytes is rejected before the target is reserved. Cancelling
+review does not bind the target.
 
 In the **proposed PostgreSQL deployment**, mount that token read-only at
 `/run/secrets/pullbox-first-start`, readable by the Pullbox process only
@@ -463,6 +467,35 @@ connections, or start workers. Pullbox refuses ordinary startup and migrations
 on a bound stage, including a clone containing its internal marker. Leave both
 the stage and the SQLite backup intact. Do not remove the marker or manually
 enable connections.
+
+### Recheck the stopped source against the reviewed target
+
+On the Docker host that owns the **still-stopped SQLite container**, use the
+original capture report and token. Choose an existing, trusted scratch directory
+outside the source mounts with enough space for another offline snapshot:
+
+```sh
+python scripts/check_postgres_handoff.py --container pullbox \
+  --capture-report /private-backups/capture.json --token-file first-start.token \
+  --scratch-dir /private-backups
+```
+
+Enter the reviewed PostgreSQL URL at the hidden prompt. The command verifies the
+closed target, repeats the SQLite backup with committed WAL data, compares it
+with the snapshot and source file state bound to the review, checks the Docker
+writer inventory again, and verifies the target a second time. Scratch is removed
+on success or a reported failure. The original snapshot is never replaced.
+
+Exit 0 and `source_and_target_verified: true` mean both sides still matched at
+the time of the check. A host edit can fail this check even if Docker reports
+that the source never restarted. If the source data changed, keep both copies;
+take a new verified snapshot and review a fresh stage. An older token-only
+stage can still pass the deployment check above, but cannot pass this handoff.
+Do not edit the capture report or database label to make them match.
+
+This command does not lock out host processes or change Compose. **Do not
+start either installation based on this report.** The configuration restore,
+file checks and explicit cutover are separate; `cutover_ready` remains false.
 
 ## Check the key and comic files
 

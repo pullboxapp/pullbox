@@ -5,9 +5,11 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,6 +28,55 @@ CAPTURE = {
 }
 DRIFT = {"source_files_changed": "SQLite files changed during capture. Do not use this snapshot."}
 SPACE = {"snapshot_space": "Not enough local scratch space. Use a larger output filesystem."}
+SCRATCH = {
+    "snapshot_scratch": "Choose a trusted, writable scratch directory you own outside "
+    "the source mounts. Do not allow group or other users to write to it."
+}
+
+
+@dataclass(frozen=True)
+class SourceCapture:
+    checkpoint: str
+    snapshot: str
+    files: str
+
+    @property
+    def fingerprint(self):
+        return hashlib.sha256(
+            f"pullbox:source:v1:{self.checkpoint}:{self.files}".encode()
+        ).hexdigest()
+
+    @classmethod
+    def read(cls, path):
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as stream:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise ValueError
+                raw = stream.read(16_385)
+            if len(raw) > 16_384:
+                raise ValueError
+            data = json.loads(raw)
+            if (
+                not isinstance(data, dict)
+                or data.get("blockers") != {}
+                or not all(
+                    data.get(k) is True
+                    for k in ("offline_checks_passed", "checkpoint_matched", "snapshot_verified")
+                )
+            ):
+                raise ValueError
+            values = [
+                data[k]
+                for k in ("checkpoint_sha256", "snapshot_sha256", "source_file_state_sha256")
+            ]
+            if not all(isinstance(v, str) and re.fullmatch("[0-9a-f]{64}", v) for v in values):
+                raise ValueError
+            return cls(*values)
+        except (OSError, KeyError, ValueError, RecursionError) as exc:
+            raise ValueError(
+                "Use the successful JSON report from the original offline snapshot capture."
+            ) from exc
 
 
 def unsafe_output(path):
@@ -117,22 +168,31 @@ def run_worker(context, run, work, mode):
 
 
 def capture_snapshot(context, output, docker, recheck, host_path):
+    return _checked_snapshot(context, output.parent, output.name, docker, recheck, host_path, None)
+
+
+def compare_snapshot(context, scratch, capture, docker, recheck, host_path):
+    """Repeat the WAL-aware capture without publishing or replacing a backup."""
+    return _checked_snapshot(context, scratch, None, docker, recheck, host_path, capture)
+
+
+def _checked_snapshot(context, directory, filename, docker, recheck, host_path, expected):
     failed = {"snapshot_verified": False, "snapshot_sha256": None}
     try:
-        parent = output.parent.resolve(strict=True)
-        output = parent / output.name
+        parent = directory.resolve(strict=True)
+        output = parent / filename if filename is not None else None
         info = parent.stat()
         if (
             not parent.is_dir()
             or info.st_uid != os.geteuid()
             or info.st_mode & 0o022
-            or unsafe_output(output)
+            or (output is not None and unsafe_output(output))
             or any(
                 m.get("Source") and host_path(str(parent)).is_relative_to(host_path(m["Source"]))
                 for m in context.mounts
             )
         ):
-            return failed, DESTINATION
+            return failed, SCRATCH if expected is not None else DESTINATION
         with tempfile.TemporaryDirectory(dir=parent, prefix=".pullbox-snapshot-") as tmp:
             # Only this empty child is mounted. Its host parent stays private (0700);
             # the container's UID may differ from the operator's UID.
@@ -157,6 +217,19 @@ def capture_snapshot(context, output, docker, recheck, host_path):
                 blockers = recheck()
                 if blockers:
                     return failed, blockers
+                if expected is not None:
+                    if digest != expected.snapshot:
+                        return failed, {
+                            "source_snapshot_mismatch": "The stopped source now contains different "
+                            "data. Keep both copies; take a new snapshot and review a fresh stage."
+                        }
+                    if before != expected.files:
+                        return failed, {
+                            "source_files_changed": "The database or its journals changed since "
+                            "capture. Do not reuse the old source evidence."
+                        }
+                    return {"snapshot_verified": True, "snapshot_sha256": digest}, {}
+                assert output is not None
                 if unsafe_output(output):
                     return failed, DESTINATION
                 fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)

@@ -14,6 +14,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 
 import pullbox.app as app
+from pullbox.services.migration_first_start import BindingError, check_binding
 from tests.integration import test_database_migration_target as targets
 from tests.integration import test_postgres_stage_review as review
 from tests.integration import test_postgres_transfer_stage as stages
@@ -112,6 +113,8 @@ async def test_probe_checks_sealed_target_from_intended_configuration(
     assert marker.startswith("false:pullbox:offline-stage:bound-v1:")
     assert secret not in marker + json.dumps(report)
     assert probe(url, token, digest)["first_start_binding_verified"]
+    with pytest.raises(BindingError, match="no source binding"):
+        await check_binding(url, token, digest, source="0" * 64)
     if image := os.environ.get("PULLBOX_TEST_SQLITE_SNAPSHOT_IMAGE"):
         packaged_probe(image, postgres, url, token, digest)
     assert not probe(url, token, "0" * 64)["first_start_binding_verified"]

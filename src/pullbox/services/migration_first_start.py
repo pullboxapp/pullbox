@@ -17,6 +17,7 @@ from pullbox.services.migration_target_preflight import parse_target_url
 
 VERIFIED = "pullbox:offline-stage:rows-verified"
 PREFIX = "pullbox:offline-stage:bound-v1:"
+SOURCE_PREFIX = "pullbox:offline-stage:bound-v2:"
 _HEX = re.compile(r"[a-f0-9]{64}")
 
 
@@ -83,13 +84,15 @@ async def _identity(conn: AsyncConnection, database: str, *, enrolling: bool) ->
     return json.dumps([database, *row[:3]], separators=(",", ":")), row[3] or ""
 
 
-def _label(key: bytes, identity: str, digest: str) -> str:
-    proof = hmac.digest(key, (PREFIX + identity + ":" + digest).encode(), "sha256").hex()
-    return PREFIX + digest + ":" + proof
+def _label(key: bytes, identity: str, digest: str, source: str | None) -> str:
+    prefix = PREFIX if source is None else SOURCE_PREFIX
+    fields = digest if source is None else digest + ":" + source
+    proof = hmac.digest(key, (prefix + identity + ":" + fields).encode(), "sha256").hex()
+    return prefix + fields + ":" + proof
 
 
 async def bind_reviewed_stage(
-    conn: AsyncConnection, database: str, digest: str, key: bytes
+    conn: AsyncConnection, database: str, digest: str, key: bytes, *, source: str | None = None
 ) -> None:
     """Called only after a confirmed review, on its original staging connection."""
     identity, current = await _identity(conn, database, enrolling=True)
@@ -98,10 +101,11 @@ async def bind_reviewed_stage(
         or await conn.scalar(text("SELECT snapshot_sha256 FROM pullbox_stage.verification"))
         != digest
         or not _HEX.fullmatch(digest)
+        or (source is not None and not _HEX.fullmatch(source))
     ):
         raise BindingError("The target no longer matches the reviewed stage.")
     name = conn.dialect.identifier_preparer.quote_identifier(database)
-    label = _label(key, identity, digest)
+    label = _label(key, identity, digest, source)
     # A database clone or dump can lose the shared catalog comment. Keep the fence
     # with the library too, atomically with the public, non-secret attestation.
     await conn.exec_driver_sql(
@@ -119,7 +123,9 @@ async def bind_reviewed_stage(
     await conn.commit()
 
 
-async def check_binding(raw: str, token_file: Path, digest: str) -> None:
+async def check_binding(
+    raw: str, token_file: Path, digest: str, *, source: str | None = None
+) -> None:
     """Use the deployment's configured owner via postgres; never connect to the stage."""
     url = parse_target_url(raw)
     if url is None or not url.database or not _HEX.fullmatch(digest):
@@ -143,11 +149,24 @@ async def check_binding(raw: str, token_file: Path, digest: str) -> None:
         try:
             async with asyncio.timeout(12), engine.connect() as conn:
                 identity, current = await _identity(conn, url.database, enrolling=False)
+                if source is not None and current.startswith(PREFIX):
+                    raise BindingError(
+                        "This stage has no source binding. Keep it closed; review a new stage "
+                        "with the original --source-capture-report."
+                    )
+                # The deployment-only probe can read either format. A host handoff
+                # must match the separately supplied source, never one from this label.
+                if source is None and current.startswith(SOURCE_PREFIX):
+                    fields = current.removeprefix(SOURCE_PREFIX).split(":")
+                    if len(fields) != 3 or not _HEX.fullmatch(fields[1]):
+                        raise BindingError("The source binding is not valid.")
+                    source = fields[1]
                 if not hmac.compare_digest(
-                    current.encode(), _label(key, identity, digest).encode()
+                    current.encode(), _label(key, identity, digest, source).encode()
                 ):
                     raise BindingError(
-                        "The token, snapshot or PostgreSQL instance does not match the review."
+                        "The token, capture, snapshot or PostgreSQL instance does not match "
+                        "the review."
                     )
         finally:
             await engine.dispose()

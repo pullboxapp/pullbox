@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- [Recheck a stopped SQLite library against its reviewed PostgreSQL stage](docs/sqlite-postgresql-migration.md#recheck-the-stopped-source-against-the-reviewed-target).
+  Detect changes committed to the SQLite write-ahead log even when the source
+  container has not restarted, without starting either installation.
+
 - [Check the intended PostgreSQL deployment before startup](docs/sqlite-postgresql-migration.md#check-the-intended-deployment-without-starting-it).
   A private token pairs the proposed deployment with the reviewed, offline database.
   Checking the pair does not start Pullbox or authorize a switch.

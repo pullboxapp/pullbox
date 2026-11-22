@@ -25,6 +25,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from alembic.config import Config  # noqa: E402
 from postgres_rehearsal_rows import STAGE_CLOSED_SQL, RehearsalError, compare_rows  # noqa: E402
+from sqlite_source_snapshot import SourceCapture  # noqa: E402
 
 from alembic import command  # noqa: E402
 from pullbox.config import get_settings  # noqa: E402
@@ -93,9 +94,15 @@ async def _unclaimed(conn, url, report):
     return True
 
 
-async def stage(path, raw, report, *, review=False, token_file=None):
+async def stage(path, raw, report, *, review=False, token_file=None, capture_report=None):
     if token_file is not None and not review:
         raise RehearsalError("binding_requires_review")
+    if capture_report is not None and token_file is None:
+        raise BindingError("Binding a source capture requires a token file and a library review.")
+    try:
+        capture = SourceCapture.read(capture_report) if capture_report is not None else None
+    except ValueError as exc:
+        raise BindingError(str(exc)) from exc
     key = read_token(token_file) if token_file is not None else None
     url = parse_target_url(raw)
     if url is None:
@@ -117,6 +124,8 @@ async def stage(path, raw, report, *, review=False, token_file=None):
                 return
             with snapshot.open("rb") as opened:
                 source_hash = hashlib.file_digest(opened, "sha256").hexdigest()
+            if capture is not None and capture.snapshot != source_hash:
+                raise BindingError("This backup does not match the original source capture report.")
             nonce = "pullbox_stage_" + uuid4().hex
             conn = await _connect(resources, url, nonce)
             if not await _unclaimed(conn, url, report):
@@ -195,8 +204,15 @@ async def stage(path, raw, report, *, review=False, token_file=None):
             await review_library(conn, source_hash, report)
             if key is not None and report["maintenance_review"]["status"] == "confirmed":
                 await conn.exec_driver_sql("SET LOCAL search_path TO pg_catalog")
-                await bind_reviewed_stage(conn, url.database, source_hash, key)
+                await bind_reviewed_stage(
+                    conn,
+                    url.database,
+                    source_hash,
+                    key,
+                    source=capture.fingerprint if capture is not None else None,
+                )
                 report["first_start_bound"] = True
+                report["source_capture_bound"] = capture is not None
 
 
 def main():
@@ -220,6 +236,11 @@ def main():
         "--first-start-token-file",
         type=Path,
         help="Bind a private deployment token after interactive review; the target stays closed.",
+    )
+    parser.add_argument(
+        "--source-capture-report",
+        type=Path,
+        help="Bind the verified offline capture report to this reviewed stage.",
     )
     args = parser.parse_args()
     report = {
@@ -251,6 +272,7 @@ def main():
                 report,
                 review=args.review_library,
                 token_file=args.first_start_token_file,
+                capture_report=args.source_capture_report,
             )
         )
     except BindingError as exc:

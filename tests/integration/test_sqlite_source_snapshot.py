@@ -245,6 +245,19 @@ def test_stop_before_copy_if_scratch_lacks_space(monkeypatch, tmp_path):
     assert exc.value.errno == errno.ENOSPC
 
 
+@pytest.mark.parametrize(
+    "bad", [b"{}", b"[" * 16_384, b"x" * 16_385, b'{"blockers":{"snapshot_capture":"failed"}}']
+)
+def test_handoff_declines_invalid_capture_report_without_echoing_it(bad, tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(ROOT / "scripts"))
+    module = importlib.import_module("sqlite_source_snapshot")
+    path = tmp_path / "capture.json"
+    path.write_bytes(bad)
+    with pytest.raises(ValueError, match="successful JSON report") as exc:
+        module.SourceCapture.read(path)
+    assert bad.decode() not in str(exc.value)
+
+
 @pytest.mark.parametrize("name", ["live.db-wal", "live.db-shm", "live.db-journal"])
 def test_never_publish_into_another_databases_journal_name(name, monkeypatch, tmp_path):
     monkeypatch.syspath_prepend(str(ROOT / "scripts"))
