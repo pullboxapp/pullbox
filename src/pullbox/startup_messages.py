@@ -9,6 +9,7 @@ from urllib.parse import urljoin
 from pullbox.branding import display_version, startup_banner
 from pullbox.config import get_settings
 from pullbox.core.build_metadata import BuildMetadata, get_build_metadata
+from pullbox.core.db_utils import database_backend_label
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,7 +23,7 @@ class StartupSummary:
     base_url: str
     bind_address: str
     port: int
-    db_url: str
+    database: str
     library_root: str
     startup_log: str
 
@@ -50,7 +51,7 @@ def build_startup_summary(*, startup_log: str) -> StartupSummary:
         base_url=settings.base_url,
         bind_address=settings.bind_address,
         port=settings.port,
-        db_url=settings.db_url,
+        database=database_backend_label(settings.db_url),
         library_root=str(settings.library_root),
         startup_log=startup_log,
     )
@@ -71,7 +72,7 @@ def render_bootstrap_summary(summary: StartupSummary) -> str:
             _status_line("bootstrap", "Commit", _coalesce(summary.commit)),
             _status_line("bootstrap", "Base URL", summary.base_url),
             _status_line("bootstrap", "Bind", f"{summary.bind_address}:{summary.port}"),
-            _status_line("bootstrap", "Database", summary.db_url),
+            _status_line("bootstrap", "Database", summary.database),
             _status_line("bootstrap", "Library Root", summary.library_root),
             _status_line("bootstrap", "Logs", summary.startup_log),
         ]

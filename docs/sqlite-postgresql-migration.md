@@ -4,6 +4,20 @@ Start with the read-only source and destination checks below. A disposable
 rehearsal or a retained **offline staging copy** is a separate, explicit action.
 None of these commands switches your running library.
 
+**First-start checks.** In a disposable trial, sign in with a migrated account,
+open a known owned issue and its Story Arc, and check **System > About** for
+the PostgreSQL server version. An old SQLite backup that contains lowercase
+issue classifications cannot transfer those rows unchanged into a readable
+library. Upgrade a separately restored copy: the migration normalizes known
+labels and fixes the default without reimporting or editing comics. It stops
+on unknown labels. On SQLite it rebuilds the issues table, so allow temporary
+space and keep the original backup. If it reports custom issue triggers or
+expression indexes, do not remove them from the live database to force an upgrade.
+
+Bootstrap logs from older versions may contain the database URL. If a log was
+shared with a PostgreSQL password in it, rotate that credential and update the
+deployment secret; an application upgrade does not redact existing log files.
+
 ## Back up and restore a PostgreSQL library
 
 This procedure is for an **already running PostgreSQL library**, not for

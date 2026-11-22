@@ -1,6 +1,7 @@
 """System API routes — backup management, log files, and system operations."""
 
 import os
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -48,6 +49,7 @@ from pullbox.config import get_settings
 from pullbox.core.backup_storage import ZIP_BACKUP_UNAVAILABLE, sqlite_backup_path
 from pullbox.core.build_metadata import get_build_metadata
 from pullbox.core.config_resolver import load_system_config_values
+from pullbox.core.db_utils import database_backend_label
 from pullbox.core.shutdown import shutdown_manager
 from pullbox.core.sqlite_lock import is_sqlite_locked_error
 from pullbox.database import DatabaseMaintenanceBusyError
@@ -530,11 +532,6 @@ async def get_about(
     # Python version
     python_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
 
-    # SQLite version
-    import sqlite3
-
-    sqlite_version = sqlite3.sqlite_version
-
     # SQLAlchemy version
     import sqlalchemy
 
@@ -563,23 +560,26 @@ async def get_about(
     # Uptime
     uptime_seconds = (datetime.now(UTC) - pullbox.STARTED_AT).total_seconds()
 
-    # Database path (strip SQLAlchemy scheme)
-    db_url = settings.db_url
-    db_path = db_url.split(":///", 1)[1] if ":///" in db_url else db_url
-
-    # Database file size
+    db_file = sqlite_backup_path(settings.db_url)
     db_size_bytes = None
-    try:
-        db_file = Path(db_path)
-        if db_file.exists():
+    if db_file is not None:
+        with suppress(OSError):
             db_size_bytes = db_file.stat().st_size
-    except Exception:
-        pass
 
     try:
         app_config = await load_system_config_values(session, ("log_level",))
     except TypeError:
         app_config = {"log_level": DEFAULT_SYSTEM_CONFIG["log_level"][0]}
+
+    database = database_backend_label(settings.db_url)
+    if database == "SQLite":
+        import sqlite3
+
+        database = f"SQLite {sqlite3.sqlite_version}"
+    elif database == "PostgreSQL":
+        version = session.get_bind().dialect.server_version_info
+        if version:
+            database += " " + ".".join(str(part) for part in version)
 
     about: dict[str, object] = {
         "version": pullbox.__version__,
@@ -592,9 +592,9 @@ async def get_about(
         "os": platform.system(),
         "hostname": platform.node() or None,
         "is_docker": is_docker,
-        "database": f"SQLite {sqlite_version}",
+        "database": database,
         "sqlalchemy_version": sqlalchemy_version,
-        "database_path": db_path if settings.debug else Path(db_path).name,
+        "database_path": (str(db_file) if settings.debug else db_file.name) if db_file else None,
         "database_size_bytes": db_size_bytes,
         "database_migration": migration_count,
         "mode": "Debug" if settings.debug else "Production",

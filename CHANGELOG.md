@@ -169,6 +169,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Issue details can now open after migration when an older database stored the
+  issue type as `issue` instead of `ISSUE`. Ownership, issue numbers and Story
+  Arc links are preserved. System > About identifies PostgreSQL and its version,
+  and startup logs identify the database engine without printing its connection string.
+
 - On PostgreSQL, **System > Backup** now explains [native backup and restore](docs/sqlite-postgresql-migration.md#back-up-and-restore-a-postgresql-library).
   Pullbox no longer schedules SQLite ZIP backups, prunes a previous SQLite
   library's restore points, or processes its pending restore marker.

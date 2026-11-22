@@ -40,6 +40,21 @@ def _make_settings(*, debug: bool) -> PullboxSettings:
 class TestAboutHidesPathsInProduction:
     """In production mode, filesystem paths must not be exposed."""
 
+    @pytest.mark.parametrize("debug", [False, True])
+    async def test_postgres_shows_connected_version_and_no_sqlite_path(self, debug):
+        settings = _make_settings(debug=debug).model_copy(
+            update={
+                "db_url": "postgresql+asyncpg://dsn-fixture:dsn-fixture@db/dsn-fixture?passfile=dsn-fixture"
+            }
+        )
+        session = MagicMock()
+        session.get_bind.return_value.dialect.server_version_info = (18, 1)
+        with patch("pullbox.config.get_settings", return_value=settings):
+            data = await get_about(_mock_user(), session)
+        assert data["database"] == "PostgreSQL 18.1"
+        assert data["database_path"] is None and data["database_size_bytes"] is None
+        assert "dsn-fixture" not in str(data)
+
     @pytest.mark.asyncio
     async def test_about_hides_paths_in_production(self) -> None:
         settings = _make_settings(debug=False)

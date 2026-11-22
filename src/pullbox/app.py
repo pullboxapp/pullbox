@@ -36,6 +36,7 @@ from pullbox.core.config_resolver import (
     is_container_runtime,
     load_system_config_values,
 )
+from pullbox.core.db_utils import database_backend_label
 from pullbox.core.events import (
     DownloadCompleted,
     DownloadFailed,
@@ -418,7 +419,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         bind_address=settings.bind_address,
         port=settings.port,
         debug=settings.debug,
-        db_url=settings.db_url,
+        database=database_backend_label(settings.db_url),
         data_dir=str(settings.data_dir),
         library_root=str(settings.library_root),
         logs_dir=str(settings.logs_dir),

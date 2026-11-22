@@ -951,6 +951,14 @@ not suppress failures in those checks.
 For the operator-facing, read-only source check, see
 [Check a SQLite backup before a PostgreSQL migration](../sqlite-postgresql-migration.md).
 
+For a disposable first-start rehearsal, set `PULLBOX_TEST_MIGRATION_TARGET_DOCKER=1`
+and `PULLBOX_TEST_SQLITE_SNAPSHOT_IMAGE` to a local Pullbox runtime image, then run
+`pytest tests/integration/test_postgres_first_start.py`. The test uses the current
+checkout's application and migrations with that image's dependencies. It rechecks
+a stopped test source, signs in for read-only review, and boots an isolated clone
+on PostgreSQL 16 and 18. The app has no published port or live library mount. This qualifies
+application startup and navigation, not activation of a live staging database.
+
 Story Arc reader bookmarks are unique per user and arc. A bookmark
 stores the stable membership and the issue the user actually read, not a page
 number or a sequence offset. Progress remains in `issue_reader_states`.

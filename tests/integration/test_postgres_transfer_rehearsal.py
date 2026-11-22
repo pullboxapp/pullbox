@@ -110,7 +110,7 @@ def test_complete_verified_rehearsal(backup, major):
     if os.environ.get("PULLBOX_TEST_MIGRATION_TARGET_DOCKER") != "1":
         pytest.skip("opt in to disposable PostgreSQL containers")
     if major == 16:
-        # The predecessor is intentionally supported: the new revision changes PostgreSQL only.
+        # An older schema with canonical issue labels still transfers without rewriting rows.
         subprocess.run(
             [
                 sys.executable,

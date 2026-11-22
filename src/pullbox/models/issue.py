@@ -142,7 +142,9 @@ class Issue(Base, IdentityMixin, TimestampMixin):
 
     # Type classification
     issue_type: Mapped[IssueType] = mapped_column(
-        SQLAlchemyEnum(IssueType), default=IssueType.ISSUE
+        SQLAlchemyEnum(IssueType, native_enum=False, length=20),
+        default=IssueType.ISSUE,
+        server_default=IssueType.ISSUE.name,
     )
 
     # Status tracking

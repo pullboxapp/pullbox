@@ -14,16 +14,21 @@ from sqlalchemy import func, select, text
 
 from pullbox import __version__
 from pullbox.models import Base
+from pullbox.models.issue import IssueType
 from pullbox.services.migration_backup_input import BackupInputError, database_snapshot
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-SOURCE_REVISION = "o2c3456789ab"
-# The current revision is PostgreSQL-only. Both SQLite revisions have identical data contracts.
-_SQLITE_SOURCE_REVISIONS = {SOURCE_REVISION, "n1b23456789a"}
-# From an empty SQLite database migrated to SOURCE_REVISION, not from a user's library.
-_LAYOUT_SHA256 = "e7cba84ac733597272281907576d8c689dc1db888b33f15e9c91f0112ebe0d66"
+SOURCE_REVISION = "p3d456789abc"
+# Fingerprints from empty, Alembic-migrated SQLite databases. Older snapshots
+# can transfer without a rewrite if their actual classifications are canonical.
+_PREVIOUS_LAYOUT = "e7cba84ac733597272281907576d8c689dc1db888b33f15e9c91f0112ebe0d66"
+_SQLITE_LAYOUTS = {
+    SOURCE_REVISION: "d0349255ba2d818481963d88ff371487866cd8eda447d4ab4fd776eb45f91721",
+    "o2c3456789ab": _PREVIOUS_LAYOUT,
+    "n1b23456789a": _PREVIOUS_LAYOUT,
+}
 _NEXT = (
     "Source inspection only. Live writer shutdown, storage, secrets, PostgreSQL "
     "target and transfer verification are separate checks. Do not switch databases."
@@ -197,10 +202,21 @@ def inspect_snapshot_connection(db: sqlite3.Connection, report: PreflightReport)
         and re.fullmatch(r"[a-z0-9]{12}", versions[0][0])
     ):
         report.source_revision = versions[0][0]
-    if report.source_revision not in _SQLITE_SOURCE_REVISIONS:
+    if report.source_revision is None or report.source_revision not in _SQLITE_LAYOUTS:
         raise BackupInputError("unsupported_revision")
-    if _layout_digest(db) != _LAYOUT_SHA256:
+    if _layout_digest(db) != _SQLITE_LAYOUTS[report.source_revision]:
         raise BackupInputError("schema_mismatch")
+    names = tuple(kind.name for kind in IssueType)
+    if db.execute(
+        "SELECT 1 FROM issues WHERE issue_type NOT IN ("
+        + ",".join("?" for _ in names)
+        + ") LIMIT 1",
+        names,
+    ).fetchone():
+        report.blockers["issue_classification"] = (
+            "An issue classification is not readable by Pullbox. Upgrade a separately restored "
+            "copy to normalize known classifications, review any unknown values, then check again."
+        )
     report.integrity_ok = db.execute("PRAGMA integrity_check(1)").fetchone() == ("ok",)
     if not report.integrity_ok:
         raise BackupInputError("invalid_database")

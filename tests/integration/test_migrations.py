@@ -1952,7 +1952,8 @@ class TestMigrationChain:
     def test_root_removal_protects_dependencies_without_losing_other_fk_actions(self, alembic_cfg):
         cfg, sync_url = alembic_cfg
         script = ScriptDirectory.from_config(cfg)
-        assert script.get_heads() == ["o2c3456789ab"]
+        assert script.get_heads() == ["p3d456789abc"]
+        assert script.get_revision("p3d456789abc").down_revision == "o2c3456789ab"
         assert script.get_revision("o2c3456789ab").down_revision == "n1b23456789a"
         assert script.get_revision("n1b23456789a").down_revision == "m0a123456789"
         assert script.get_revision("m0a123456789").down_revision == "l9f012345678"
@@ -2553,7 +2554,9 @@ class TestMigrationChain:
         assert "issue_type" in columns
 
     def test_issue_type_default_value(self, alembic_cfg) -> None:
-        """issue_type column defaults to 'issue'."""
+        """SQL inserts default to the label the issue reader can hydrate."""
+        from pullbox.models.issue import IssueType
+
         cfg, sync_url = alembic_cfg
         command.upgrade(cfg, "head")
 
@@ -2580,7 +2583,7 @@ class TestMigrationChain:
                 result = conn.execute(
                     text("SELECT issue_type FROM issues WHERE series_id = :sid"), {"sid": series_id}
                 ).scalar()
-                assert result == "issue"
+                assert result == IssueType.ISSUE.name
                 conn.commit()
         finally:
             engine.dispose()

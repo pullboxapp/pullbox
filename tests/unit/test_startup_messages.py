@@ -27,7 +27,7 @@ def test_render_bootstrap_summary_includes_banner_and_context() -> None:
         base_url="http://localhost:8585",
         bind_address="0.0.0.0",
         port=8585,
-        db_url="sqlite+aiosqlite:////data/pullbox.db",
+        database="SQLite",
         library_root="/comics",
         startup_log="/data/logs/startup.log",
     )
@@ -69,7 +69,7 @@ def test_build_startup_summary_uses_runtime_settings(monkeypatch) -> None:
         base_url="https://pullbox.example.test",
         bind_address="127.0.0.1",
         port=9443,
-        db_url="sqlite+aiosqlite:////data/pullbox.db",
+        database="SQLite",
         library_root="/library",
         startup_log="/data/logs/startup.log",
     )
@@ -85,6 +85,26 @@ def test_render_ready_summary_derives_ping_url() -> None:
     assert "[ready] Open: http://localhost:8585" in rendered
     assert "[ready] Health: http://localhost:8585/ping" in rendered
     assert "[ready] Scheduler: active" in rendered
+
+
+@pytest.mark.parametrize(
+    ("db_url", "label"),
+    [
+        ("postgresql+asyncpg://sensitive:private@host/private?sslkey=private", "PostgreSQL"),
+        ("postgresql+asyncpg:///private?host=private&passfile=private", "PostgreSQL"),
+        ("sqlite+aiosqlite:///private?key=private", "SQLite"),
+        ("not a private database URL", "Unknown"),
+    ],
+)
+def test_bootstrap_exposes_only_database_backend(monkeypatch, db_url, label):
+    from pullbox.config import get_settings
+
+    settings = get_settings().model_copy(update={"db_url": db_url})
+    monkeypatch.setattr(startup_messages, "get_settings", lambda: settings)
+    summary = build_startup_summary(startup_log="/data/logs/startup.log")
+    rendered = render_bootstrap_summary(summary)
+    assert f"[bootstrap] Database: {label}\n" in rendered
+    assert db_url not in repr(summary) and db_url not in rendered
 
 
 def test_render_ready_summary_uses_custom_health_and_inactive_scheduler() -> None:
@@ -114,7 +134,7 @@ def test_main_renders_bootstrap_summary(monkeypatch, capsys) -> None:
         base_url="http://localhost:8585",
         bind_address="0.0.0.0",
         port=8585,
-        db_url="sqlite+aiosqlite:////data/pullbox.db",
+        database="SQLite",
         library_root="/comics",
         startup_log="/data/logs/startup.log",
     )

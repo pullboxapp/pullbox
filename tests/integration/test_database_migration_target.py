@@ -382,7 +382,7 @@ def test_postgres_downgrade_cannot_lose_large_import_byte_count(server):
         sql(db, "SELECT file_size FROM import_files WHERE id=17 AND status='SAFETY_APPROVED'")
         == "4227910479"
     )
-    assert sql(db, "SELECT version_num FROM alembic_version") == "o2c3456789ab"
+    assert sql(db, "SELECT version_num FROM alembic_version") == "p3d456789abc"
     sql(db, "UPDATE import_files SET file_size=2147483647 WHERE id=17")
     _migrate(url, "downgrade", "n1b23456789a")
     _migrate(url, "upgrade", "head")

@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from pullbox.config import get_settings
+from pullbox.core.db_utils import database_backend_label
 
 logger = structlog.get_logger(__name__)
 
@@ -348,7 +349,7 @@ def get_engine() -> AsyncEngine:
         kwargs = _build_engine_kwargs(settings.db_url, echo=echo)
         _engine = create_async_engine(settings.db_url, **kwargs)
         _set_db_permissions(settings.db_url)
-        logger.debug("database_engine_created", db_url=settings.db_url)
+        logger.debug("database_engine_created", database=database_backend_label(settings.db_url))
     return _engine
 
 
