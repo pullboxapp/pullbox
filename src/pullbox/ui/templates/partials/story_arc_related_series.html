@@ -1,0 +1,47 @@
+{% from "partials/story_arc_kept_comics.html" import review_controls %}
+<section x-show="deletePreview.series" x-data="storyArcReviewPage(deleteUrl + '/related-series')"
+         aria-label="Related series impact" class="space-y-2">
+  <button type="button" class="btn-secondary btn-sm" @click="toggleReview()"
+          :aria-expanded="expanded.toString()" aria-controls="arc-related-series">Review related series</button>
+  <div id="arc-related-series" x-show="expanded" class="space-y-2">
+    <p class="text-pb-text-sec">Deleting this arc keeps these series. Removing an entire series would also remove its issue records outside this reading order.</p>
+    <ul class="space-y-3">
+      <template x-for="series in records" :key="series.id">
+        <li class="space-y-1">
+          <strong x-text="series.title"></strong> <span x-show="series.year" x-text="'(' + series.year + ')'"></span>
+          <p><span x-text="series.members + (series.members === 1 ? ' confirmed issue' : ' confirmed issues') + ' in this arc'"></span>;
+            <span x-text="series.outside + ' outside'"></span>.
+            <span x-text="series.files + (series.files === 1 ? ' registered file' : ' registered files') + ' across the series.'"></span>
+          </p>
+          <template x-if="series.outside">
+            <div x-data="storyArcReviewPage(deleteUrl + '/related-series/' + series.id + '/outside-issues')" class="space-y-1">
+              <button type="button" class="btn-secondary btn-sm" @click="toggleReview()"
+                      :aria-expanded="expanded.toString()" :aria-controls="'outside-' + series.id">Review outside issues</button>
+              <div x-show="expanded" :id="'outside-' + series.id">
+                <ul aria-label="Outside issues"><template x-for="issue in records" :key="issue.id">
+                  <li x-text="'#' + issue.number + (issue.title ? ': ' + issue.title : '')"></li>
+                </template></ul>
+                {{ review_controls('outside issues', 'No issues outside this arc.') }}
+              </div>
+            </div>
+          </template>
+          <template x-if="series.other_arcs">
+            <div x-data="storyArcReviewPage(deleteUrl + '/related-series/' + series.id + '/other-arcs')" class="space-y-1">
+              <span x-text="series.other_arcs + (series.other_arcs === 1 ? ' other arc links' : ' other arcs link') + ' to this series.'"></span>
+              <button type="button" class="btn-secondary btn-sm" @click="toggleReview()"
+                      :aria-expanded="expanded.toString()" :aria-controls="'series-peers-' + series.id">Review other reading orders</button>
+              <div x-show="expanded" :id="'series-peers-' + series.id">
+                <ul><template x-for="peer in records" :key="peer.id">
+                  <li><span x-text="peer.name"></span> <span x-show="peer.lifecycle === 'archived'">(Archived)</span>:
+                    <span x-text="peer.linked + (peer.linked === 1 ? ' linked entry' : ' linked entries')"></span></li>
+                </template></ul>
+                {{ review_controls('other reading orders', 'No other reading orders link to this series.') }}
+              </div>
+            </div>
+          </template>
+        </li>
+      </template>
+    </ul>
+    {{ review_controls('related series', 'No confirmed series remain for this arc.') }}
+  </div>
+</section>

@@ -63,6 +63,7 @@ from pullbox.services.story_arc_placement_integration import (
     StoryArcPlacementSyncService,
     validate_story_arc_placement_policy_input,
 )
+from pullbox.services.story_arc_series_review import outside_issues, related_series, series_peers
 from pullbox.services.story_arc_service import (
     StoryArcConflictError,
     StoryArcNotFoundError,
@@ -1366,6 +1367,39 @@ async def story_arc_member_files(
 ) -> Response:
     try:
         page = await member_files(session, story_arc_id, after)
+    except StoryArcNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return JSONResponse(page, headers={"Cache-Control": "no-store"})
+
+
+@router.get("/story-arcs/{story_arc_id}/delete/related-series", include_in_schema=False)
+async def story_arc_related_series(
+    story_arc_id: int,
+    _user: InteractiveOperatorUser,
+    session: DbSession,
+    after: Annotated[int, Query(ge=0, le=9223372036854775807)] = 0,
+) -> Response:
+    try:
+        page = await related_series(session, story_arc_id, after)
+    except StoryArcNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return JSONResponse(page, headers={"Cache-Control": "no-store"})
+
+
+@router.get(
+    "/story-arcs/{story_arc_id}/delete/related-series/{series_id}/{detail}", include_in_schema=False
+)
+async def story_arc_related_series_detail(
+    story_arc_id: int,
+    series_id: int,
+    detail: Literal["outside-issues", "other-arcs"],
+    _user: InteractiveOperatorUser,
+    session: DbSession,
+    after: Annotated[int, Query(ge=0, le=9223372036854775807)] = 0,
+) -> Response:
+    read = outside_issues if detail == "outside-issues" else series_peers
+    try:
+        page = await read(session, story_arc_id, series_id, after)
     except StoryArcNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
     return JSONResponse(page, headers={"Cache-Control": "no-store"})

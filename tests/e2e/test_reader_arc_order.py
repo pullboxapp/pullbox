@@ -562,6 +562,18 @@ def test_review_shared_member_comic_before_removing_it(
         opener = page.get_by_role("button", name="Delete Story Arc", exact=True)
         opener.click()
         dialog = page.get_by_role("dialog", name="Delete Reader crossover?")
+        if not submit:
+            related = dialog.get_by_role("button", name="Review related series")
+            related.click(timeout=2500)
+            series_scope = dialog.get_by_role("region", name="Related series impact")
+            row = series_scope.get_by_role("listitem").filter(
+                has=page.get_by_text("Batman Beyond", exact=True)
+            )
+            expect(row.get_by_text("1 confirmed issue in this arc", exact=True)).to_be_visible()
+            row.get_by_role("button", name="Review other reading orders").click()
+            expect(row.get_by_text("Another reading order", exact=True)).to_be_visible()
+            expect(dialog.get_by_role("button", name="Delete arc only")).to_be_enabled()
+            related.click()
         page.route(
             f"**/story-arcs/{arc_reader}/delete/member-files?*",
             lambda r: r.fulfill(status=503),
@@ -586,6 +598,7 @@ def test_review_shared_member_comic_before_removing_it(
         expect(consent).not_to_be_checked()
         consent.check()
         expect(confirm).to_be_enabled()
+        expect(confirm).to_have_css("opacity", "1")
         assert_no_axe_violations(page, name="arc-delete-library-review", include=["dialog[open]"])
         if submit:
             confirm.click()
@@ -619,6 +632,40 @@ def test_review_shared_member_comic_before_removing_it(
         assert path.read_bytes() == original
     finally:
         _run_async_blocking(cleanup(other_id))
+
+
+@pytest.mark.parametrize("theme", ["light", "dark", "tron"])
+def test_related_series_review_is_read_only(
+    authed_page: Page, seeded_server: str, arc_reader: int, theme: str
+) -> None:
+    page = authed_page
+    page.add_init_script(f"localStorage.setItem('pullbox-theme', '{theme}')")
+    if theme == "dark":
+        page.set_viewport_size({"width": 390, "height": 844})
+    page.goto(f"{seeded_server}/story-arcs/{arc_reader}")
+    opener = page.get_by_role("button", name="Delete Story Arc", exact=True)
+    opener.click()
+    dialog = page.get_by_role("dialog", name="Delete Reader crossover?")
+    review = dialog.get_by_role("region", name="Related series impact")
+    baseline = page.request.get(f"{seeded_server}/story-arcs/{arc_reader}/delete/preview").json()
+    page.route("**/related-series?*", lambda route: route.fulfill(status=503), times=1)
+    review.get_by_role("button", name="Review related series").click()
+    expect(review.get_by_role("alert")).to_have_text("Could not load related series.")
+    review.get_by_role("button", name="Retry").click()
+    row = review.get_by_role("listitem").filter(has=page.get_by_text("Batman Beyond", exact=True))
+    row.get_by_role("button", name="Review outside issues").click()
+    expect(
+        row.get_by_role("list", name="Outside issues").get_by_role("listitem").first
+    ).to_be_visible()
+    expect(review.get_by_role("checkbox")).to_have_count(0)
+    expect(dialog.get_by_role("button", name="Delete arc only")).to_be_enabled()
+    assert_no_axe_violations(page, name=f"arc-series-review-{theme}", include=["dialog[open]"])
+    dialog.press("Escape")
+    expect(opener).to_be_focused()
+    after = page.request.get(f"{seeded_server}/story-arcs/{arc_reader}/delete/preview").json()
+    assert {k: v for k, v in after.items() if k != "token"} == {
+        k: v for k, v in baseline.items() if k != "token"
+    }
 
 
 def test_delete_arc_with_an_explicitly_selected_copy(

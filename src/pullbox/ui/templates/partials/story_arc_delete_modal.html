@@ -21,6 +21,7 @@
             Shared with other arcs: <span x-text="deletePreview.shared_issues"></span>. Their reading orders stay unchanged.
           </p>
           {% include "partials/story_arc_kept_comics.html" %}
+          {% include "partials/story_arc_related_series.html" %}
           <section x-show="deletePreview.placements" class="space-y-2">
             <p>Managed copies or links: <span x-text="deletePreview.managed_placements"></span>.
               References: <span x-text="deletePreview.referenced_placements"></span>.
