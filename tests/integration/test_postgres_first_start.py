@@ -28,11 +28,16 @@ from http.client import HTTPConnection
 from http.cookies import SimpleCookie
 from urllib.parse import urlencode
 cookies = SimpleCookie()
-def request(path, form=None):
+csrf = {}
+def request(path, form=None, *, payload=None):
     conn = HTTPConnection('127.0.0.1', 8585, timeout=8)
     try:
-        conn.request('POST' if form else 'GET', path, urlencode(form) if form else None,
-                     {'Content-Type':'application/x-www-form-urlencoded',
+        data = json.dumps(payload) if payload is not None else urlencode(form) if form else None
+        conn.request('POST' if data is not None else 'GET', path, data,
+                     {'Content-Type':'application/json' if payload is not None
+                                     else 'application/x-www-form-urlencoded',
+                      'Origin':'http://127.0.0.1:8585',
+                      **(csrf if payload is not None else {}),
                       'Cookie': '; '.join(m.OutputString(attrs=[]) for m in cookies.values())})
         response = conn.getresponse()
         for key, value in response.getheaders():

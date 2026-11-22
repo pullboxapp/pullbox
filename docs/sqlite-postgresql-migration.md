@@ -612,6 +612,20 @@ not edit Compose or start a container on your behalf.
    starting the regular service. The token, approval and restored SQLite mount
    can now be removed. Keep the backups themselves.
 
+**Test a disposable migrated library before switching your live one.** Use
+independent copies of your app data and media. Sign in, open a known wanted
+issue, and use **Import File** with a test CBZ. If the incoming folder is
+read-only, use **Copy**: migration preserves your existing transfer setting,
+and **Move** requires permission to remove the source. Check that the issue
+is owned, the imported pages are readable, and the source copy is intact.
+
+In **Import Follow-up**, preview **Recheck deferred files** for a completed
+import. A record proven to match an already registered file should not create
+a second copy. A file without sufficient evidence should remain in Follow-up.
+Afterward, test restoring a new PostgreSQL backup alongside the matching media;
+the restored database should show those decisions. Do not perform test writes
+on an offline stage you plan to use for a real cutover.
+
 **If startup is interrupted:** do not start SQLite based on a lost terminal or
 a failed health check. Check the database status from the maintenance database
 as shown above. A still-bound label means cutover did not commit; an interruption

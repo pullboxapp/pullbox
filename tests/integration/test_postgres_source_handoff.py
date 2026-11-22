@@ -15,6 +15,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.engine import make_url
 
+from tests.integration import postgres_import_workload as workload
 from tests.integration import test_postgres_stage_review as review
 from tests.integration import test_postgres_transfer_stage as stages
 from tests.integration.test_postgres_first_start import _NAVIGATE, docker
@@ -90,13 +91,18 @@ async def test_recheck_original_source_and_reviewed_target(
     (covers / "71").mkdir()
     (covers / "71" / "series.jpg").write_bytes(b"original cover")
     (comics / "one.cbz").write_bytes(b"first")
+    imports = tmp_path / "imports"
+    expected = None
     with closing(sqlite3.connect(source)) as db, db:
+        db.execute("PRAGMA foreign_keys=ON")
         db.execute("INSERT INTO library_roots(id,path,name,enabled) VALUES(77,'/comics','main',1)")
         db.execute(
             "INSERT INTO library_files(id,library_root_id,file_path,file_name,file_size,"
             "file_format,file_modified_at,match_confidence,has_comicinfo) VALUES "
             "(101,77,'/comics/one.cbz','one.cbz',5,'CBZ',CURRENT_TIMESTAMP,'UNMATCHED',0)"
         )
+        if start == "activate":
+            expected = workload.seed(db, comics, imports)
     token = tmp_path / "token"
     key = secrets.token_hex(32)
     xml = server[0] == 18
@@ -154,9 +160,11 @@ async def test_recheck_original_source_and_reviewed_target(
             env={**os.environ, "PULLBOX_SECRET_KEY": "" if xml else key},
             check=True,
         )
-        checkpoint = inspect(name)["checkpoint_sha256"]
+        offline = inspect(name)
+        assert not offline["blockers"], offline["blockers"]
+        checkpoint = offline["checkpoint_sha256"]
         captured = inspect(name, "--compare-checkpoint", checkpoint, "--snapshot", str(snapshot))
-        assert captured["snapshot_verified"]
+        assert captured["snapshot_verified"], captured["blockers"]
         receipt.write_text(json.dumps(captured))
         db, url, sql = stages.target(server)
         receipt.write_text(json.dumps({**captured, "snapshot_sha256": "0" * 64}))
@@ -260,6 +268,11 @@ async def test_recheck_original_source_and_reviewed_target(
                 f"type=bind,src={stages.ROOT / 'alembic'},dst=/app/alembic,readonly",
                 "--mount",
                 f"type=bind,src={copied},dst=/comics",
+                *(
+                    ["--mount", f"type=bind,src={imports},dst=/imports,readonly"]
+                    if expected
+                    else []
+                ),
                 "--mount",
                 f"type=bind,src={token},dst=/run/token,readonly",
                 "--mount",
@@ -352,7 +365,8 @@ async def test_recheck_original_source_and_reviewed_target(
                     "python",
                     "-",
                     str(server[0]),
-                    input=_NAVIGATE.replace("Private title", "first confidential title"),
+                    input=_NAVIGATE.replace("Private title", "first confidential title")
+                    + (workload.OPERATOR_ACTIONS if expected else ""),
                 )
                 if result.returncode:
                     logs = docker("logs", app)
@@ -367,6 +381,8 @@ async def test_recheck_original_source_and_reviewed_target(
                 assert "[ready] Scheduler: active" in started.stdout + started.stderr
                 assert sql(db, "SELECT status FROM issues WHERE id=83") == "OWNED"
                 assert sql(db, "SELECT status FROM import_files WHERE id=2") == "FAILED"
+                if expected:
+                    workload.verify(sql, db, copied, imports, expected)
                 if not shared:
                     assert inspect(name, "--compare-checkpoint", checkpoint)["checkpoint_matched"]
                 assert hashlib.sha256(snapshot.read_bytes()).hexdigest() == captured_source.snapshot
@@ -402,6 +418,8 @@ async def test_recheck_original_source_and_reviewed_target(
                         timeout=60,
                     )
                 stages.targets._migrate(restore_url, "upgrade", "head")
+                if expected:
+                    workload.verify(sql, restored, copied, imports, expected)
                 assert (
                     sql(restored, "SELECT name FROM story_arcs WHERE id=55")
                     == "post-cutover change"
