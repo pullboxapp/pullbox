@@ -13,7 +13,12 @@ from sqlalchemy import delete, select
 from pullbox.database import get_session_factory
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
-from pullbox.models.story_arc import IssueStoryArc, StoryArc, StoryArcResolutionState
+from pullbox.models.story_arc import (
+    IssueStoryArc,
+    StoryArc,
+    StoryArcPlacement,
+    StoryArcResolutionState,
+)
 from tests.e2e.accessibility import assert_no_axe_violations
 from tests.e2e.conftest import _TEST_COVER_PNG, _run_async_blocking
 from tests.e2e.pages.issue_detail import IssueDetailPage
@@ -470,6 +475,55 @@ def test_reader_rechecks_damaged_chapter_before_an_explicit_jump(
     expect(context).to_contain_text("1 of 4")
     expect(issue.reader_status).to_have_text("Page 2 of 3")
     assert not damaged.exists()
+
+
+@pytest.mark.parametrize("theme", ["light", "dark", "tron"])
+def test_review_arc_file_paths_before_deleting_or_cancelling(
+    authed_page: Page, seeded_server: str, arc_reader: int, theme: str
+) -> None:
+    async def seed() -> None:
+        async with get_session_factory().begin() as db:
+            member = await db.scalar(
+                select(IssueStoryArc.id)
+                .where(IssueStoryArc.story_arc_id == arc_reader)
+                .order_by(IssueStoryArc.id)
+                .limit(1)
+            )
+            for n in range(21):
+                db.add(
+                    StoryArcPlacement(
+                        issue_story_arc_id=member, placement_path=f"/arc-review/sample-{n:02d}.cbz"
+                    )
+                )
+
+    _run_async_blocking(seed())
+    page = authed_page
+    page.add_init_script(f"localStorage.setItem('pullbox-theme', '{theme}')")
+    if theme == "dark":
+        page.set_viewport_size({"width": 390, "height": 844})
+    page.goto(f"{seeded_server}/story-arcs/{arc_reader}")
+    opener = page.get_by_role("button", name="Delete Story Arc", exact=True)
+    opener.click()
+    dialog = page.get_by_role("dialog", name="Delete Reader crossover?")
+    dialog.get_by_role("button", name="Review arc files").click(timeout=5000)
+    expect(dialog.get_by_text("/arc-review/sample-00.cbz", exact=True)).to_be_visible()
+    expect(page.locator("html")).to_have_attribute("data-theme", theme)
+    expect(dialog.get_by_role("button", name="Cancel")).to_be_in_viewport(ratio=1)
+    expect(dialog.get_by_role("button", name="Delete arc only")).to_be_in_viewport(ratio=1)
+    assert_no_axe_violations(page, name=f"arc-delete-files-{theme}", include=["dialog[open]"])
+    dialog.get_by_role("button", name="Next", exact=True).click()
+    expect(dialog.get_by_text("/arc-review/sample-20.cbz", exact=True)).to_be_visible()
+    expect(dialog.get_by_text("/arc-review/sample-00.cbz", exact=True)).to_have_count(0)
+    dialog.get_by_role("button", name="Previous", exact=True).click()
+    expect(dialog.get_by_text("/arc-review/sample-00.cbz", exact=True)).to_be_visible()
+    dialog.get_by_role("button", name="Cancel", exact=True).click()
+    expect(opener).to_be_focused()
+    opener.click()
+    expect(dialog.get_by_role("button", name="Review arc files")).to_have_attribute(
+        "aria-expanded", "false"
+    )
+    dialog.press("Escape")
+    expect(opener).to_be_focused()
 
 
 @pytest.mark.parametrize("change", ["arc", "membership"])

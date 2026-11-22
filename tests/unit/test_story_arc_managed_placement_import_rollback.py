@@ -244,6 +244,31 @@ async def test_unpublished_origin_work_is_cancelled_without_touching_canonical(
 
 
 @pytest.mark.asyncio
+async def test_interactive_cleanup_cannot_consume_import_owned_placement(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    context = await _seed_import_placement(db_session, tmp_path)
+    service = StoryArcPlacementSyncService()
+    synced = await service.sync_membership(
+        db_session,
+        context.story_arc_id,
+        context.membership_id,
+        import_provenance=StoryArcPlacementImportProvenance(context.job_id, context.action_id),
+    )
+    assert synced.placement
+    with pytest.raises(StoryArcPlacementIntegrationError) as failure:
+        await service.remove_placement(
+            db_session,
+            context.story_arc_id,
+            synced.placement.id,
+            confirm_managed_artifact_removal=True,
+        )
+    assert failure.value.code == "placement_import_protected"
+    assert Path(synced.placement.placement_path).read_bytes() == context.canonical_path.read_bytes()
+    assert await db_session.get(StoryArcPlacement, synced.placement.id)
+
+
+@pytest.mark.asyncio
 async def test_completed_managed_placement_is_safely_removed_and_rollback_is_idempotent(
     db_session: AsyncSession,
     tmp_path: Path,

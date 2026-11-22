@@ -1,33 +1,74 @@
 function storyArcDetail() {
   return {
     coverModalOpen: false, coverModalUrl: '', reordering: false, reorderError: '',
-    deletePhase: '', deleteError: '',
-    async reviewDelete(arcId, opener) {
-      if (this.deletePhase) return;
-      const url = '/story-arcs/' + Number(arcId) + '/delete';
-      const count = (value, singular, plural) => value + ' ' + (value === 1 ? singular : plural);
+    deletePreview: null, deletePhase: '', deleteError: '', deleteUrl: '', deleteGeneration: 0,
+    showPaths: false, pathItems: [], pathCursors: [0], pathNext: null, pathBusy: false, pathError: '', pathRetry: [0],
+    reviewDelete(arcId) {
+      if (this.$refs.deleteDialog.open) return;
+      this.deleteUrl = '/story-arcs/' + Number(arcId) + '/delete';
+      this.$refs.deleteDialog.showModal();
+      this.$refs.deleteCancel.focus();
+      this.loadDeletePreview();
+    },
+    closeDelete() {
+      if (this.deletePhase === 'deleting') return;
+      ++this.deleteGeneration;
+      this.$refs.deleteDialog.close();
+      this.$refs.deleteOpener?.focus({preventScroll: true});
+    },
+    async loadDeletePreview() {
+      const generation = ++this.deleteGeneration;
+      this.deletePreview = null;
       this.deleteError = '';
-      this.deletePhase = 'Loading preview…';
+      this.deletePhase = 'loading';
+      this.showPaths = false;
+      this.pathBusy = false;
+      this.pathItems = [];
+      this.pathCursors = [0];
+      this.pathNext = null;
+      this.pathError = '';
       try {
-        const preview = await fetch(url + '/preview', {cache: 'no-store'});
-        if (!preview.ok) throw new Error('Could not load this arc. Refresh the page and try again.');
-        const p = await preview.json();
-        if (p.blocker || !p.token) throw new Error(p.blocker || 'Deletion is unavailable.');
-        const keep = [count(p.issues, 'issue', 'issues'), count(p.series, 'series', 'series'), count(p.files, 'library file', 'library files')].join(', ');
-        this.deletePhase = 'Review deletion';
-        const confirmed = await pbConfirm({
-          title: 'Delete ' + p.name + '?',
-          message: 'Permanently remove this arc and ' + count(p.entries, 'reading-order entry', 'reading-order entries') + '. Keep: ' + keep + '. ' +
-            (p.shared_issues ? count(p.shared_issues, 'issue is', 'issues are') + ' also in other arcs; those arcs stay unchanged. ' : '') +
-            (p.placements ? 'Stop synchronizing ' + count(p.placements, 'arc placement', 'arc placements') + '; existing copies and links stay on disk. ' : '') +
-            'No files will be moved or deleted.',
-          confirmText: 'Delete arc only', destructive: true,
-        });
-        if (!confirmed) return;
-        this.deletePhase = 'Deleting arc…';
-        const response = await fetch(url, {
+        const response = await fetch(this.deleteUrl + '/preview', {cache: 'no-store'});
+        if (!response.ok) throw new Error();
+        const preview = await response.json();
+        if (generation === this.deleteGeneration) this.deletePreview = preview;
+      } catch {
+        if (generation === this.deleteGeneration) this.deleteError = 'Could not load the deletion preview.';
+      } finally {
+        if (generation === this.deleteGeneration) this.deletePhase = '';
+      }
+    },
+    async togglePaths() {
+      this.showPaths = !this.showPaths;
+      if (this.showPaths && !this.pathItems.length && !this.pathBusy) await this.loadPaths([0]);
+    },
+    async loadPaths(cursors) {
+      if (this.pathBusy) return;
+      const generation = this.deleteGeneration;
+      this.pathBusy = true;
+      this.pathRetry = cursors;
+      this.pathError = '';
+      try {
+        const response = await fetch(this.deleteUrl + '/placements?after=' + cursors.at(-1), {cache: 'no-store'});
+        if (!response.ok) throw new Error();
+        const data = await response.json();
+        if (generation !== this.deleteGeneration) return;
+        this.pathItems = data.items;
+        this.pathNext = data.next_after;
+        this.pathCursors = cursors;
+      } catch {
+        if (generation === this.deleteGeneration) this.pathError = 'Could not load the arc files.';
+      } finally {
+        if (generation === this.deleteGeneration) this.pathBusy = false;
+      }
+    },
+    async confirmDelete() {
+      if (this.deletePhase || !this.deletePreview?.token || this.deleteError) return;
+      this.deletePhase = 'deleting';
+      try {
+        const response = await fetch(this.deleteUrl, {
           method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': readCsrfTokenFromBody()},
-          body: JSON.stringify({token: p.token}),
+          body: JSON.stringify({token: this.deletePreview.token}),
         });
         const result = await response.json();
         if (!response.ok || result.deleted !== true) {
@@ -40,7 +81,6 @@ function storyArcDetail() {
           : error.message;
       } finally {
         this.deletePhase = '';
-        this.$nextTick(() => opener.focus({preventScroll: true}));
       }
     },
     beginReorder(event) {

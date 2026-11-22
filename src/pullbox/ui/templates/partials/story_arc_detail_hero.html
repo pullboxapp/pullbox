@@ -143,10 +143,8 @@
         {% else %}
           <button type="button" data-testid="story-arc-action-archive" class="btn-ghost" disabled>Story Arc archived</button>
         {% endif %}
-        <button type="button" class="btn-danger" :disabled="!!deletePhase"
-                @click="reviewDelete({{ story_arc.id }}, $el)"
-                x-text="deletePhase || 'Delete Story Arc'">Delete Story Arc</button>
-        <p x-show="deleteError" x-cloak role="alert" class="text-sm text-pb-error" x-text="deleteError"></p>
+        <button type="button" class="btn-danger" x-ref="deleteOpener"
+                @click="reviewDelete({{ story_arc.id }})">Delete Story Arc</button>
       </div>
     </aside>
   </div>

@@ -1,0 +1,60 @@
+<dialog x-ref="deleteDialog" aria-labelledby="arc-delete-title" class="m-auto bg-transparent p-0 text-pb-text"
+        @cancel.prevent="closeDelete()" @click.self="closeDelete()">
+  <div class="modal-panel library-browser-modal library-browser-modal--compact">
+    <header class="modal-header">
+      <h2 id="arc-delete-title" class="library-browser-modal__title"
+          x-text="deletePreview ? 'Delete ' + deletePreview.name + '?' : 'Delete Story Arc?'">Delete Story Arc?</h2>
+    </header>
+    <div class="modal-body library-browser-modal__body space-y-3 p-5 text-sm">
+      <p x-show="deletePhase === 'loading'" role="status">Loading preview...</p>
+      <template x-if="deletePreview">
+        <div class="space-y-3">
+          <p>Permanently remove this arc and
+            <span x-text="deletePreview.entries + (deletePreview.entries === 1 ? ' reading-order entry' : ' reading-order entries')"></span>.
+            No files will be moved or deleted.</p>
+          <p class="text-pb-text-sec">Kept in your library:
+            <span x-text="deletePreview.issues + (deletePreview.issues === 1 ? ' issue' : ' issues')"></span>,
+            <span x-text="deletePreview.series + ' series'"></span>,
+            <span x-text="deletePreview.files + (deletePreview.files === 1 ? ' library file' : ' library files')"></span>.
+          </p>
+          <p x-show="deletePreview.shared_issues" class="text-pb-text-sec">
+            Shared with other arcs: <span x-text="deletePreview.shared_issues"></span>. Their reading orders stay unchanged.
+          </p>
+          <section x-show="deletePreview.placements" class="space-y-2">
+            <p>Managed copies or links: <span x-text="deletePreview.managed_placements"></span>.
+              References: <span x-text="deletePreview.referenced_placements"></span>.
+              Existing files stay in place without further arc synchronization.</p>
+            <button type="button" class="btn-secondary btn-sm" @click="togglePaths()"
+                    :aria-expanded="showPaths.toString()" aria-controls="arc-delete-paths">Review arc files</button>
+            <div id="arc-delete-paths" x-show="showPaths" class="space-y-2">
+              <p class="text-xs text-pb-text-sec">Recorded paths, not a scan of your disk.</p>
+              <ul class="space-y-2">
+                <template x-for="item in pathItems" :key="item.id">
+                  <li><span class="block break-all font-mono text-xs" x-text="item.path"></span>
+                    <span class="text-xs text-pb-text-sec"
+                          x-text="item.registered ? 'Registered library file' : item.ownership === 'referenced' ? 'Referenced file' : 'Managed ' + item.mode"></span></li>
+                </template>
+              </ul>
+              <p role="status" x-show="pathBusy">Loading arc files...</p>
+              <p role="alert" x-show="pathError" x-text="pathError"></p>
+              <button type="button" class="btn-secondary btn-sm" x-show="pathError" @click="loadPaths(pathRetry)">Retry file list</button>
+              <nav aria-label="Arc file pages" class="flex items-center gap-2" x-show="pathNext || pathCursors.length > 1">
+                <button type="button" class="btn-secondary btn-sm" :disabled="pathBusy || pathCursors.length === 1" @click="loadPaths(pathCursors.slice(0, -1))">Previous</button>
+                <span x-text="'Page ' + pathCursors.length"></span>
+                <button type="button" class="btn-secondary btn-sm" :disabled="pathBusy || !pathNext" @click="loadPaths([...pathCursors, pathNext])">Next</button>
+              </nav>
+            </div>
+          </section>
+          <p x-show="deletePreview.blocker" class="text-pb-warning" role="status" x-text="deletePreview.blocker"></p>
+        </div>
+      </template>
+      <p x-show="deleteError" role="alert" class="text-pb-error" x-text="deleteError"></p>
+      <button type="button" class="btn-secondary btn-sm" x-show="deleteError" @click="loadDeletePreview()">Refresh preview</button>
+    </div>
+    <footer class="modal-footer">
+      <button x-ref="deleteCancel" type="button" class="btn-secondary" :disabled="deletePhase === 'deleting'" @click="closeDelete()">Cancel</button>
+      <button type="button" class="btn-danger" :disabled="!!deletePhase || !!deleteError || !deletePreview?.token" @click="confirmDelete()"
+              x-text="deletePhase === 'deleting' ? 'Deleting...' : 'Delete arc only'">Delete arc only</button>
+    </footer>
+  </div>
+</dialog>

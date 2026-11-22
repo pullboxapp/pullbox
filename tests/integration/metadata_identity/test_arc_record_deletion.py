@@ -1,18 +1,112 @@
 """Record-only Story Arc deletion must preserve import evidence on both databases."""
 
 import asyncio
+from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from sqlalchemy import func, select
 
 from pullbox.models.audit_log import AuditEventType, AuditLog
 from pullbox.models.import_job import ImportJob, ImportJobStatus, ImportSourceType
-from pullbox.models.story_arc import IssueStoryArc, StoryArc, StoryArcSourceKind
+from pullbox.models.issue import Issue
+from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot
+from pullbox.models.series import Series
+from pullbox.models.story_arc import (
+    IssueStoryArc,
+    StoryArc,
+    StoryArcResolutionState,
+    StoryArcSourceKind,
+)
 from pullbox.models.story_arc_import import ImportedStoryArc
 from pullbox.models.user import User
-from pullbox.services.story_arc_deletion import delete_reviewed_arc, preview_arc_deletion
+from pullbox.services.story_arc_deletion import (
+    delete_reviewed_arc,
+    preview_arc_deletion,
+    review_arc_placement_paths,
+)
+from pullbox.services.story_arc_placement_integration import (
+    StoryArcPlacementPolicyInput,
+    StoryArcPlacementSyncService,
+)
 from pullbox.services.story_arc_service import StoryArcConflictError, StoryArcNotFoundError
 from tests.fixtures.metadata_identity_persistence import IdentityProbeDatabase
+
+
+@pytest.mark.parametrize("mode", ["copy", "hardlink", "symlink"])
+async def test_removing_a_reviewed_arc_representation_preserves_canonical_entry(
+    identity_probe_db: IdentityProbeDatabase, tmp_path: Path, mode: str
+) -> None:
+    _, factory, _ = identity_probe_db
+    canonical = tmp_path / "Comic.cbz"
+    canonical.write_bytes(b"only canonical comic")
+    canonical_inode = canonical.stat().st_ino
+    dest = tmp_path / "Arcs"
+    dest.mkdir()
+    async with factory.begin() as db:
+        root = LibraryRoot(name="Library", path=str(tmp_path), enabled=True)
+        series = Series(title="Comic", sort_title="comic", library_root=root)
+        issue = Issue(series=series, issue_number=1)
+        original = LibraryFile(
+            library_root=root,
+            issue=issue,
+            file_path=str(canonical),
+            file_name=canonical.name,
+            file_size=canonical.stat().st_size,
+            file_format=FileFormat.CBZ,
+            file_modified_at=datetime.now(UTC),
+        )
+        arc = StoryArc(name="Crossover")
+        member = IssueStoryArc(
+            story_arc=arc,
+            issue=issue,
+            source_ordinal=1,
+            sequence_number=1,
+            resolution_state=StoryArcResolutionState.RESOLVED,
+        )
+        db.add_all([original, member])
+        await db.flush()
+        arc_id, mid, root_id, revision, fid = arc.id, member.id, root.id, arc.revision, original.id
+    svc = StoryArcPlacementSyncService()
+    async with factory() as db:
+        await svc.update_policy(
+            db,
+            arc_id,
+            expected_revision=revision,
+            proposal=StoryArcPlacementPolicyInput(
+                mode=mode,
+                target_library_root_id=root_id,
+                destination_root=str(dest),
+                symlink_style="relative" if mode == "symlink" else None,
+            ),
+        )
+        result = await svc.sync_membership(db, arc_id, mid)
+        assert result.placement
+        path = Path(result.placement.placement_path)
+        assert path.read_bytes() == canonical.read_bytes()
+        assert path.is_symlink() == (mode == "symlink")
+        assert (path.stat().st_ino == canonical_inode) == (mode != "copy")
+        review = await review_arc_placement_paths(db, arc_id, 0)
+        assert review["items"] == [
+            dict(
+                id=result.placement.id,
+                path=str(path),
+                mode=mode,
+                ownership="managed",
+                registered=False,
+            )
+        ]
+        removed = await svc.remove_placement(
+            db, arc_id, result.placement.id, confirm_managed_artifact_removal=True
+        )
+        assert removed.artifact_removed and removed.canonical_preserved
+        assert not path.exists() and not path.is_symlink()
+        assert await db.get(LibraryFile, fid)
+        assert (await review_arc_placement_paths(db, arc_id, 0))["items"] == []
+    assert (
+        canonical.read_bytes() == b"only canonical comic"
+        and canonical.stat().st_ino == canonical_inode
+    )
 
 
 async def test_delete_confirmation_is_single_use_and_preserves_import_evidence(

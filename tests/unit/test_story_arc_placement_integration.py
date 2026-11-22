@@ -16,7 +16,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from pullbox.models.config import SystemConfig
 from pullbox.models.issue import Issue
-from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
+from pullbox.models.library import (
+    FileFormat,
+    LibraryFile,
+    LibraryFileStorageMode,
+    LibraryRoot,
+    MatchConfidence,
+)
 from pullbox.models.publisher import Publisher
 from pullbox.models.series import Series
 from pullbox.models.story_arc import (
@@ -1119,6 +1125,74 @@ async def test_managed_placement_can_be_removed_without_touching_canonical_file(
         membership = await session.get(IssueStoryArc, membership_id)
         assert membership is not None
         assert membership.sync_eligible is True
+
+
+@pytest.mark.parametrize(
+    ("change", "expected_code"),
+    [
+        ("disabled", "target_library_root_unavailable"),
+        ("read_only", "target_library_root_unavailable"),
+        ("rebound", "destination_root_outside_library_root"),
+        ("canonical", "placement_registered_as_library_file"),
+        ("referenced", "placement_registered_as_library_file"),
+    ],
+)
+async def test_managed_cleanup_requires_current_root_and_exclusive_path_ownership(
+    db_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    change: str,
+    expected_code: str,
+) -> None:
+    arc_id, member_id, root_id, canonical, destination = await _seed_membership(
+        db_factory, tmp_path
+    )
+    service = StoryArcPlacementSyncService()
+    async with db_factory() as session:
+        await service.update_policy(
+            session, arc_id, expected_revision=1, proposal=_copy_policy(root_id, destination)
+        )
+        result = await service.sync_membership(session, arc_id, member_id)
+        assert result.placement is not None
+        pid = result.placement.id
+        path = Path(result.placement.placement_path)
+        inode = path.stat().st_ino
+    async with db_factory.begin() as session:
+        root = await session.get(LibraryRoot, root_id)
+        assert root is not None
+        if change == "disabled":
+            root.enabled = False
+        elif change == "read_only":
+            root.allow_managed_writes = False
+        elif change == "rebound":
+            replacement = tmp_path / "other-library"
+            replacement.mkdir()
+            root.path = str(replacement)
+        else:
+            session.add(
+                LibraryFile(
+                    library_root=root,
+                    file_path=str(path),
+                    file_name=path.name,
+                    file_size=path.stat().st_size,
+                    file_modified_at=datetime.now(UTC),
+                    file_format=FileFormat.CBZ,
+                    storage_mode=LibraryFileStorageMode.REFERENCED
+                    if change == "referenced"
+                    else LibraryFileStorageMode.MANAGED,
+                )
+            )
+    async with db_factory() as session:
+        with pytest.raises(StoryArcPlacementIntegrationError) as failure:
+            await service.remove_placement(
+                session, arc_id, pid, confirm_managed_artifact_removal=True
+            )
+        assert failure.value.code == expected_code
+    assert path.read_bytes() == canonical.read_bytes() == b"canonical archive"
+    assert path.stat().st_ino == inode
+    async with db_factory() as session:
+        tracked = await session.get(StoryArcPlacement, pid)
+        assert tracked and tracked.operation_token is None
+        assert tracked.last_result["target_fingerprint"]
 
 
 @pytest.mark.parametrize(

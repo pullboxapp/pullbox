@@ -35,7 +35,11 @@ from pullbox.models.story_arc import (
     StoryArcSourceKind,
 )
 from pullbox.services.reader_arc_bookmarks import load_arc_read_action
-from pullbox.services.story_arc_deletion import delete_reviewed_arc, preview_arc_deletion
+from pullbox.services.story_arc_deletion import (
+    delete_reviewed_arc,
+    preview_arc_deletion,
+    review_arc_placement_paths,
+)
 from pullbox.services.story_arc_editing_policy import (
     StoryArcManualEditingDisabledError,
     require_manual_arc_edit,
@@ -149,6 +153,14 @@ _ERROR_MESSAGES = {
     "not-found": "That story arc entry is no longer available.",
     "validation": "That change could not be saved. Review the fields and try again.",
     "placement": "Placement failed. Review the policy and placement state.",
+    "placement-protect-library": "This arc path is also a registered library file. It was kept.",
+    "placement-protect-import": (
+        "Import rollback still tracks this placement. Its file and history were kept."
+    ),
+    "placement-protect-root": (
+        "The placement is no longer in an approved writable arc location. "
+        "Check its library root and Story Arc Files settings before retrying. No file was removed."
+    ),
     "reorder": "That reorder could not be completed. Review the placement state and try again.",
     "reorder-recovery": (
         "This reorder has unfinished managed-file work. Use the same preview below to retry "
@@ -853,9 +865,17 @@ async def story_arc_placement_remove(
             placement_id,
             confirm_managed_artifact_removal=confirm_managed_artifact_removal,
         )
-    except StoryArcPlacementIntegrationError:
+    except StoryArcPlacementIntegrationError as exc:
         await session.rollback()
-        return _redirect(request, _detail_url(story_arc_id, error="placement"))
+        error = {
+            "placement_registered_as_library_file": "placement-protect-library",
+            "placement_import_protected": "placement-protect-import",
+            "placement_root_changed": "placement-protect-root",
+            "target_library_root_unavailable": "placement-protect-root",
+            "destination_root_unavailable": "placement-protect-root",
+            "destination_root_outside_library_root": "placement-protect-root",
+        }.get(exc.code, "placement")
+        return _redirect(request, _detail_url(story_arc_id, error=error))
     notice = (
         "placement-reference-forgotten"
         if removed.referenced_artifact_preserved
@@ -1227,6 +1247,20 @@ async def story_arc_delete_preview(
     except StoryArcNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
     return JSONResponse(preview, headers={"Cache-Control": "no-store"})
+
+
+@router.get("/story-arcs/{story_arc_id}/delete/placements", include_in_schema=False)
+async def story_arc_delete_placements(
+    story_arc_id: int,
+    _user: InteractiveOperatorUser,
+    session: DbSession,
+    after: Annotated[int, Query(ge=0, le=9223372036854775807)] = 0,
+) -> Response:
+    try:
+        page = await review_arc_placement_paths(session, story_arc_id, after)
+    except StoryArcNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return JSONResponse(page, headers={"Cache-Control": "no-store"})
 
 
 @router.post("/story-arcs/{story_arc_id}/delete", include_in_schema=False)

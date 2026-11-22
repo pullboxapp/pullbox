@@ -645,9 +645,18 @@ class StoryArcPlacementSyncService:
         *,
         confirm_managed_artifact_removal: bool = False,
         abandoned_published_operation_token: str | None = None,
+        rollback_action_id: int | None = None,
     ) -> StoryArcPlacementRemovalView:
         """Remove only owned placement evidence, never a canonical or referenced file."""
         placement = await _require_placement(session, story_arc_id, placement_id)
+        if placement.creating_action_id != rollback_action_id or (
+            placement.source_import_job_id is not None and rollback_action_id is None
+        ):
+            raise StoryArcPlacementIntegrationError(
+                "placement_import_protected",
+                "This placement is tracked by import rollback. Its file and history were kept.",
+                category="ownership",
+            )
         ownership = placement.ownership
         membership_id = placement.issue_story_arc_id
         if ownership is StoryArcPlacementOwnership.REFERENCED:
@@ -763,6 +772,30 @@ class StoryArcPlacementSyncService:
                 "Managed placement has no valid destination policy for safe removal",
                 category="safety",
             )
+        if placement.library_root_id != policy.target_library_root_id:
+            raise StoryArcPlacementIntegrationError(
+                "placement_root_changed",
+                "This arc file no longer belongs to the configured root. Nothing was removed.",
+                category="ownership",
+            )
+        _, configured_root = await _validate_placement_destination(
+            session,
+            policy.mode,
+            policy.target_library_root_id,
+            policy.destination_root,
+            # Older Mylar imports could publish to a separate arc mount. Only
+            # the verified creating action can reclaim its own original artifact.
+            historical_rollback=rollback_action_id is not None,
+        )
+        # Compare the directory entry, not the inode or a resolved link target:
+        # a separate arc hardlink/symlink to a library comic is eligible.
+        registered = select(LibraryFile.id).where(LibraryFile.file_path == placement.placement_path)
+        if await session.scalar(registered.limit(1)) is not None:
+            raise StoryArcPlacementIntegrationError(
+                "placement_registered_as_library_file",
+                "This arc path is also registered as a library file. It was left in place.",
+                category="ownership",
+            )
         canonical_path_raw = (
             await session.scalar(
                 select(LibraryFile.file_path).where(LibraryFile.id == placement.library_file_id)
@@ -799,6 +832,18 @@ class StoryArcPlacementSyncService:
             .where(
                 StoryArcPlacement.id == placement_id,
                 StoryArcPlacement.ownership == StoryArcPlacementOwnership.MANAGED,
+                StoryArcPlacement.library_root_id == policy.target_library_root_id,
+                StoryArcPlacement.creating_action_id == rollback_action_id,
+                StoryArcPlacement.placement_path == str(evidence.placement_path),
+                ~registered.exists(),
+                select(LibraryRoot.id)
+                .where(
+                    LibraryRoot.id == policy.target_library_root_id,
+                    LibraryRoot.enabled.is_(True),
+                    LibraryRoot.allow_managed_writes.is_(True),
+                    LibraryRoot.path == configured_root,
+                )
+                .exists(),
                 managed_token_filter,
             )
             .values(
@@ -1443,12 +1488,36 @@ async def validate_story_arc_placement_policy_input(
         )
 
     root_id = proposal.target_library_root_id
+    resolved_destination, _ = await _validate_placement_destination(
+        session, mode, root_id, proposal.destination_root
+    )
+    return StoryArcPlacementPolicy(
+        configured=True,
+        revision=revision,
+        mode=mode,
+        target_library_root_id=root_id,
+        destination_root=str(resolved_destination),
+        folder_template=proposal.folder_template,
+        file_template=proposal.file_template,
+        symlink_style=symlink_style,
+        synchronize=proposal.synchronize,
+    )
+
+
+async def _validate_placement_destination(
+    session: AsyncSession,
+    mode: StoryArcPlacementPolicyMode,
+    root_id: int | None,
+    raw_destination: str | None,
+    *,
+    historical_rollback: bool = False,
+) -> tuple[Path, str]:
     if isinstance(root_id, bool) or not isinstance(root_id, int) or root_id < 1:
         raise StoryArcPlacementIntegrationError(
             "target_library_root_required",
             "Placement policy requires a selected library root",
         )
-    library_root = await session.get(LibraryRoot, root_id)
+    library_root = await session.get(LibraryRoot, root_id, populate_existing=True)
     if library_root is None:
         raise StoryArcPlacementIntegrationError(
             "target_library_root_unavailable",
@@ -1466,7 +1535,6 @@ async def validate_story_arc_placement_policy_input(
             "Selected story-arc library root is unavailable",
             category="safety",
         ) from exc
-    raw_destination = proposal.destination_root
     if raw_destination is None or not raw_destination.strip():
         raise StoryArcPlacementIntegrationError(
             "destination_root_required",
@@ -1513,7 +1581,7 @@ async def validate_story_arc_placement_policy_input(
             "Selected story-arc library root is unavailable",
             category="safety",
         )
-    if not resolved_destination.is_relative_to(resolved_library_root):
+    if not historical_rollback and not resolved_destination.is_relative_to(resolved_library_root):
         raise StoryArcPlacementIntegrationError(
             "destination_root_outside_library_root",
             "Story-arc destination root must be within the selected library root",
@@ -1530,17 +1598,7 @@ async def validate_story_arc_placement_policy_input(
             "Check this folder's permissions for the container user, then recheck and retry.",
             category="safety",
         )
-    return StoryArcPlacementPolicy(
-        configured=True,
-        revision=revision,
-        mode=mode,
-        target_library_root_id=root_id,
-        destination_root=str(resolved_destination),
-        folder_template=proposal.folder_template,
-        file_template=proposal.file_template,
-        symlink_style=symlink_style,
-        synchronize=proposal.synchronize,
-    )
+    return resolved_destination, library_root.path
 
 
 def _is_positive_int(value: object) -> bool:

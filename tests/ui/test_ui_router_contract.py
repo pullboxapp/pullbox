@@ -629,6 +629,12 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
             "story_arc_delete_preview",
             "story_arc_delete_preview",
         ),
+        (
+            "/story-arcs/{story_arc_id}/delete/placements",
+            ("GET",),
+            "story_arc_delete_placements",
+            "story_arc_delete_placements",
+        ),
         ("/story-arcs/{story_arc_id}/delete", ("POST",), "story_arc_delete", "story_arc_delete"),
         ("/htmx/series/search", ("GET",), "htmx_search_series", "htmx_search_series"),
         ("/issues/{issue_id}", ("GET",), "issue_detail", "issue_detail"),

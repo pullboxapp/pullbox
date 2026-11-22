@@ -855,6 +855,60 @@ async def test_delete_only_review_preserves_shared_issue_and_both_files(
     assert copy.read_bytes() == canonical.read_bytes() == b"canonical story arc issue"
 
 
+async def test_delete_preview_pages_only_this_arcs_paths_and_marks_library_registrations(
+    authenticated_client: AsyncClient, sec_db: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    ids = await _seed_placement_arc(sec_db, tmp_path)
+    directory = Path(str(ids["destination"]))
+    async with sec_db.begin() as session:
+        other = StoryArc(name="Other arc")
+        member = IssueStoryArc(story_arc=other, sequence_number=1, source_ordinal=1)
+        session.add(member)
+        await session.flush()
+        for n in range(23):
+            path = directory / f"{n:02d}.cbz"
+            session.add(
+                StoryArcPlacement(
+                    issue_story_arc_id=member.id if n == 21 else ids["membership"],
+                    library_root_id=ids["root"],
+                    placement_path=str(path),
+                    mode=StoryArcPlacementMode.COPY
+                    if n == 0
+                    else StoryArcPlacementMode.REFERENCE_ONLY,
+                    ownership=StoryArcPlacementOwnership.MANAGED
+                    if n == 0
+                    else StoryArcPlacementOwnership.REFERENCED,
+                )
+            )
+        session.add(
+            LibraryFile(
+                library_root_id=ids["root"],
+                file_path=str(directory / "00.cbz"),
+                file_name="00.cbz",
+                file_size=1,
+                file_modified_at=datetime.now(UTC),
+                file_format=FileFormat.CBZ,
+            )
+        )
+    url = f"/story-arcs/{ids['arc']}/delete"
+    a = await authenticated_client.get(url + "/placements")
+    assert a.status_code == 200 and "no-store" in a.headers["cache-control"].split(", ")
+    first = a.json()
+    assert len(first["items"]) == 20 and first["next_after"] == first["items"][-1]["id"]
+    assert first["items"][0]["registered"] is True and first["items"][0]["mode"] == "copy"
+    assert (
+        first["items"][1]["registered"] is False and first["items"][1]["ownership"] == "referenced"
+    )
+    second = (
+        await authenticated_client.get(url + f"/placements?after={first['next_after']}")
+    ).json()
+    assert [Path(p["path"]).name for p in second["items"]] == ["20.cbz", "22.cbz"]
+    assert second["next_after"] is None
+    preview = (await authenticated_client.get(url + "/preview")).json()
+    assert (preview["managed_placements"], preview["referenced_placements"]) == (1, 21)
+    assert not list(directory.iterdir())
+
+
 async def test_delete_only_waits_for_arc_work_even_after_review(
     authenticated_client: AsyncClient,
     sec_db: async_sessionmaker[AsyncSession],

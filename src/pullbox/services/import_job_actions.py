@@ -2147,6 +2147,7 @@ async def _rollback_import_managed_story_arc_placement(
             placement_ownership is StoryArcPlacementOwnership.MANAGED
         ),
         abandoned_published_operation_token=abandoned_published_operation_token,
+        rollback_action_id=action_id,
     )
     session.expire_all()
     current_work = await session.get(StoryArcSyncWork, int(parsed["sync_work_id"]))

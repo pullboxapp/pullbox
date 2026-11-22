@@ -19,6 +19,7 @@ from pullbox.models.story_arc import (
     IssueStoryArc,
     StoryArc,
     StoryArcPlacement,
+    StoryArcPlacementOwnership,
     StoryArcResolutionState,
 )
 from pullbox.models.story_arc_import import ImportedStoryArc
@@ -38,6 +39,8 @@ class ArcDeleteReview:
     files: int
     shared_issues: int
     placements: int
+    managed_placements: int
+    referenced_placements: int
     blocker: str | None
 
 
@@ -137,11 +140,14 @@ async def _snapshot(
         blocker = "Arc file work is unfinished. Finish or recover it, then review deletion again."
     elif sqlite and not await db.scalar(text("PRAGMA foreign_keys")):
         blocker = "SQLite foreign key enforcement is off. Restore it before deleting an arc."
+    managed_count = sum(p.ownership == StoryArcPlacementOwnership.MANAGED for p in placements)
     review = ArcDeleteReview(
         arc.name,
         len(members),
         *await _retained_library_counts(db, arc_id),
         len(placements),
+        managed_count,
+        len(placements) - managed_count,
         blocker,
     )
     binding = [
@@ -181,6 +187,42 @@ async def _retained_library_counts(db: AsyncSession, arc_id: int) -> tuple[int, 
 async def preview_arc_deletion(db: AsyncSession, arc_id: int, user_id: int) -> dict[str, object]:
     review, binding = await _snapshot(db, arc_id, user_id, lock=False)
     return {**asdict(review), "token": None if review.blocker else _signer().dumps(binding)}
+
+
+async def review_arc_placement_paths(
+    db: AsyncSession, arc_id: int, after: int
+) -> dict[str, object]:
+    """Page saved directory entries without opening, resolving or hashing a comic."""
+    if await db.scalar(select(StoryArc.id).where(StoryArc.id == arc_id)) is None:
+        raise StoryArcNotFoundError("Story Arc not found.")
+    page_size = 20
+    rows = (
+        await db.execute(
+            select(
+                StoryArcPlacement.id,
+                StoryArcPlacement.placement_path,
+                StoryArcPlacement.mode,
+                StoryArcPlacement.ownership,
+                LibraryFile.id.is_not(None).label("registered"),
+            )
+            .join(IssueStoryArc, IssueStoryArc.id == StoryArcPlacement.issue_story_arc_id)
+            .outerjoin(LibraryFile, LibraryFile.file_path == StoryArcPlacement.placement_path)
+            .where(IssueStoryArc.story_arc_id == arc_id, StoryArcPlacement.id > after)
+            .order_by(StoryArcPlacement.id)
+            .limit(page_size + 1)
+        )
+    ).all()
+    items = [
+        {
+            "id": row.id,
+            "path": row.placement_path,
+            "mode": row.mode.value,
+            "ownership": row.ownership.value,
+            "registered": row.registered,
+        }
+        for row in rows[:page_size]
+    ]
+    return {"items": items, "next_after": rows[page_size - 1].id if len(rows) > page_size else None}
 
 
 async def delete_reviewed_arc(db: AsyncSession, arc_id: int, user_id: int, token: str) -> None:
