@@ -63,8 +63,8 @@ python scripts/check_sqlite_source_offline.py --container pullbox --compare-chec
 A restart followed by another stop, a replacement source, or a newly observed
 writable peer invalidates the earlier evidence. A failed check returns exit
 code 1 and no usable fingerprint. This is a **Docker state fingerprint, not
-a backup checksum or a write lock**. It does not create the final snapshot,
-verify application journals, or authorize cutover.
+a backup checksum or a write lock**. The check alone does not create a
+snapshot, verify application journals, or authorize cutover.
 
 This check is for one standalone local Linux Docker Engine (including Docker
 Desktop) with an explicit absolute `PULLBOX_DB_URL` and persistent data and
@@ -73,6 +73,43 @@ volumes, including parent and child mounts. It does not qualify orchestrators,
 remote/shared storage, host writers, other daemons, filesystem aliases or
 writers created and removed between observations. Do not rely on it for those
 setups. Keep external automation disabled and the source offline throughout.
+
+## Capture the offline SQLite snapshot
+
+From the same host checkout with Pullbox dependencies installed, keep the source
+stopped and use the `checkpoint_sha256` you recorded above. Choose a **new**
+file in a trusted local directory you own, outside the source mounts:
+
+```sh
+python scripts/check_sqlite_source_offline.py --container pullbox \
+  --compare-checkpoint "$OFFLINE_CHECKPOINT" --snapshot /private-backups/pullbox-offline.db
+```
+
+The command runs Python from the stopped container's exact local image without
+starting Pullbox or downloading an image. The helper has no network, mounts
+the database storage read-only and writes only to private scratch. It uses the
+SQLite backup API, including committed WAL data. If the WAL index is absent,
+it rebuilds the index on a private working copy, not in the library. Use an
+ordinary bind or local volume with no volume subpath. The local filesystem
+must support hard links and directory sync. Allow space for the database plus
+its WAL and 256 MiB, or twice the database-plus-WAL size and the same reserve if
+the index needs rebuilding. Do not delete or modify journals to pass the check.
+
+The file is published with owner-only permissions only after schema, integrity,
+foreign-key and outstanding-work checks pass, the source files still have the
+same identity, size and timestamps, and the Docker checkpoint still matches.
+An existing file, symlink or SQLite sidecar at the destination blocks publication.
+If blocked, resolve the stated cause; if you restart the app, get a **new**
+offline checkpoint. Do not use scratch files left by a forced interruption.
+If the host process was killed, list only its helpers with
+`docker ps -a --filter label=pullbox.offline-source=snapshot` and confirm
+that no capture is active before removing a leftover helper.
+
+Save the successful report and use this exact file for the transfer. Compare
+its **`snapshot_sha256`** with the staging report; that digest identifies the
+database contents, unlike the Docker checkpoint. This does not save your
+configuration, encryption key, artwork or comics. The source stays stopped,
+and **`cutover_ready` remains false**.
 
 ## Check the destination
 

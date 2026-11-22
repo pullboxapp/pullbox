@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- [Capture a verified offline SQLite snapshot](docs/sqlite-postgresql-migration.md#capture-the-offline-sqlite-snapshot)
+  for PostgreSQL migration without starting Pullbox. Committed WAL changes are
+  included; a source restart or unfinished library operation blocks publication.
+
 - [Check that a Docker SQLite source is offline](docs/sqlite-postgresql-migration.md#check-whether-the-docker-source-is-offline)
   before migration. The check identifies containers with overlapping writable
   mounts and detects a source restart without changing the running stack.

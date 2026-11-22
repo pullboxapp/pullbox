@@ -6,7 +6,9 @@ import json
 import os
 import re
 import subprocess
+from dataclasses import dataclass
 from functools import partial
+from pathlib import Path as HostPath
 from pathlib import PurePosixPath as Path
 
 MESSAGES = {
@@ -29,13 +31,28 @@ class OfflineCheckError(Exception):
     pass
 
 
-def docker(*args, endpoint=None):
+@dataclass
+class SourceContext:
+    endpoint: str
+    cid: str
+    database: Path
+    data_mount: dict
+    desktop: bool
+    mounts: list
+
+
+def docker(*args, endpoint=None, timeout=30):
     host = ["--host", endpoint] if endpoint else []
     env = os.environ.copy()
     if endpoint:
         env.pop("DOCKER_CONTEXT", None)
     return subprocess.run(
-        ["docker", *host, *args], capture_output=True, text=True, timeout=30, check=True, env=env
+        ["docker", *host, *args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=True,
+        env=env,
     ).stdout.strip()
 
 
@@ -104,6 +121,10 @@ def check_source_paths(config, mounts):
     db_files = {Path(str(db) + suffix) for suffix in ("", "-wal", "-shm", "-journal")}
     if any(absolute(m["Destination"]) in db_files for m in mounts):
         raise OfflineCheckError("unsupported_layout")
+    return db, max(
+        (m for m in mounts if db.parent.is_relative_to(absolute(m["Destination"]))),
+        key=lambda m: len(absolute(m["Destination"]).parts),
+    )
 
 
 def inspect_rows(run, ids):
@@ -158,7 +179,7 @@ def inspect_source(name, compare):
         json.loads(line).split("=", 1)
         for line in run("container", "inspect", "--format", SOURCE_CONFIG, source).splitlines()
     )
-    check_source_paths(config, mounts)
+    database, data_mount = check_source_paths(config, mounts)
     protected = {storage(m, desktop) for m in mounts if m["RW"]} - {None}
     related = {source: rows[source][:4]}
     writers = []
@@ -197,22 +218,49 @@ def inspect_source(name, compare):
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
     if compare and compare != digest:
         blockers.add("checkpoint_changed")
-    return blockers, digest, sorted(writers)
+    return (
+        blockers,
+        digest,
+        sorted(writers),
+        SourceContext(endpoint, source, database, data_mount, desktop, mounts),
+    )
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--container", required=True)
+    parser.add_argument("--snapshot", metavar="NEW_FILE")
     parser.add_argument("--compare-checkpoint", metavar="SHA256")
     args = parser.parse_args()
     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", args.container):
         parser.error("Invalid Docker container name or ID")
     if args.compare_checkpoint and not re.fullmatch("[a-f0-9]{64}", args.compare_checkpoint):
         parser.error("Expected a SHA-256 checkpoint")
+    if args.snapshot and not args.compare_checkpoint:
+        parser.error("--snapshot requires --compare-checkpoint from a prior successful check")
     digest = None
     writers = []
+    snapshot_info = {"snapshot_verified": False, "snapshot_sha256": None} if args.snapshot else {}
+    messages = dict(MESSAGES)
     try:
-        reasons, digest, writers = inspect_source(args.container, args.compare_checkpoint)
+        reasons, digest, writers, context = inspect_source(args.container, args.compare_checkpoint)
+        if args.snapshot and not reasons:
+            from sqlite_source_snapshot import capture_snapshot
+
+            def recheck():
+                nonlocal writers
+                after, _, writers, _ = inspect_source(args.container, digest)
+                return {reason: MESSAGES[reason] for reason in after}
+
+            snapshot_info, blocked = capture_snapshot(
+                context,
+                HostPath(args.snapshot),
+                partial(docker, endpoint=context.endpoint),
+                recheck,
+                partial(host_path, desktop=context.desktop),
+            )
+            reasons.update(blocked)
+            messages.update(blocked)
     except OfflineCheckError as exc:
         reasons = {exc.args[0]}
     except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
@@ -225,7 +273,8 @@ def main():
                 "checkpoint_matched": not reasons and args.compare_checkpoint is not None,
                 "cutover_ready": False,
                 "other_writer_ids": writers,
-                "blockers": {reason: MESSAGES[reason] for reason in sorted(reasons)},
+                "blockers": {reason: messages[reason] for reason in sorted(reasons)},
+                **snapshot_info,
             },
             sort_keys=True,
         )
