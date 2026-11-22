@@ -330,6 +330,16 @@ async def bulk_delete_series(
     session: DbSession,
 ) -> dict[str, int]:
     """Bulk-delete multiple series."""
+    from pullbox.services.story_arc_series_detachment import (
+        check_series_arc_work,
+        reserve_series_arc_work,
+    )
+
+    if len(body.series_ids) > 1:
+        if body.delete_files or body.delete_folder:
+            await reserve_series_arc_work(session, body.series_ids)
+        else:
+            await check_series_arc_work(session, body.series_ids)
     deleted = 0
     skipped = 0
     for sid in body.series_ids:

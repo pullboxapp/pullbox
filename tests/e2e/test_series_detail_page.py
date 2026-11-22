@@ -509,9 +509,29 @@ class TestSeriesDetailPage:
         assert option_spacing >= 12
 
         series.close_delete_modal()
-
         assert series.page_shell.is_visible()
         assert series.footer.is_visible()
+
+    def test_blocked_arc_cleanup_keeps_specific_reason_in_delete_dialog(
+        self, authed_page, seeded_server: str
+    ) -> None:
+        series = SeriesDetailPage(authed_page, seeded_server)
+        series.goto(1)
+        series.open_delete_modal()
+        message = 'Story Arc "House of M" still has a managed copy. Review its files before deleting this series.'
+        authed_page.route(
+            "**/htmx/series/*/delete",
+            lambda route: route.fulfill(
+                status=422, json={"error": {"code": "VALIDATION_ERROR", "message": message}}
+            ),
+        )
+        series.delete_modal.get_by_test_id("series-delete-submit").click()
+        expect(series.delete_modal.get_by_role("alert").filter(has_text=message)).to_be_visible(
+            timeout=2500
+        )
+        series.close_delete_modal()
+        series.open_delete_modal()
+        expect(series.delete_modal.get_by_text(message)).not_to_be_visible()
 
     def test_delete_folder_option_forces_delete_files(
         self,

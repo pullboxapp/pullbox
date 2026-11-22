@@ -120,6 +120,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Deleting a series now keeps its chapters in surviving Story Arcs as missing,
+  with their reading order and issue labels intact. Skipped chapters stay
+  skipped. If an arc still has a managed copy or pending file work, the delete
+  dialog names the arc instead of reporting a generic failure.
 - Import Results now distinguishes pending file metadata updates from failures.
   Use **Check status** to see the latest outcome without retrying or reimporting files.
 - Preserved the import page shell and working follow-up and rollback controls

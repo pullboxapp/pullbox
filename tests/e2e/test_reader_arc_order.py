@@ -13,6 +13,7 @@ from sqlalchemy import delete, select
 from pullbox.database import get_session_factory
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
+from pullbox.models.series import Series
 from pullbox.models.story_arc import (
     IssueStoryArc,
     StoryArc,
@@ -22,6 +23,7 @@ from pullbox.models.story_arc import (
 from tests.e2e.accessibility import assert_no_axe_violations
 from tests.e2e.conftest import _TEST_COVER_PNG, _run_async_blocking
 from tests.e2e.pages.issue_detail import IssueDetailPage
+from tests.e2e.pages.series_detail import SeriesDetailPage
 
 pytestmark = pytest.mark.e2e
 
@@ -666,6 +668,52 @@ def test_related_series_review_is_read_only(
     assert {k: v for k, v in after.items() if k != "token"} == {
         k: v for k, v in baseline.items() if k != "token"
     }
+
+
+def test_deleting_a_parent_series_preserves_a_reviewable_chapter(
+    authed_page: Page, seeded_server: str, arc_reader: int, tmp_path: Path
+) -> None:
+    async def seed() -> tuple[int, int]:
+        async with get_session_factory().begin() as db:
+            series = Series(
+                title="Disposable crossover",
+                sort_title="disposable crossover",
+                path=str(tmp_path / "Disposable crossover"),
+            )
+            issue = Issue(
+                series=series, issue_number=50, issue_number_text="50-X", title="Final chapter"
+            )
+            entry = IssueStoryArc(
+                story_arc_id=arc_reader,
+                issue=issue,
+                sequence_number=4,
+                source_ordinal=4,
+                resolution_state=StoryArcResolutionState.RESOLVED,
+            )
+            db.add(entry)
+            await db.flush()
+            return series.id, entry.id
+
+    async def cleanup(sid: int) -> None:
+        async with get_session_factory().begin() as db:
+            await db.execute(delete(Series).where(Series.id == sid))
+
+    sid, mid = _run_async_blocking(seed())
+    try:
+        page = authed_page
+        detail = SeriesDetailPage(page, seeded_server)
+        detail.goto(sid)
+        detail.open_delete_modal()
+        detail.delete_modal.get_by_test_id("series-delete-submit").click()
+        expect(page).to_have_url(re.compile(r"/series(?:\?.*)?$"))
+        page.goto(f"{seeded_server}/story-arcs/{arc_reader}")
+        row = page.locator(f"tbody[data-membership-id='{mid}']")
+        expect(row).to_contain_text("Disposable crossover")
+        expect(row).to_contain_text("#50-X")
+        expect(row).to_contain_text("Final chapter")
+        expect(row.get_by_test_id(f"story-arc-membership-status-{mid}")).to_contain_text("Missing")
+    finally:
+        _run_async_blocking(cleanup(sid))
 
 
 def test_delete_arc_with_an_explicitly_selected_copy(

@@ -1344,6 +1344,26 @@ class TestSeriesPage:
         assert series.footer.is_visible()
         assert series.results_body.is_visible()
 
+    def test_blocked_bulk_delete_keeps_selection_and_shows_arc_reason(
+        self, authed_page, seeded_server: str
+    ) -> None:
+        series = SeriesListPage(authed_page, seeded_server)
+        series.goto("per_page=25")
+        series.toggle_row_selection("Batman Beyond")
+        series.toggle_row_selection("Wonder Woman", modifiers=["ControlOrMeta"])
+        series.open_bulk_delete_confirm()
+        message = 'Story Arc "Crossover" still uses this series. Review its managed copy.'
+        authed_page.route(
+            "**/api/v1/series/bulk",
+            lambda route: route.fulfill(
+                status=422, json={"error": {"code": "VALIDATION_ERROR", "message": message}}
+            ),
+        )
+        series.delete_modal.get_by_test_id("series-delete-submit").click()
+        series.delete_modal.get_by_role("alert").get_by_text(message).wait_for(timeout=3000)
+        assert series.selected_count_text() == "2 selected"
+        assert series.row_for_title("Batman Beyond").is_visible()
+
     def test_bulk_delete_requires_confirmation_and_removes_rows_without_shell_swap(
         self,
         authed_page,

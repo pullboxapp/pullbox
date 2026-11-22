@@ -64,6 +64,10 @@ from pullbox.services.series_delete_targets import (
     reclaim_transient_series_folder,
     trash_relative_path,
 )
+from pullbox.services.story_arc_series_detachment import (
+    check_series_arc_work,
+    detach_series_arc_entries,
+)
 from pullbox.utilities.settings import move_path_to_utility_trash
 
 if TYPE_CHECKING:
@@ -988,6 +992,7 @@ class SeriesService:
             raise NotFoundError("Series", series_id)
 
         series_title = series.title
+        await check_series_arc_work(session, [series_id])
         root = (
             await session.get(LibraryRoot, series.library_root_id)
             if trash_dir is not None and series.library_root_id is not None
@@ -1052,6 +1057,10 @@ class SeriesService:
             else delete_target.folder_paths
         )
         moved_folder_keys: set[str] = set()
+        if effective_delete_files:
+            # Target discovery can take time. Recheck before unlinking anything,
+            # not after a later database rollback can no longer help.
+            await detach_series_arc_entries(session, series)
         if delete_folder:
             for folder_path in folder_paths:
                 folder_references = await referenced_library_files_for_target(
@@ -1135,6 +1144,8 @@ class SeriesService:
         for download_id in download_ids:
             await retire_download_operations(session, download_id)
         await purge_series_cover_cache(session, series_id)
+        if not effective_delete_files:
+            await detach_series_arc_entries(session, series)
         await session.delete(series)
         logger.info(
             "series_deleted",

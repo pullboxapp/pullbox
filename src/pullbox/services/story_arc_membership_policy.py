@@ -3,7 +3,20 @@
 from sqlalchemy import func
 from sqlalchemy.sql.elements import ColumnElement
 
-from pullbox.models.story_arc import IssueStoryArc, StoryArcSourceKind
+from pullbox.models.story_arc import IssueStoryArc, StoryArcResolutionState, StoryArcSourceKind
+
+
+def retain_missing_chapter(
+    member: IssueStoryArc, *, number: str | None, title: str | None, series: str | None
+) -> None:
+    """Retain display evidence without replacing the provider's original labels or user skip."""
+    member.source_series_name = member.source_series_name or series
+    member.source_issue_title = member.source_issue_title or title
+    member.source_issue_number_text = member.source_issue_number_text or number
+    member.issue = None
+    member.sync_eligible = False
+    if member.resolution_state != StoryArcResolutionState.SKIPPED:
+        member.resolution_state = StoryArcResolutionState.MISSING
 
 
 def provider_issue_identity(member: IssueStoryArc) -> str | None:

@@ -82,6 +82,7 @@
     totalMatchingCount: {{ total }},
     toolbarMode: 'browse',
     showDeleteConfirm: false,
+    deleteError: '',
     deleteFiles: false,
     deleteFolder: false,
     deleteLinkedFileCount: 0,
@@ -407,6 +408,7 @@
       if (this.deleteTargetIds.length === 0) {
         return;
       }
+      this.deleteError = '';
       this.bulkBusy = true;
       const seriesIds = this.deleteTargetIds.map((id) => Number(id));
       const hasDeletedRowVisible = () =>
@@ -434,10 +436,12 @@
         });
 
         if (!response.ok) {
-          throw new Error('Delete failed');
+          this.deleteError = _extractApiErrorMessage(response, await _readJsonBody(response), errorMessage);
+          this.bulkBusy = false;
+          return;
         }
       } catch (_) {
-        this.dispatchToast(errorMessage, 'error');
+        this.deleteError = 'Could not confirm deletion. Refresh before trying again.';
         this.bulkBusy = false;
         return;
       }
@@ -477,6 +481,7 @@
       this.resetDeleteConfirm();
     },
     resetDeleteConfirm() {
+      this.deleteError = '';
       this.showDeleteConfirm = false;
       this.deleteFiles = false;
       this.deleteFolder = false;
@@ -991,6 +996,7 @@
   {% set close_handler = "cancelDeleteConfirm()" %}
   {% set title_expr = "deleteModalTitle()" %}
   {% set message_expr = "deleteModalMessage()" %}
+  {% set error_expr = "deleteError" %}
   {% set delete_files_model = "deleteFiles" %}
   {% set delete_folders_model = "deleteFolder" %}
   {% set submit_handler = "applyDelete()" %}

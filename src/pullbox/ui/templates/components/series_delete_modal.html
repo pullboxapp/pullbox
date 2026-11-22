@@ -74,6 +74,13 @@
             {% call inline_alert(tone="danger", icon="warning", attrs='data-testid="series-delete-summary"') %}
               <p class="text-sm leading-6 text-pb-text" x-text="{{ message_expr }}"></p>
             {% endcall %}
+            {% if error_expr %}
+              <template x-if="{{ error_expr }}">
+                {% call inline_alert(tone="danger", attrs='role="alert"') %}
+                  <p x-text="{{ error_expr }}"></p>
+                {% endcall %}
+              </template>
+            {% endif %}
           </div>
 
           <section class="library-browser-modal__section-panel">

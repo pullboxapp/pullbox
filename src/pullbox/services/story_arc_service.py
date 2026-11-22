@@ -12,6 +12,7 @@ from sqlalchemy.orm import selectinload
 from pullbox.core.issue_numbers import normalize_issue_number_text
 from pullbox.core.story_arc_identity import normalize_story_arc_name
 from pullbox.models.issue import Issue
+from pullbox.models.series import Series
 from pullbox.models.story_arc import (
     IssueStoryArc,
     StoryArc,
@@ -25,6 +26,7 @@ from pullbox.services.story_arc_membership_policy import (
     order_review_filter,
     provider_issue_identity,
     requires_order_review,
+    retain_missing_chapter,
 )
 
 if TYPE_CHECKING:
@@ -431,13 +433,15 @@ class StoryArcService:
                 "Canonical issue cannot detach while a managed story-arc placement exists"
             )
 
+        series = await session.get(Series, issue.series_id) if issue is not None else None
         affected_arc_ids: set[int] = set()
         for membership in memberships:
-            membership.issue_id = None
-            if membership.resolution_state != StoryArcResolutionState.SKIPPED:
-                membership.resolution_state = StoryArcResolutionState.MISSING
-            if membership.source_issue_number_text is None and issue is not None:
-                membership.source_issue_number_text = issue.effective_issue_number_text
+            retain_missing_chapter(
+                membership,
+                number=issue.effective_issue_number_text if issue else None,
+                title=issue.title if issue else None,
+                series=series.title if series else None,
+            )
             affected_arc_ids.add(membership.story_arc_id)
         await self._advance_arc_revisions(session, affected_arc_ids)
         await session.flush()

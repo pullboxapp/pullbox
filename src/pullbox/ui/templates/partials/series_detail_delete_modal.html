@@ -7,7 +7,9 @@ Are you sure you want to delete {{ series.title }}? This removes the series and 
     deleteFiles: false,
     deleteFolder: false,
     deleting: false,
+    deleteError: '',
     closeDeleteModal() {
+      this.deleteError = '';
       this.showDeleteModal = false;
       this.deleteFiles = false;
       this.deleteFolder = false;
@@ -22,6 +24,7 @@ Are you sure you want to delete {{ series.title }}? This removes the series and 
     },
     submitDelete() {
       if (this.deleting) return;
+      this.deleteError = '';
       this.deleting = true;
       const returnUrl = this.deleteReturnUrl();
       fetch('/htmx/series/{{ series.id }}/delete', {
@@ -35,14 +38,16 @@ Are you sure you want to delete {{ series.title }}? This removes the series and 
           delete_folder: this.deleteFolder,
         }),
       })
-        .then((response) => {
-          if (!response.ok) throw new Error('Failed to delete series');
+        .then(async (response) => {
+          if (!response.ok) {
+            this.deleteError = _extractApiErrorMessage(response, await _readJsonBody(response), 'Unable to delete this series.');
+            this.deleting = false;
+            return;
+          }
           window.location.assign(returnUrl);
         })
         .catch(() => {
-          if (typeof showToast === 'function') {
-            showToast({ message: 'Failed to delete series', level: 'error' });
-          }
+          this.deleteError = 'Could not confirm deletion. Refresh before trying again.';
           this.deleting = false;
         });
     },
@@ -53,6 +58,7 @@ Are you sure you want to delete {{ series.title }}? This removes the series and 
   {% set close_handler = "closeDeleteModal()" %}
   {% set title_expr = "'Delete Series'" %}
   {% set message_expr = delete_message|trim|tojson|forceescape %}
+  {% set error_expr = "deleteError" %}
   {% set delete_files_model = "deleteFiles" %}
   {% set delete_folders_model = "deleteFolder" %}
   {% set submit_handler = "submitDelete()" %}
