@@ -16,6 +16,7 @@ import pytest
 from sqlalchemy.engine import make_url
 
 from tests.integration import postgres_import_workload as workload
+from tests.integration import postgres_native_followup as native
 from tests.integration import test_postgres_stage_review as review
 from tests.integration import test_postgres_transfer_stage as stages
 from tests.integration.test_postgres_first_start import _NAVIGATE, docker
@@ -59,12 +60,16 @@ def handoff(source, url, token, capture, scratch):
 def cluster(request):
     from tests.integration.test_database_migration_target import disposable_server
 
-    with disposable_server(request.param) as instance:
+    with disposable_server(
+        request.param, publish_app=os.environ.get("PULLBOX_TEST_MIGRATION_BROWSER") == "1"
+    ) as instance:
         yield instance
 
 
 @pytest.mark.parametrize(
-    "start", [None, "activate", "restart"], ids=["check", "activate", "restart"]
+    "start",
+    [None, "activate", "restart", "browser"],
+    ids=["check", "activate", "restart", "browser"],
 )
 async def test_recheck_original_source_and_reviewed_target(
     cluster, populated, tmp_path, monkeypatch, start
@@ -72,6 +77,10 @@ async def test_recheck_original_source_and_reviewed_target(
     image = os.environ.get("PULLBOX_TEST_SQLITE_SNAPSHOT_IMAGE")
     if not image:
         pytest.skip("requires the disposable source image")
+    browser = start == "browser"
+    if browser and os.environ.get("PULLBOX_TEST_MIGRATION_BROWSER") != "1":
+        pytest.skip("opt in to the disposable Chromium cutover rehearsal")
+    activated = start in {"activate", "browser"}
     monkeypatch.syspath_prepend(str(stages.ROOT / "scripts"))
     import check_postgres_handoff as host
 
@@ -101,8 +110,9 @@ async def test_recheck_original_source_and_reviewed_target(
             "file_format,file_modified_at,match_confidence,has_comicinfo) VALUES "
             "(101,77,'/comics/one.cbz','one.cbz',5,'CBZ',CURRENT_TIMESTAMP,'UNMATCHED',0)"
         )
-        if start == "activate":
+        if activated:
             expected = workload.seed(db, comics, imports)
+    originals = native.make_sources(imports) if browser else {}
     token = tmp_path / "token"
     key = secrets.token_hex(32)
     xml = server[0] == 18
@@ -134,10 +144,8 @@ async def test_recheck_original_source_and_reviewed_target(
             check=True,
         )
 
-    write_wal("first confidential title")
-    before = hashlib.sha256(source.read_bytes()).digest()
     try:
-        docker(
+        source_run = docker(
             "run",
             "--name",
             name,
@@ -147,6 +155,20 @@ async def test_recheck_original_source_and_reviewed_target(
             f"type=bind,src={data},dst=/data",
             "--mount",
             f"type=bind,src={comics},dst=/comics",
+            *(
+                [
+                    "--mount",
+                    f"type=bind,src={imports},dst=/imports,readonly",
+                    "--mount",
+                    f"type=bind,src={stages.ROOT / 'src'},dst=/candidate/src,readonly",
+                    "--mount",
+                    f"type=bind,src={native.__file__},dst=/scan.py,readonly",
+                    "--user",
+                    f"{os.getuid()}:{os.getgid()}",
+                ]
+                if browser
+                else []
+            ),
             "-e",
             "PULLBOX_DB_URL=sqlite:////data/pullbox.db",
             "-e",
@@ -156,10 +178,16 @@ async def test_recheck_original_source_and_reviewed_target(
             "--entrypoint=python",
             image,
             "-c",
-            "pass",
+            "import sys,runpy; sys.path.insert(0,'/candidate/src'); "
+            "runpy.run_path('/scan.py',run_name='__main__')"
+            if browser
+            else "pass",
             env={**os.environ, "PULLBOX_SECRET_KEY": "" if xml else key},
             check=True,
         )
+        cases = json.loads(source_run.stdout.splitlines()[-1]) if browser else []
+        write_wal("first confidential title")
+        before = hashlib.sha256(source.read_bytes()).digest()
         offline = inspect(name)
         assert not offline["blockers"], offline["blockers"]
         checkpoint = offline["checkpoint_sha256"]
@@ -233,7 +261,7 @@ async def test_recheck_original_source_and_reviewed_target(
         if start:
             app = name + "-first-start"
             inside = make_url(url).set(port=5432).render_as_string(hide_password=False)
-            shared = xml and start == "activate"
+            shared = xml and activated
             copied = comics if shared else tmp_path / "new-library"
             if not shared:
                 shutil.copytree(comics, copied)
@@ -383,12 +411,23 @@ async def test_recheck_original_source_and_reviewed_target(
                 assert sql(db, "SELECT status FROM import_files WHERE id=2") == "FAILED"
                 if expected:
                     workload.verify(sql, db, copied, imports, expected)
+                if cases:
+                    address = docker("port", postgres, "8585/tcp", check=True).stdout.strip()
+                    assert address.startswith("127.0.0.1:")
+                    await native.exercise("http://" + address, cases, originals, copied, db, sql)
                 if not shared:
                     assert inspect(name, "--compare-checkpoint", checkpoint)["checkpoint_matched"]
                 assert hashlib.sha256(snapshot.read_bytes()).hexdigest() == captured_source.snapshot
                 # A native backup of the now-live original stage must be usable without its
                 # first-start secrets and must retain writes made after SQLite was frozen.
                 docker("stop", "-t", "12", app, check=True)
+                if cases:
+                    stat_query = (
+                        "SELECT last_execution,last_status FROM scheduled_task_stats "
+                        "WHERE task_id='monitor_downloads' AND last_execution IS NOT NULL"
+                    )
+                    last_run = sql(db, stat_query)
+                    assert last_run and last_run.split("|")[1]
                 sql(db, "UPDATE story_arcs SET name='post-cutover change' WHERE id=55")
                 restored, restore_url, _ = stages.target(server)
                 commands = ["docker", "exec", "-i", postgres]
@@ -420,6 +459,8 @@ async def test_recheck_original_source_and_reviewed_target(
                 stages.targets._migrate(restore_url, "upgrade", "head")
                 if expected:
                     workload.verify(sql, restored, copied, imports, expected)
+                if cases:
+                    assert sql(restored, stat_query) == last_run
                 assert (
                     sql(restored, "SELECT name FROM story_arcs WHERE id=55")
                     == "post-cutover change"

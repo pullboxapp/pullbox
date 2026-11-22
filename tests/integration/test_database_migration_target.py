@@ -76,7 +76,7 @@ def server(request):
 
 
 @contextmanager
-def disposable_server(major):
+def disposable_server(major, *, publish_app=False):
     if os.environ.get("PULLBOX_TEST_MIGRATION_TARGET_DOCKER") != "1":
         pytest.skip("opt in to disposable Docker PostgreSQL 16 and 18")
     password = secrets.token_hex(20)
@@ -99,6 +99,7 @@ def disposable_server(major):
         mount,
         "--publish",
         "127.0.0.1::5432",
+        *(["--publish", "127.0.0.1::8585"] if publish_app else []),
         "--env",
         "POSTGRES_PASSWORD",
         f"postgres:{major}-bookworm",

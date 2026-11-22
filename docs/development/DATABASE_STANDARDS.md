@@ -967,6 +967,18 @@ These tests activate the original disposable database, refuse changed source or
 target evidence, and exercise authenticated navigation and native restore after
 admitting writes. The real development and production services are not test targets.
 
+To exercise the migrated library through Chromium, also set
+`PULLBOX_TEST_MIGRATION_BROWSER=1` and run
+`pytest tests/integration/test_postgres_source_handoff.py -k browser` with the
+project's Playwright Chromium and built UI assets installed. Let this rehearsal
+finish before running other Docker rehearsals: the source safety check refuses
+an inventory that changes during inspection. Only an ephemeral loopback port is
+published for the browser. The SQLite source scans synthetic CBZ files on a
+read-only inbox mount; the PostgreSQL app sees the same originals. In Follow-up,
+verified Metron and GCD links recover issue 13a, while an unverified issue stays
+unmatched. Rollback must remove the managed copy, restore the prior issue status,
+and leave both originals untouched.
+
 Story Arc reader bookmarks are unique per user and arc. A bookmark
 stores the stable membership and the issue the user actually read, not a page
 number or a sequence offset. Progress remains in `issue_reader_states`.
