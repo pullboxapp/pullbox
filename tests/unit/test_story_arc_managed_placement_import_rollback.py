@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import pytest
 from sqlalchemy import select
 
+from pullbox.models.config import SystemConfig
 from pullbox.models.import_job import (
     ImportJob,
     ImportJobAction,
@@ -269,9 +270,11 @@ async def test_interactive_cleanup_cannot_consume_import_owned_placement(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("trash_offline", [False, True])
 async def test_completed_managed_placement_is_safely_removed_and_rollback_is_idempotent(
     db_session: AsyncSession,
     tmp_path: Path,
+    trash_offline: bool,
 ) -> None:
     context = await _seed_import_placement(db_session, tmp_path)
     synchronized = await StoryArcPlacementSyncService().sync_membership(
@@ -285,6 +288,12 @@ async def test_completed_managed_placement_is_safely_removed_and_rollback_is_ide
     )
     assert synchronized.placement is not None
     target = Path(synchronized.placement.placement_path)
+    if trash_offline:
+        await db_session.merge(
+            SystemConfig(
+                key="utility_trash_folder", value=str(tmp_path / "offline"), value_type="string"
+            )
+        )
     context.work.state = StoryArcSyncWorkState.COMPLETED
     context.work.last_result = {"schema_version": 1, "outcome": synchronized.outcome}
     await db_session.flush()

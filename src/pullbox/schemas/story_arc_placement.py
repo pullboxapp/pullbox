@@ -148,6 +148,7 @@ class StoryArcPlacementRemovalResponse(BaseModel):
     canonical_preserved: bool
     referenced_artifact_preserved: bool
     automatic_sync_disabled: bool
+    trash_path: str | None = None
 
 
 class StoryArcPolicyMigrationPreviewRequest(StoryArcPlacementPolicyUpdate):

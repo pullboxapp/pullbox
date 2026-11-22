@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy import and_, delete, func, select
 from sqlalchemy import update as sa_update
@@ -56,6 +56,7 @@ from pullbox.models.story_arc import (
     StoryArcSourceKind,
     StoryArcSymlinkStyle,
 )
+from pullbox.services.issue_file_service import resolve_configured_utility_trash_dir
 from pullbox.services.library_root_management import (
     validate_managed_library_root,
     validate_reference_library_root,
@@ -81,6 +82,7 @@ from pullbox.services.story_arc_placement_service import (
     StoryArcPlacementRemovalResult,
     StoryArcPlacementResult,
     StoryArcPlacementSafetyError,
+    StoryArcPlacementTrash,
     execute_story_arc_placement,
     inspect_story_arc_placement,
     prepare_story_arc_placement,
@@ -270,6 +272,7 @@ class StoryArcPlacementRemovalView:
     canonical_preserved: bool = True
     referenced_artifact_preserved: bool = False
     automatic_sync_disabled: bool = True
+    trash_path: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -644,6 +647,7 @@ class StoryArcPlacementSyncService:
         placement_id: int,
         *,
         confirm_managed_artifact_removal: bool = False,
+        expected_trash_enabled: bool | None = None,
         abandoned_published_operation_token: str | None = None,
         rollback_action_id: int | None = None,
     ) -> StoryArcPlacementRemovalView:
@@ -822,6 +826,46 @@ class StoryArcPlacementSyncService:
             )
 
         operation_token = uuid4().hex
+        trash: StoryArcPlacementTrash | None = None
+        trash_intent: dict[str, str] = {}
+        if rollback_action_id is None:
+            trash_root = await resolve_configured_utility_trash_dir(session)
+            if expected_trash_enabled is not None and expected_trash_enabled != (
+                trash_root is not None
+            ):
+                raise StoryArcPlacementIntegrationError(
+                    "trash_policy_changed",
+                    "Trash settings changed. Review this removal again before confirming.",
+                )
+            prior_root = previous_result.get("trash_root")
+            prior_receipt = previous_result.get("trash_receipt")
+            if prior_root is not None and (trash_root is None or prior_root != str(trash_root)):
+                raise StoryArcPlacementIntegrationError(
+                    "trash_unavailable",
+                    "The trash folder changed during removal. Restore it before retrying.",
+                )
+            if trash_root is not None:
+                if (
+                    await session.scalar(
+                        select(LibraryRoot.id).where(LibraryRoot.path == str(trash_root)).limit(1)
+                    )
+                    is not None
+                ):
+                    raise StoryArcPlacementIntegrationError(
+                        "trash_unavailable", "A library root cannot be used as the trash folder."
+                    )
+                try:
+                    receipt = (
+                        UUID(str(prior_receipt))
+                        if prior_root is not None
+                        else UUID(operation_token)
+                    )
+                except ValueError as exc:
+                    raise StoryArcPlacementIntegrationError(
+                        "trash_unavailable", "The trash receipt needs review."
+                    ) from exc
+                trash = StoryArcPlacementTrash(trash_root, receipt, resume=prior_root is not None)
+                trash_intent = {"trash_root": str(trash_root), "trash_receipt": receipt.hex}
         managed_token_filter: ColumnElement[bool] = (
             StoryArcPlacement.operation_token.is_(None)
             if observed_token is None
@@ -850,6 +894,7 @@ class StoryArcPlacementSyncService:
                 operation_token=operation_token,
                 last_result={
                     **previous_result,
+                    **trash_intent,
                     "schema_version": 1,
                     "status": "remove_prepared",
                     "operation_token": operation_token,
@@ -871,6 +916,7 @@ class StoryArcPlacementSyncService:
                 partial(
                     remove_managed_story_arc_placement,
                     evidence,
+                    trash=trash,
                     destination_root=Path(policy.destination_root),
                     canonical_path=(
                         Path(canonical_path_raw) if canonical_path_raw is not None else None
@@ -886,6 +932,7 @@ class StoryArcPlacementSyncService:
         except StoryArcPlacementError as exc:
             if (
                 not evidence.target_fingerprint
+                and (trash is None or not trash.resume)
                 and exc.code == "filesystem_error"
                 and isinstance(exc.__cause__, FileNotFoundError)
             ):
@@ -923,7 +970,7 @@ class StoryArcPlacementSyncService:
             placement_id=placement_id,
             membership_id=membership_id,
             operation_token=operation_token,
-            artifact_removed=removed.removed,
+            removal=removed,
         )
         if caller_cancelled:
             raise asyncio.CancelledError
@@ -931,6 +978,7 @@ class StoryArcPlacementSyncService:
             placement_id=placement_id,
             ownership=ownership,
             artifact_removed=removed.removed,
+            trash_path=removed.trash_path,
         )
 
     async def _sync_membership_locked(
@@ -2808,6 +2856,7 @@ async def _persist_removal_failure(
         return
     previous = dict(placement.last_result or {})
     failure = {
+        **{key: previous[key] for key in ("trash_root", "trash_receipt") if key in previous},
         **(
             {"target_fingerprint": dict(previous["target_fingerprint"])}
             if isinstance(previous.get("target_fingerprint"), dict)
@@ -2853,7 +2902,7 @@ async def _delete_removed_placement_checkpoint(
     placement_id: int,
     membership_id: int,
     operation_token: str,
-    artifact_removed: bool,
+    removal: StoryArcPlacementRemovalResult,
 ) -> None:
     """Atomically forget ownership only after the managed artifact is absent."""
     result = await session.execute(
@@ -2879,7 +2928,15 @@ async def _delete_removed_placement_checkpoint(
                 "schema_version": 1,
                 "status": "placement_removed",
                 "placement_id": placement_id,
-                "artifact_removed": artifact_removed,
+                "artifact_removed": removal.removed,
+                **(
+                    {
+                        "trash_path": str(removal.trash_path),
+                        "original_path": str(removal.placement_path),
+                    }
+                    if removal.trash_path
+                    else {}
+                ),
                 "canonical_preserved": True,
             },
         )

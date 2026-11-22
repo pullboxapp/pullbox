@@ -165,6 +165,8 @@
                             <form action="/story-arcs/{{ story_arc.id }}/placements/{{ item.id }}/retry" method="post" data-testid="story-arc-placement-retry-{{ item.id }}">
                               <button type="submit" class="btn-secondary btn-sm">Retry</button>
                             </form>
+                          {% elif item.retry_trash %}
+                            <span class="text-xs text-pb-warning">Check the trash folder, then retry removal.</span>
                           {% else %}
                             <span class="text-xs text-pb-text-dim">Current</span>
                           {% endif %}
@@ -177,12 +179,13 @@
                               x-data="{}"
                             >
                               <input type="hidden" name="confirm_managed_artifact_removal" value="true">
+                              <input type="hidden" name="expected_trash_enabled" value="{{ 'true' if placement_trash_enabled else 'false' }}">
                               <button
                                 type="button"
                                 class="btn-secondary btn-sm text-pb-error"
-                                @click="pbConfirm({ title: 'Remove managed Story Arc artifact?', message: 'Only the Pullbox-managed Story Arc copy will be removed. The canonical library file will stay in place.', confirmLabel: 'Remove artifact', danger: true }).then((ok) => { if (ok) $el.form.requestSubmit() })"
+                                @click="pbConfirm({ title: 'Remove this arc file?', message: '{% if placement_trash_enabled %}The arc copy or link will go to Trash.{% else %}Trash is off. The arc copy or link will be permanently removed.{% endif %} The original library comic will stay in place.', confirmLabel: '{{ 'Move to Trash' if placement_trash_enabled else 'Remove arc file' }}', danger: true }).then((ok) => { if (ok) $el.form.requestSubmit() })"
                               >
-                                Remove managed copy
+                                {{ 'Retry removal' if item.retry_trash else 'Remove managed copy' }}
                               </button>
                             </form>
                           {% elif story_arc.active and item.can_remove and item.ownership == 'referenced' %}

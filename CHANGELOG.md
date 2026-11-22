@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   references. Managed placement removal now protects paths that have become
   library files, destinations no longer approved for writes, and import-owned
   placements needed for rollback.
+- Removing an individual managed Story Arc copy or link now honors the configured
+  trash folder. If Pullbox cannot verify the trash copy, it stops rather than
+  permanently deleting the arc file. The original library comic stays in place.
 - If a story arc or its membership changes while you read, you can stay on
   the same page and explicitly continue in series order. An old arc link
   can still open the issue in series order if its file is available.

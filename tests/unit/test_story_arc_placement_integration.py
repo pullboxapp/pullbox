@@ -1127,6 +1127,130 @@ async def test_managed_placement_can_be_removed_without_touching_canonical_file(
         assert membership.sync_eligible is True
 
 
+@pytest.mark.parametrize("mode", ["copy", "hardlink", "symlink"])
+@pytest.mark.parametrize("trash_available", [True, False])
+async def test_managed_arc_removal_honors_configured_trash(
+    db_factory: async_sessionmaker[AsyncSession], tmp_path: Path, mode: str, trash_available: bool
+) -> None:
+    from pullbox.ui.story_arc_presenters import _placement_state_view
+
+    arc_id, member_id, root_id, canonical, destination = await _seed_membership(
+        db_factory, tmp_path
+    )
+    trash = tmp_path / "trash"
+    if trash_available:
+        trash.mkdir()
+    os.utime(canonical, (10, 10))
+    original = canonical.stat()
+    service = StoryArcPlacementSyncService()
+    async with db_factory() as session:
+        session.add(SystemConfig(key="utility_trash_folder", value=str(trash), value_type="string"))
+        await session.commit()
+        await service.update_policy(
+            session,
+            arc_id,
+            expected_revision=1,
+            proposal=replace(
+                _copy_policy(root_id, destination),
+                mode=StoryArcPlacementPolicyMode(mode),
+                symlink_style=StoryArcSymlinkStyle.RELATIVE if mode == "symlink" else None,
+            ),
+        )
+        synced = await service.sync_membership(session, arc_id, member_id)
+        placement = synced.placement
+        assert placement is not None
+        path = Path(placement.placement_path)
+        link_text = os.readlink(path) if mode == "symlink" else None
+        with pytest.raises(StoryArcPlacementIntegrationError, match="Trash settings changed"):
+            await service.remove_placement(
+                session,
+                arc_id,
+                placement.id,
+                confirm_managed_artifact_removal=True,
+                expected_trash_enabled=False,
+            )
+        assert path.read_bytes() == b"canonical archive"
+        if not trash_available:
+            with pytest.raises(StoryArcPlacementIntegrationError, match="trash"):
+                await service.remove_placement(
+                    session, arc_id, placement.id, confirm_managed_artifact_removal=True
+                )
+            assert path.read_bytes() == b"canonical archive"
+            assert await session.get(StoryArcPlacement, placement.id) is not None
+            page = await service.list_placements(session, arc_id, limit=1, offset=0)
+            actions = _placement_state_view(page.items[0])
+            assert actions.can_remove and not actions.can_repair and not actions.can_retry
+            trash.mkdir()
+        await service.remove_placement(
+            session, arc_id, placement.id, confirm_managed_artifact_removal=True
+        )
+        backups = list(trash.rglob(path.name))
+        assert len(backups) == 1
+        backup = backups[0]
+        receipt = (
+            await session.get(IssueStoryArc, member_id, populate_existing=True)
+        ).last_materialization_result
+        assert receipt["trash_path"] == str(backup)
+        assert receipt["original_path"] == str(path)
+        if link_text is not None:
+            assert backup.is_symlink()
+            assert os.readlink(backup) == link_text
+        else:
+            assert backup.read_bytes() == b"canonical archive"
+            assert not backup.samefile(canonical)
+        assert backup.lstat().st_mtime_ns > original.st_mtime_ns
+        assert not os.path.lexists(path)
+    assert canonical.read_bytes() == b"canonical archive"
+    assert canonical.stat().st_ino == original.st_ino
+    assert canonical.stat().st_mtime_ns == original.st_mtime_ns
+
+
+@pytest.mark.parametrize("hazard", ["symlink_parent", "registered_root", "disk_full"])
+async def test_unusable_trash_never_falls_back_to_unlink(
+    db_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    hazard: str,
+) -> None:
+    import pullbox.services.story_arc_placement_service as filesystem
+
+    arc_id, member_id, root_id, canonical, destination = await _seed_membership(
+        db_factory, tmp_path
+    )
+    trash = tmp_path / "trash"
+    outside = tmp_path / "other-files"
+    trash.mkdir()
+    outside.mkdir()
+    service = StoryArcPlacementSyncService()
+    async with db_factory() as session:
+        session.add(SystemConfig(key="utility_trash_folder", value=str(trash), value_type="string"))
+        await session.commit()
+        await service.update_policy(
+            session, arc_id, expected_revision=1, proposal=_copy_policy(root_id, destination)
+        )
+        synced = await service.sync_membership(session, arc_id, member_id)
+        assert synced.placement is not None
+        path = Path(synced.placement.placement_path)
+        if hazard == "symlink_parent":
+            (trash / "Story Arcs").symlink_to(outside, target_is_directory=True)
+        elif hazard == "registered_root":
+            session.add(LibraryRoot(name="Other library", path=str(trash), enabled=True))
+            await session.commit()
+        else:
+
+            def full(*args: object, **kwargs: object) -> None:
+                raise OSError(28, "No space left on device")
+
+            monkeypatch.setattr(filesystem, "_publish_copy_at", full)
+        with pytest.raises(StoryArcPlacementIntegrationError, match="trash"):
+            await service.remove_placement(
+                session, arc_id, synced.placement.id, confirm_managed_artifact_removal=True
+            )
+        assert path.read_bytes() == canonical.read_bytes() == b"canonical archive"
+        assert await session.get(StoryArcPlacement, synced.placement.id) is not None
+        assert not list(outside.iterdir())
+
+
 @pytest.mark.parametrize(
     ("change", "expected_code"),
     [
@@ -1463,10 +1587,12 @@ async def test_changed_managed_placement_is_not_removed(
         assert await session.get(StoryArcPlacement, synced.placement.id) is not None
 
 
+@pytest.mark.parametrize("trash_state", ["off", "retained", "changed", "missing"])
 async def test_managed_removal_recovers_after_unlink_before_database_checkpoint(
     db_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    trash_state: str,
 ) -> None:
     import pullbox.services.story_arc_placement_integration as integration
 
@@ -1485,6 +1611,13 @@ async def test_managed_removal_recovers_after_unlink_before_database_checkpoint(
     assert synced.placement is not None
     target = Path(synced.placement.placement_path)
     checkpoint = integration._delete_removed_placement_checkpoint
+    trash = tmp_path / "trash"
+    if trash_state != "off":
+        trash.mkdir()
+        async with db_factory.begin() as session:
+            session.add(
+                SystemConfig(key="utility_trash_folder", value=str(trash), value_type="string")
+            )
 
     async def crash_after_unlink(*_args: object, **_kwargs: object) -> None:
         raise StoryArcPlacementIntegrationError(
@@ -1521,6 +1654,20 @@ async def test_managed_removal_recovers_after_unlink_before_database_checkpoint(
         "_delete_removed_placement_checkpoint",
         checkpoint,
     )
+    if trash_state in {"changed", "missing"}:
+        (backup,) = trash.rglob(target.name)
+        if trash_state == "changed":
+            backup.write_bytes(b"unrelated file")
+        else:
+            backup.unlink()
+        async with db_factory() as session:
+            with pytest.raises(StoryArcPlacementIntegrationError, match="trash"):
+                await service.remove_placement(
+                    session, arc_id, synced.placement.id, confirm_managed_artifact_removal=True
+                )
+            assert await session.get(StoryArcPlacement, synced.placement.id) is not None
+        assert canonical.read_bytes() == b"canonical archive"
+        return
     async with db_factory() as session:
         recovered = await service.remove_placement(
             session,
@@ -1528,7 +1675,11 @@ async def test_managed_removal_recovers_after_unlink_before_database_checkpoint(
             synced.placement.id,
             confirm_managed_artifact_removal=True,
         )
-    assert recovered.artifact_removed is False
+    assert recovered.artifact_removed is (trash_state == "retained")
+    if trash_state == "retained":
+        assert list(trash.rglob(target.name)) == [recovered.trash_path]
+        assert recovered.trash_path is not None
+        assert recovered.trash_path.read_bytes() == b"canonical archive"
     assert canonical.read_bytes() == b"canonical archive"
     async with db_factory() as session:
         assert await session.get(StoryArcPlacement, synced.placement.id) is None

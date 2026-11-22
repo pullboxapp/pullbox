@@ -12,6 +12,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from pullbox.models import Base
+from pullbox.models.config import SystemConfig
 from pullbox.models.issue import Issue
 from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
 from pullbox.models.series import Series
@@ -249,12 +250,21 @@ async def test_policy_preview_rejects_sibling_prefix_destination(
     }
 
 
+@pytest.mark.parametrize("trash_enabled", [False, True])
 async def test_sync_list_retry_and_repair_have_categorized_state(
     client: AsyncClient,
     db_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    trash_enabled: bool,
 ) -> None:
     arc_id, membership_id, root_id, canonical, destination = await _seed(db_factory, tmp_path)
+    trash = tmp_path / "trash"
+    if trash_enabled:
+        trash.mkdir()
+        async with db_factory.begin() as db:
+            await db.merge(
+                SystemConfig(key="utility_trash_folder", value=str(trash), value_type="string")
+            )
     update = await client.put(
         f"/api/v1/story-arcs/{arc_id}/placement-policy",
         json={"expected_revision": 1, **_policy_payload(root_id, destination)},
@@ -318,7 +328,12 @@ async def test_sync_list_retry_and_repair_have_categorized_state(
         params={"confirm_managed_artifact_removal": True},
     )
     assert removed.status_code == 200, removed.text
-    assert removed.json() == {
+    body = removed.json()
+    if trash_enabled:
+        retained = Path(body.pop("trash_path"))
+        assert retained.is_relative_to(trash)
+        assert retained.read_bytes() == canonical.read_bytes()
+    assert body == {
         "placement_id": placement["id"],
         "ownership": "managed",
         "artifact_removed": True,

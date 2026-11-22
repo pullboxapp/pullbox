@@ -279,6 +279,7 @@ class StoryArcPlacementStateView:
     can_retry: bool
     can_repair: bool
     can_remove: bool
+    retry_trash: bool
     safety_block_reason: str
 
 
@@ -1205,6 +1206,7 @@ def _placement_state_view(item: StoryArcPlacementView) -> StoryArcPlacementState
         and last_result.get("operation") == "remove"
         and last_result.get("error_category") in {"safety", "collision", "ownership"}
     )
+    retry_trash = removal_safety_blocked and last_result.get("error_code") == "trash_unavailable"
     return StoryArcPlacementStateView(
         id=item.id,
         membership_id=item.issue_story_arc_id,
@@ -1222,12 +1224,13 @@ def _placement_state_view(item: StoryArcPlacementView) -> StoryArcPlacementState
             and item.state.value in {"missing", "failed"}
             and not removal_safety_blocked
         ),
-        can_remove=not removal_safety_blocked,
+        can_remove=not removal_safety_blocked or retry_trash,
+        retry_trash=retry_trash,
         safety_block_reason=(
             "Pullbox blocked changes because this managed artifact no longer matches its "
             "recorded ownership evidence. Review the artifact manually; the canonical "
             "library file was not changed."
-            if removal_safety_blocked
+            if removal_safety_blocked and not retry_trash
             else ""
         ),
     )

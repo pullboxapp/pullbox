@@ -34,6 +34,7 @@ from pullbox.models.story_arc import (
     StoryArcLifecycle,
     StoryArcSourceKind,
 )
+from pullbox.services.issue_file_service import resolve_configured_utility_trash_dir
 from pullbox.services.reader_arc_bookmarks import load_arc_read_action
 from pullbox.services.story_arc_deletion import (
     delete_reviewed_arc,
@@ -133,6 +134,7 @@ _NOTICE_MESSAGES = {
     "placement-synchronized": "Story Arc placement synchronized.",
     "placement-retried": "Story Arc placement retry completed.",
     "placement-repaired": "Managed Story Arc placement repaired.",
+    "placement-trashed": "The arc copy or link is in Trash. The original library comic was kept.",
     "placement-managed-removed": (
         "Pullbox-managed Story Arc artifact removed. The canonical library file was preserved."
     ),
@@ -153,6 +155,8 @@ _ERROR_MESSAGES = {
     "not-found": "That story arc entry is no longer available.",
     "validation": "That change could not be saved. Review the fields and try again.",
     "placement": "Placement failed. Review the policy and placement state.",
+    "placement-trash": "Could not verify the arc file in Trash. Check the trash folder and retry.",
+    "placement-trash-changed": "Trash settings changed. Review the removal before confirming.",
     "placement-protect-library": "This arc path is also a registered library file. It was kept.",
     "placement-protect-import": (
         "Import rollback still tracks this placement. Its file and history were kept."
@@ -375,6 +379,8 @@ async def _render_story_arc_detail(
             else None
         ),
         placement_ui=placement_ui,
+        placement_trash_enabled=placement_ui is not None
+        and await resolve_configured_utility_trash_dir(session) is not None,
         placement_policy=placement_policy,
         pagination_base_url=f"/story-arcs/{story_arc_id}?{urlencode({'per_page': per_page})}",
         placement_pagination_base_url=(
@@ -856,6 +862,7 @@ async def story_arc_placement_remove(
     _user: AuthenticatedUser,
     session: DbSession,
     confirm_managed_artifact_removal: bool = Form(False),
+    expected_trash_enabled: bool | None = Form(None),
 ) -> Response:
     """Remove managed artifacts or forget references under ownership safeguards."""
     try:
@@ -864,10 +871,13 @@ async def story_arc_placement_remove(
             story_arc_id,
             placement_id,
             confirm_managed_artifact_removal=confirm_managed_artifact_removal,
+            expected_trash_enabled=expected_trash_enabled,
         )
     except StoryArcPlacementIntegrationError as exc:
         await session.rollback()
         error = {
+            "trash_policy_changed": "placement-trash-changed",
+            "trash_unavailable": "placement-trash",
             "placement_registered_as_library_file": "placement-protect-library",
             "placement_import_protected": "placement-protect-import",
             "placement_root_changed": "placement-protect-root",
@@ -881,6 +891,8 @@ async def story_arc_placement_remove(
         if removed.referenced_artifact_preserved
         else "placement-managed-removed"
     )
+    if removed.trash_path is not None:
+        notice = "placement-trashed"
     return _redirect(request, _detail_url(story_arc_id, notice=notice))
 
 

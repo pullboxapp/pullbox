@@ -17,6 +17,7 @@ from sqlalchemy import event, select, text
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from pullbox.config import get_settings
+from pullbox.models.config import SystemConfig
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
 from pullbox.models.publisher import Publisher
@@ -1655,11 +1656,13 @@ class TestStoryArcManagementUI:
         assert str(ids["destination"]) in detail.text
         assert "Defaults for new arcs" in detail.text
 
+    @pytest.mark.parametrize("trash_enabled", [True, False])
     async def test_managed_placement_actions_keep_working_without_diagnostic_cards(
         self,
         authenticated_client: AsyncClient,
         sec_db: async_sessionmaker[AsyncSession],
         tmp_path: Path,
+        trash_enabled: bool,
     ) -> None:
         ids = await _seed_placement_arc(sec_db, tmp_path)
         placement_service = StoryArcPlacementSyncService()
@@ -1751,6 +1754,46 @@ class TestStoryArcManagementUI:
         assert unconfirmed.headers["location"].endswith("?error=placement")
         assert target.exists()
 
+        stale = await authenticated_client.post(
+            f"/story-arcs/{ids['arc']}/placements/{placement_id}/remove",
+            data={"confirm_managed_artifact_removal": "true", "expected_trash_enabled": "true"},
+            headers=_csrf_header_for(authenticated_client),
+            follow_redirects=False,
+        )
+        assert stale.headers["location"].endswith("?error=placement-trash-changed")
+        assert target.exists()
+
+        trash = tmp_path / "trash"
+        if trash_enabled:
+            async with sec_db.begin() as session:
+                await session.merge(
+                    SystemConfig(key="utility_trash_folder", value=str(trash), value_type="string")
+                )
+            unavailable = await authenticated_client.post(
+                f"/story-arcs/{ids['arc']}/placements/{placement_id}/remove",
+                data={"confirm_managed_artifact_removal": "true", "expected_trash_enabled": "true"},
+                headers=_csrf_header_for(authenticated_client),
+                follow_redirects=False,
+            )
+            assert unavailable.headers["location"].endswith("?error=placement-trash")
+            assert target.exists()
+            trash.mkdir()
+        preview = await authenticated_client.post(
+            f"/story-arcs/{ids['arc']}/placement-policy/preview",
+            data={
+                "mode": "copy",
+                "expected_revision": 1,
+                "target_library_root_id": ids["root"],
+                "destination_root": str(ids["destination"]),
+            },
+            headers=_csrf_header_for(authenticated_client),
+        )
+        assert preview.status_code == 200
+        if trash_enabled:
+            assert "The arc copy or link will go to Trash." in preview.text
+            assert "Retry removal" in preview.text
+        else:
+            assert "Trash is off. The arc copy or link will be permanently removed." in preview.text
         removed = await authenticated_client.post(
             f"/story-arcs/{ids['arc']}/placements/{placement_id}/remove",
             data={"confirm_managed_artifact_removal": "true"},
@@ -1758,7 +1801,11 @@ class TestStoryArcManagementUI:
             follow_redirects=False,
         )
         assert removed.status_code == 303
-        assert removed.headers["location"].endswith("?notice=placement-managed-removed")
+        if trash_enabled:
+            assert removed.headers["location"].endswith("?notice=placement-trashed")
+            assert next(trash.rglob(target.name)).read_bytes() == b"canonical story arc issue"
+        else:
+            assert removed.headers["location"].endswith("?notice=placement-managed-removed")
         assert not target.exists()
         assert Path(str(ids["canonical"])).read_bytes() == b"canonical story arc issue"
         async with sec_db() as session:

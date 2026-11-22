@@ -14,7 +14,7 @@ import hashlib
 import os
 import secrets
 import stat
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol
@@ -33,6 +33,7 @@ from pullbox.services.story_arc_placement_preview import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
+    from uuid import UUID
 
     from pullbox.core.story_arc_naming import StoryArcNamingValues
 
@@ -293,6 +294,17 @@ class StoryArcPlacementRemovalResult:
 
     placement_path: Path
     removed: bool
+    trash_path: Path | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StoryArcPlacementTrash:
+    root: Path
+    receipt: UUID
+    resume: bool
+
+    def destination(self, source: Path) -> Path:
+        return self.root / "Story Arcs" / self.receipt.hex / source.name
 
 
 @dataclass(frozen=True, slots=True)
@@ -1176,6 +1188,7 @@ def remove_managed_story_arc_placement(
     destination_root: Path,
     canonical_path: Path | None,
     journal: StoryArcPlacementJournal | None = None,
+    trash: StoryArcPlacementTrash | None = None,
 ) -> StoryArcPlacementRemovalResult:
     """Remove only an unchanged, action-owned managed placement artifact."""
     mode, _ownership, _symlink_style = _require_managed_ownership(evidence)
@@ -1187,12 +1200,22 @@ def remove_managed_story_arc_placement(
 
     prepared: StoryArcPlacementJournalEvent | None = None
     try:
-        with _open_secure_parent_directory(
-            root_guard,
-            target_path.parent,
-            create=False,
-        ) as secure_parent:
+        with (
+            ExitStack() as stack,
+            _open_secure_parent_directory(
+                root_guard,
+                target_path.parent,
+                create=False,
+            ) as secure_parent,
+        ):
             if not _entry_exists_at(secure_parent.parent_fd, target_path.name):
+                if trash is not None and trash.resume:
+                    stack.enter_context(
+                        _verified_trash_copy(evidence, trash, canonical_path, missing=True)
+                    )
+                    return StoryArcPlacementRemovalResult(
+                        target_path, True, trash.destination(target_path)
+                    )
                 return StoryArcPlacementRemovalResult(target_path, removed=False)
             actual_fingerprint = _fingerprint_target_at(
                 secure_parent,
@@ -1220,6 +1243,11 @@ def remove_managed_story_arc_placement(
                 target_fingerprint=dict(evidence.target_fingerprint),
             )
             _record_journal(journal, prepared)
+            backup = (
+                stack.enter_context(_verified_trash_copy(evidence, trash, canonical_path))
+                if trash
+                else None
+            )
             _assert_parent_path_stable(secure_parent)
             if (
                 not _entry_exists_at(secure_parent.parent_fd, target_path.name)
@@ -1234,6 +1262,16 @@ def remove_managed_story_arc_placement(
                     "fingerprint_mismatch",
                     "Managed story-arc placement changed before removal",
                 )
+            if backup is not None:
+                parent, identity = backup
+                _assert_parent_path_stable(parent)
+                if (
+                    _publication_stat_identity(_entry_lstat_at(parent.parent_fd, target_path.name))
+                    != identity
+                ):
+                    raise StoryArcPlacementSafetyError(
+                        "trash_unavailable", "The trash copy changed before removal."
+                    )
             os.unlink(target_path.name, dir_fd=secure_parent.parent_fd)
             _fsync_directory(secure_parent.parent_fd)
             _assert_parent_path_stable(secure_parent)
@@ -1258,7 +1296,76 @@ def remove_managed_story_arc_placement(
             target_fingerprint=dict(evidence.target_fingerprint),
         ),
     )
-    return StoryArcPlacementRemovalResult(target_path, removed=True)
+    return StoryArcPlacementRemovalResult(
+        target_path, True, trash.destination(target_path) if trash else None
+    )
+
+
+@contextmanager
+def _verified_trash_copy(
+    evidence: ManagedStoryArcPlacementEvidence,
+    trash: StoryArcPlacementTrash,
+    canonical_path: Path | None,
+    *,
+    missing: bool = False,
+) -> Iterator[tuple[_SecureParentDirectory, tuple[int, int, int, int, int, int]]]:
+    """Back up the directory entry before unlink, never its symlink target or shared inode."""
+    source, root = evidence.placement_path, trash.root
+    destination = trash.destination(source)
+    fingerprint = evidence.target_fingerprint
+    link = fingerprint.get("link_target") if fingerprint.get("kind") == "symlink" else None
+    with ExitStack() as stack:
+        try:
+            if (
+                root == Path(root.anchor)
+                or not root.is_absolute()
+                or root.resolve(strict=True) != root
+                or source.is_relative_to(root)
+                or (canonical_path is not None and canonical_path.resolve().is_relative_to(root))
+            ):
+                raise ValueError("unsafe trash location")
+            guard = _validated_root(root)
+            parent = stack.enter_context(
+                _open_secure_parent_directory(guard, destination.parent, create=not missing)
+            )
+            _assert_parent_path_stable(parent)
+            if not _entry_exists_at(parent.parent_fd, source.name):
+                if missing:
+                    raise ValueError("missing retained entry")
+                if isinstance(link, str):
+                    os.symlink(link, source.name, dir_fd=parent.parent_fd)
+                else:
+                    _publish_copy_at(
+                        source, source.name, parent, fingerprint, None, preserve_times=False
+                    )
+                _fsync_directory(parent.parent_fd)
+            elif not trash.resume:
+                raise ValueError("occupied trash destination")
+            before = _publication_stat_identity(_entry_lstat_at(parent.parent_fd, source.name))
+            if isinstance(link, str):
+                valid = (
+                    stat.S_ISLNK(before[2])
+                    and os.readlink(source.name, dir_fd=parent.parent_fd) == link
+                )
+            else:
+                valid = (
+                    stat.S_ISREG(before[2])
+                    and before[:2] != (fingerprint.get("device"), fingerprint.get("inode"))
+                    and _entry_lstat_at(parent.parent_fd, source.name).st_nlink == 1
+                    and _fingerprint_regular_at(parent.parent_fd, source.name)["sha256"]
+                    == fingerprint.get("sha256")
+                )
+            if not valid or before != _publication_stat_identity(
+                _entry_lstat_at(parent.parent_fd, source.name)
+            ):
+                raise ValueError("changed trash entry")
+            _assert_parent_path_stable(parent)
+        except (ValueError, OSError, StoryArcPlacementError) as exc:
+            raise StoryArcPlacementSafetyError(
+                "trash_unavailable",
+                "Cannot verify the arc file in trash. Check the trash folder and retry.",
+            ) from exc
+        yield parent, before
 
 
 def _coerce_mode(value: StoryArcPlacementMode | str) -> StoryArcPlacementMode:
@@ -1875,6 +1982,8 @@ def _publish_copy_at(
     parent: _SecureParentDirectory,
     source_fingerprint: Fingerprint,
     cancellation_requested: CancellationRequested | None,
+    *,
+    preserve_times: bool = True,
 ) -> _PublishedTarget:
     source_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -1910,10 +2019,8 @@ def _publish_copy_at(
                 digest.update(chunk)
             target.flush()
         os.fchmod(temporary_fd, stat.S_IMODE(source_stat.st_mode))
-        os.utime(
-            temporary_fd,
-            ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns),
-        )
+        if preserve_times:
+            os.utime(temporary_fd, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
         os.fsync(temporary_fd)
         source_after = os.fstat(source_fd)
         temporary_stat = os.fstat(temporary_fd)

@@ -91,6 +91,7 @@ def _removal_response(
         canonical_preserved=result.canonical_preserved,
         referenced_artifact_preserved=result.referenced_artifact_preserved,
         automatic_sync_disabled=result.automatic_sync_disabled,
+        trash_path=str(result.trash_path) if result.trash_path else None,
     )
 
 
@@ -383,6 +384,7 @@ async def repair_story_arc_placement(
 @router.delete(
     "/{story_arc_id}/placements/{placement_id}",
     response_model=StoryArcPlacementRemovalResponse,
+    response_model_exclude_none=True,
 )
 async def remove_story_arc_placement(
     story_arc_id: int,

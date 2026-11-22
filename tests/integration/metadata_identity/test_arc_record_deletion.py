@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import func, select
 
 from pullbox.models.audit_log import AuditEventType, AuditLog
+from pullbox.models.config import SystemConfig
 from pullbox.models.import_job import ImportJob, ImportJobStatus, ImportSourceType
 from pullbox.models.issue import Issue
 from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot
@@ -34,8 +35,9 @@ from tests.fixtures.metadata_identity_persistence import IdentityProbeDatabase
 
 
 @pytest.mark.parametrize("mode", ["copy", "hardlink", "symlink"])
+@pytest.mark.parametrize("trash_enabled", [False, True])
 async def test_removing_a_reviewed_arc_representation_preserves_canonical_entry(
-    identity_probe_db: IdentityProbeDatabase, tmp_path: Path, mode: str
+    identity_probe_db: IdentityProbeDatabase, tmp_path: Path, mode: str, trash_enabled: bool
 ) -> None:
     _, factory, _ = identity_probe_db
     canonical = tmp_path / "Comic.cbz"
@@ -44,6 +46,10 @@ async def test_removing_a_reviewed_arc_representation_preserves_canonical_entry(
     dest = tmp_path / "Arcs"
     dest.mkdir()
     async with factory.begin() as db:
+        if trash_enabled:
+            trash = tmp_path / "trash"
+            trash.mkdir()
+            db.add(SystemConfig(key="utility_trash_folder", value=str(trash), value_type="string"))
         root = LibraryRoot(name="Library", path=str(tmp_path), enabled=True)
         series = Series(title="Comic", sort_title="comic", library_root=root)
         issue = Issue(series=series, issue_number=1)
@@ -100,6 +106,15 @@ async def test_removing_a_reviewed_arc_representation_preserves_canonical_entry(
             db, arc_id, result.placement.id, confirm_managed_artifact_removal=True
         )
         assert removed.artifact_removed and removed.canonical_preserved
+        if trash_enabled:
+            assert removed.trash_path is not None and removed.trash_path.is_relative_to(trash)
+            if mode == "symlink":
+                assert removed.trash_path.is_symlink()
+            else:
+                assert removed.trash_path.read_bytes() == canonical.read_bytes()
+                assert not removed.trash_path.samefile(canonical)
+        else:
+            assert removed.trash_path is None
         assert not path.exists() and not path.is_symlink()
         assert await db.get(LibraryFile, fid)
         assert (await review_arc_placement_paths(db, arc_id, 0))["items"] == []
