@@ -111,7 +111,7 @@ COPY alembic/ alembic/
 COPY scripts/ scripts/
 
 RUN python -m pip install --upgrade pip wheel \
-    && python -m pip install --no-cache-dir -e ".[dev]"
+    && python -m pip install --no-cache-dir -e ".[dev,postgres]"
 
 EXPOSE 8585
 

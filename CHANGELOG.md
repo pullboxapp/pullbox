@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Before a PostgreSQL migration, you can now [check the destination](docs/sqlite-postgresql-migration.md#check-the-destination)
+  without changing it. Pullbox explains when a database is occupied, shared, or
+  unsuitable. Neither the source nor the target command switches your live library.
+
 - Check a SQLite backup before planning a PostgreSQL migration with
   [migration-preflight](docs/sqlite-postgresql-migration.md). It reports table
   counts, broken relationships, and unfinished work without changing either database.

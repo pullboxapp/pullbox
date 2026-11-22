@@ -14,6 +14,7 @@ import asyncio
 import getpass
 import json
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 from sqlalchemy import select
@@ -140,6 +141,16 @@ def build_parser() -> argparse.ArgumentParser:
     preflight.add_argument(
         "--json", action="store_true", help="Print the full table inventory and blockers as JSON"
     )
+    target = subparsers.add_parser(
+        "migration-check-target", help="Check an explicitly selected empty PostgreSQL database"
+    )
+    target.add_argument(
+        "--url-stdin",
+        required=True,
+        action="store_true",
+        help="Read the dedicated target URL from standard input, never the app configuration",
+    )
+    target.add_argument("--json", action="store_true", help="Print a redacted target report")
 
     # reset-password
     rp = subparsers.add_parser(
@@ -210,9 +221,29 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.command == "migration-preflight":
-        from dataclasses import asdict
+    if args.command == "migration-check-target":
+        from pullbox.services.migration_target_preflight import inspect_target
 
+        if sys.stdin.isatty():
+            raw = getpass.getpass("PostgreSQL target URL (hidden): ")
+        else:
+            raw = sys.stdin.readline(4098).rstrip("\r\n")
+        target = asyncio.run(inspect_target(raw))
+        if args.json:
+            print(json.dumps(asdict(target), sort_keys=True))
+        else:
+            print(
+                "PostgreSQL target: "
+                + ("checks passed" if target.target_checks_passed else "blocked")
+            )
+            if target.server_major is not None:
+                print(f"Server major: {target.server_major}")
+            for reason in target.blockers.values():
+                print(f"- {reason}")
+            print(target.next_step)
+        if not target.target_checks_passed:
+            sys.exit(1)
+    elif args.command == "migration-preflight":
         from pullbox.services.database_migration_preflight import inspect_migration_backup
 
         report = inspect_migration_backup(args.backup, configured_url=get_settings().db_url)

@@ -107,7 +107,7 @@ COPY src/ src/
 
 RUN python -m venv "${VIRTUAL_ENV}" \
     && "${VIRTUAL_ENV}/bin/python" -m pip install --upgrade pip wheel \
-    && "${VIRTUAL_ENV}/bin/python" -m pip install --no-cache-dir --no-compile ".[prod]" \
+    && "${VIRTUAL_ENV}/bin/python" -m pip install --no-cache-dir --no-compile ".[prod,postgres]" \
     && find "${VIRTUAL_ENV}" -type d -name __pycache__ -prune -exec rm -rf {} +
 
 RUN set -eu; \
