@@ -472,6 +472,117 @@ def test_reader_rechecks_damaged_chapter_before_an_explicit_jump(
     assert not damaged.exists()
 
 
+@pytest.mark.parametrize("change", ["arc", "membership"])
+def test_lost_arc_context_keeps_page_and_explicitly_recovers_series_order(
+    authed_page: Page,
+    seeded_server: str,
+    seeded_reader_state_guard: None,
+    arc_reader: int,
+    change: str,
+) -> None:
+    page = authed_page
+    page.goto(f"{seeded_server}/story-arcs/{arc_reader}")
+    with page.expect_response(
+        lambda r: r.url.endswith("/1/progress") and r.request.method == "PUT"
+    ):
+        page.get_by_role("link", name="Read story arc", exact=True).click()
+    stale_launch = page.url + "&read=1"
+    issue = IssueDetailPage(page, seeded_server)
+    expect(issue.reader_status).to_have_text("Page 2 of 3")
+    page.get_by_test_id("comic-reader-fit-width").click()
+
+    async def remove() -> None:
+        async with get_session_factory().begin() as session:
+            if change == "arc":
+                await session.execute(delete(StoryArc).where(StoryArc.id == arc_reader))
+            else:
+                await session.execute(
+                    delete(IssueStoryArc).where(
+                        IssueStoryArc.story_arc_id == arc_reader, IssueStoryArc.issue_id == 1
+                    )
+                )
+
+    _run_async_blocking(remove())
+    if change == "arc":
+        with page.expect_response(
+            lambda r: r.url.endswith("/1/progress") and r.request.method == "PUT"
+        ) as saved:
+            page.get_by_test_id("comic-reader-previous").click()
+        assert saved.value.json()["arc_bookmark_saved"] is False
+    else:
+        page.get_by_test_id("comic-reader-next-issue").click()
+    expected = "Page 1 of 3" if change == "arc" else "Page 2 of 3"
+    current = issue.reader_page.get_attribute("src")
+    recovery = page.get_by_role("button", name="Continue in series order", exact=True)
+    expect(recovery).to_be_visible()
+    expect(page.get_by_test_id("comic-reader-next-issue")).to_be_disabled()
+    if change == "arc":
+        expect(
+            issue.reader_dialog.get_by_role("link", name="Back to story arc")
+        ).not_to_be_visible()
+    expect(issue.reader_status).to_have_text(expected)
+    expect(page).to_have_url(re.compile(r"source=story-arc"))
+    recovery.press("Enter")
+    expect(recovery).not_to_be_visible()
+    expect(page.get_by_test_id("comic-reader-arc-position")).not_to_be_visible()
+    expect(issue.reader_page).to_have_attribute("src", current)
+    expect(issue.reader_page).to_have_attribute("data-fit-mode", "width")
+    expect(issue.reader_status).to_have_text(expected)
+    expect(page.get_by_test_id("comic-reader-viewport")).to_be_focused()
+    issue.close_reader()
+    expect(page.get_by_test_id("issue-detail-back-link")).to_have_text("Back to series")
+
+    page.goto(stale_launch)
+    error = page.get_by_test_id("comic-reader-error")
+    expect(error).to_be_visible()
+    error.get_by_role("link", name="Read in series order").click()
+    expect(issue.reader_status).to_have_text(expected)
+    expect(page.get_by_test_id("comic-reader-arc-position")).not_to_be_visible()
+
+
+def test_reader_does_not_return_to_an_arc_deleted_after_the_last_save(
+    authed_page: Page,
+    seeded_server: str,
+    seeded_reader_state_guard: None,
+    arc_reader: int,
+) -> None:
+    page = authed_page
+    page.goto(f"{seeded_server}/story-arcs/{arc_reader}")
+    page.get_by_role("link", name="Read story arc", exact=True).click()
+    with page.expect_response(
+        lambda r: (
+            r.request.method == "PUT"
+            and r.url.endswith("/progress")
+            and not r.url.endswith("/1/progress")
+        )
+    ) as saved:
+        page.get_by_test_id("comic-reader-next-issue").click()
+    assert saved.value.json()["arc_bookmark_saved"] is True
+    chapter_id = int(saved.value.url.split("/")[-2])
+    back = page.get_by_role("dialog").get_by_role("link", name="Back to story arc")
+    expect(back).to_be_visible()
+
+    async def remove() -> None:
+        async with get_session_factory().begin() as session:
+            await session.execute(delete(StoryArc).where(StoryArc.id == arc_reader))
+
+    _run_async_blocking(remove())
+    arc_detail = f"**/story-arcs/{arc_reader}*"
+    page.route(arc_detail, lambda route: route.fulfill(status=503))
+    back.click()
+    expect(page.get_by_test_id("comic-reader-switch-error")).to_contain_text("Could not check")
+    expect(page.get_by_role("button", name="Continue in series order")).not_to_be_visible()
+    expect(back).to_be_visible()
+    page.unroute(arc_detail)
+    back.click()
+    expect(page.get_by_role("button", name="Continue in series order")).to_be_visible()
+    expect(back).not_to_be_visible()
+    expect(page.get_by_test_id("comic-reader-page-status")).to_have_text("Page 1 of 3")
+    page.get_by_test_id("comic-reader-close").click()
+    expect(page).to_have_url(f"{seeded_server}/issues/{chapter_id}")
+    expect(page.get_by_test_id("issue-detail-back-link")).to_have_text("Back to series")
+
+
 def test_read_in_arc_order_then_open_independently(
     authed_page: Page, seeded_server: str, seeded_reader_state_guard: None, arc_reader: int
 ) -> None:

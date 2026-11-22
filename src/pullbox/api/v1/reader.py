@@ -255,26 +255,35 @@ async def _validated_arc(
     after: int | None,
     before: int | None,
     across_gap_from_issue: int | None,
+    from_issue: int | None,
 ) -> ArcReaderOrder:
     arc = await load_arc_reader_order(session, arc_id, issue_id, entry_id)
     if arc is None:
         raise HTTPException(
             409,
-            "This issue is no longer a confirmed entry in this story arc. "
-            "Reopen the story arc to see its current reading order.",
+            {
+                "code": "arc_entry_unavailable",
+                "message": "This chapter is no longer a confirmed entry in this story arc.",
+            },
         )
     if boundary := after or before:
         neighbor = arc.previous if after else arc.next
         if across_gap_from_issue is not None:
             # A chapter becoming readable between the two invalidates the old jump.
             neighbor = arc.previous_available if after else arc.next_available
+        origin = across_gap_from_issue or from_issue
         if (
-            neighbor is None
+            not origin
+            or not neighbor
             or neighbor.entry_id != boundary
-            or (across_gap_from_issue is not None and neighbor.issue_id != across_gap_from_issue)
+            or neighbor.issue_id != origin
         ):
             raise HTTPException(
-                409, "The arc reading order changed. Reopen the story arc to continue."
+                409,
+                {
+                    "code": "arc_order_changed",
+                    "message": "The arc reading order changed. Choose a chapter from the arc.",
+                },
             )
     return arc
 
@@ -289,6 +298,7 @@ async def reader_manifest(
     after_entry: Annotated[int | None, Query(ge=1)] = None,
     before_entry: Annotated[int | None, Query(ge=1)] = None,
     across_gap_from_issue: Annotated[int | None, Query(ge=1)] = None,
+    from_issue: Annotated[int | None, Query(ge=1)] = None,
     reading_series_id: Annotated[int | None, Query(ge=1)] = None,
 ) -> JSONResponse:
     """Return a side-effect-free reader manifest after closing the DB session."""
@@ -298,9 +308,11 @@ async def reader_manifest(
     ):
         raise HTTPException(422, "Invalid story arc navigation.")
     if across_gap_from_issue is not None and (
-        entry_id is None or not (after_entry or before_entry)
+        from_issue is not None or entry_id is None or not (after_entry or before_entry)
     ):
         raise HTTPException(422, "Invalid story arc gap navigation.")
+    if from_issue is not None and (entry_id is None or not (after_entry or before_entry)):
+        raise HTTPException(422, "Invalid story arc navigation.")
     factory = get_request_session_factory(request)
     directed = bool(after_entry or before_entry)
 
@@ -329,12 +341,15 @@ async def reader_manifest(
                 after_entry,
                 before_entry,
                 across_gap_from_issue,
+                from_issue,
             )
         neighbor = arc.next if after_entry else arc.previous
         boundary = f"{'after' if after_entry else 'before'}_entry={arc.entry_id}"
         if neighbor and neighbor.gap:
             neighbor = arc.next_available if after_entry else arc.previous_available
             boundary += f"&across_gap_from_issue={issue_id}"
+        else:
+            boundary += f"&from_issue={issue_id}"
         target = _arc_adjacent_response(neighbor, story_arc_id, boundary)
         raise HTTPException(
             _ERROR_STATUS[exc.code],
@@ -374,6 +389,7 @@ async def reader_manifest(
                 after_entry,
                 before_entry,
                 across_gap_from_issue,
+                from_issue,
             )
             arc_context = ReaderStoryArcResponse(
                 id=story_arc_id,
@@ -396,10 +412,10 @@ async def reader_manifest(
             )
             detail_url += f"?source=story-arc&story_arc_id={story_arc_id}&entry_id={arc.entry_id}"
             previous = _arc_adjacent_response(
-                arc.previous, story_arc_id, f"before_entry={arc.entry_id}"
+                arc.previous, story_arc_id, f"before_entry={arc.entry_id}&from_issue={issue_id}"
             )
             following = _arc_adjacent_response(
-                arc.next, story_arc_id, f"after_entry={arc.entry_id}"
+                arc.next, story_arc_id, f"after_entry={arc.entry_id}&from_issue={issue_id}"
             )
         else:
             adjacent = await load_adjacent_readable_issues(

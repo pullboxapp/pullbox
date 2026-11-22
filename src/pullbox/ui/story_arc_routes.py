@@ -620,6 +620,18 @@ async def story_arc_create(
     return _redirect(request, _detail_url(story_arc_id, notice="created"))
 
 
+@router.head("/story-arcs/{story_arc_id}", include_in_schema=False)
+async def check_story_arc_return(
+    story_arc_id: int, _user: AuthenticatedUser, session: DbSession
+) -> Response:
+    """Check a reader return link without loading files, members, or their counts."""
+    exists = await session.scalar(select(StoryArc.id).where(StoryArc.id == story_arc_id))
+    return Response(
+        status_code=204 if exists is not None else 404,
+        headers={"Cache-Control": "private, no-store"},
+    )
+
+
 @router.get("/story-arcs/{story_arc_id}", response_class=HTMLResponse, include_in_schema=False)
 async def story_arc_detail(
     story_arc_id: int,

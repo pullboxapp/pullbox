@@ -596,15 +596,30 @@ async def test_arc_manifest_follows_saved_cross_series_order_without_skipping_ga
     assert forward["previous_issue"]["issue_id"] == b
     assert forward["next_issue"] is None and forward["story_arc"]["next_gap"] is None
     assert f"story_arc_id={arc_id}" in forward["issue_detail_url"]
+    # Reassign the originating membership without moving it. A stale browser
+    # must not treat a different comic at the same entry as the one on screen.
+    async with sec_db.begin() as session:
+        origin = await session.get(IssueStoryArc, a_entry)
+        assert origin is not None
+        origin.issue_id = other
+    wrong_origin = await authenticated_client.get(forward["previous_issue"]["manifest_url"])
+    assert wrong_origin.status_code == 409
+    assert wrong_origin.json()["detail"]["code"] == "arc_order_changed"
+    async with sec_db.begin() as session:
+        origin = await session.get(IssueStoryArc, a_entry)
+        assert origin is not None
+        origin.issue_id = a
     for invalid in (f"story_arc_id={arc_id}&entry_id={a_entry}", "story_arc_id=999999"):
-        assert (await authenticated_client.get(f"{url}?{invalid}")).status_code == 409
+        missing = await authenticated_client.get(f"{url}?{invalid}")
+        assert missing.status_code == 409
+        assert missing.json()["detail"]["code"] == "arc_entry_unavailable"
     async with sec_db.begin() as session:
         chapter = await session.get(IssueStoryArc, a_entry)
         assert chapter
         chapter.sequence_number = 1
     stale_next = await authenticated_client.get(data["next_issue"]["manifest_url"])
     assert stale_next.status_code == 409
-    assert "reading order changed" in stale_next.json()["detail"]
+    assert "reading order changed" in stale_next.json()["detail"]["message"]
     # Reordering put the unresolved chapter between A and B. Ordinary navigation
     # must remain blocked even when a distinct, explicitly authorized jump exists.
     a_url = f"/api/v1/reader/issues/{a}/manifest?story_arc_id={arc_id}&entry_id={a_entry}"
@@ -683,8 +698,12 @@ async def test_damaged_chapter_offers_only_a_current_directed_arc_neighbor(
     sec_app.state.reader_content_service = service
     url = f"/api/v1/reader/issues/{b}/manifest"
     context = f"{url}?story_arc_id={arc.id}&entry_id={entries[1].id}"
-    forward = f"{context}&after_entry={entries[0].id}"
-    backwards = f"{context}&before_entry={entries[2].id}"
+    forward = f"{context}&after_entry={entries[0].id}&from_issue={a}"
+    backwards = f"{context}&before_entry={entries[2].id}&from_issue={c}"
+    # Links from an older tab that lack the origin issue must fail closed.
+    assert (
+        await authenticated_client.get(f"{context}&after_entry={entries[0].id}")
+    ).status_code == 409
     get = authenticated_client.get
     files[1].unlink()
     assert "arc_continuation" not in (await get(url)).json()["detail"]

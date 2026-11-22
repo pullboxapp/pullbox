@@ -125,6 +125,29 @@ async def test_reorder_saves_once_without_confirmation(
         assert arc is not None and arc.revision == revision + 1
 
 
+async def test_return_link_checks_existence_privately_without_rendering_the_arc(
+    authenticated_client: AsyncClient,
+    unauthenticated_client: AsyncClient,
+    sec_db: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ids = await _seed_detail_arc(sec_db)
+    render = AsyncMock(side_effect=AssertionError("Checking a link must not load its issue list"))
+    monkeypatch.setattr(story_arc_routes, "_render_story_arc_detail", render)
+    url = f"/story-arcs/{ids['arc']}"
+    denied = await unauthenticated_client.head(url, follow_redirects=False)
+    assert denied.status_code in {401, 302, 303, 307}
+    async with sec_db.begin() as session:
+        arc = await session.get(StoryArc, ids["arc"])
+        assert arc
+        arc.lifecycle = StoryArcLifecycle.ARCHIVED
+    available = await authenticated_client.head(url)
+    assert available.status_code == 204 and not available.content
+    assert "no-store" in available.headers["cache-control"]
+    assert (await authenticated_client.head("/story-arcs/999999")).status_code == 404
+    render.assert_not_awaited()
+
+
 async def test_detail_does_not_inspect_placement_files_for_removed_cards(
     authenticated_client: AsyncClient,
     sec_db: async_sessionmaker[AsyncSession],

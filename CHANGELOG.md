@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- If a story arc or its membership changes while you read, you can stay on
+  the same page and explicitly continue in series order. An old arc link
+  can still open the issue in series order if its file is available.
 - If a story arc chapter is missing on disk, damaged, or blocked by the reader's
   safety limits, you can keep your page and choose the next or previous available
   chapter. Pullbox rechecks the file and reading order first so you don't pass

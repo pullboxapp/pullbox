@@ -18341,6 +18341,10 @@ function readerMixin(config) {
       .then(function (data) {
         var detail = data && data.detail;
         var error = new Error(typeof detail === "string" ? detail : (detail && detail.message) || fallback);
+        if (response.status === 409 && detail &&
+            (detail.code === "arc_entry_unavailable" || detail.code === "arc_order_changed")) {
+          error.arcProblem = detail.code;
+        }
         if (detail && Object.prototype.hasOwnProperty.call(detail, "arc_continuation")) {
           error.arcContinuation = detail.arc_continuation;
         }
@@ -18363,6 +18367,7 @@ function readerMixin(config) {
     readerIssueStatusMessage: "",
     readerIssueSwitchError: "",
     readerArcRecovery: null,
+    readerArcProblem: "",
     readerOrderChanged: false,
     readerOriginDetail: "",
     readerOriginLocation: "",
@@ -18481,10 +18486,12 @@ function readerMixin(config) {
           return self.activateReaderManifest(manifest, false);
         })
         .catch(function (error) {
-          if (error && error.name === "AbortError") return;
+          if (!self.readerOpen || generation !== self.readerIssueGeneration ||
+              (error && error.name === "AbortError")) return;
           self.readerLoading = false;
           self.readerPageLoading = false;
           self.readerFatalError = true;
+          self.readerArcProblem = (error && error.arcProblem) || "";
           self.readerErrorMessage =
             (error && error.message) || "The comic could not be prepared.";
           self.showReaderControls();
@@ -18522,6 +18529,7 @@ function readerMixin(config) {
       this.readerIssueStatusMessage = "";
       this.readerIssueSwitchError = "";
       this.readerArcRecovery = null;
+      this.readerArcProblem = "";
       this.readerCompletionVisible = false;
       this.readerCompletionUpdating = false;
       this.readerPageIndex = 0;
@@ -18604,6 +18612,10 @@ function readerMixin(config) {
     },
 
     finishReaderClose: function () {
+      if (this.readerArcProblem && (this.readerActiveIssueId || cfg.issueId)) {
+        window.location.replace("/issues/" + Number(this.readerActiveIssueId || cfg.issueId));
+        return;
+      }
       if (this.readerOrderChanged) {
         if (this.readerManifest && this.readerOriginDetail &&
             this.readerOriginDetail !== this.readerManifest.issue_detail_url) {
@@ -18844,7 +18856,10 @@ function readerMixin(config) {
         var canonical = await response.json();
         self.readerProgressSaveFailed = false;
         if (canonical.arc_bookmark_saved === false && self.readerManifest === manifest) {
-          self.readerIssueSwitchError = "Your page was saved, but this arc entry changed. Open the story arc to choose a chapter.";
+          self.readerArcProblem = "arc_entry_unavailable";
+          self.readerArcRecovery = null;
+          self.readerIssueSwitchError = "Your page was saved. This issue is no longer a confirmed chapter in this story arc.";
+          if (self.readerOpen) self.showReaderControls();
         }
         if (canonical.series_bookmark_saved === false && self.readerManifest === manifest) {
           self.readerIssueSwitchError = "Your page was saved, but this issue changed series. Reopen the series to choose an issue.";
@@ -18881,7 +18896,7 @@ function readerMixin(config) {
     },
 
     readerAdjacentIssue: function (direction) {
-      if (!this.readerManifest) return null;
+      if (!this.readerManifest || this.readerArcProblem) return null;
       return direction === "previous"
         ? this.readerManifest.previous_issue
         : this.readerManifest.next_issue;
@@ -18913,12 +18928,11 @@ function readerMixin(config) {
       }
     },
 
-    switchReaderOrder: async function (control) {
+    switchReaderOrder: async function (selected, control) {
       var current = this.readerManifest;
       if (!current) return;
-      var selected = control.value;
       var prior = current.story_arc ? String(current.story_arc.id) : "series";
-      control.value = prior;
+      if (control) control.value = prior;
       if (selected === prior || this.readerIssueTransitioning || this.readerCompletionUpdating ||
           this.readerLoading || this.readerPageLoading || this.readerFatalError) return;
       var arc = current.reading_arcs.find(function (item) { return String(item.id) === selected; });
@@ -18951,8 +18965,11 @@ function readerMixin(config) {
           issue_detail_url: fresh.issue_detail_url, reading_arcs: fresh.reading_arcs,
         });
         this.readerOrderChanged = true;
+        this.readerArcProblem = "";
+        this.readerIssueSwitchError = "";
         this.reflectReaderOrder();
-        control.value = selected;
+        if (control) control.value = selected;
+        else if (this.$refs.readerViewport) this.$refs.readerViewport.focus({ preventScroll: true });
         this.readerIssueStatusMessage = "Reading order: " + (arc ? fresh.story_arc.name : "Series order");
       } catch (error) {
         if (!this.readerOpen || generation !== this.readerIssueGeneration || error.name === "AbortError") return;
@@ -18968,13 +18985,14 @@ function readerMixin(config) {
     },
 
     readerGapTarget: function (direction) {
+      if (this.readerArcProblem) return null;
       var arc = this.readerManifest && this.readerManifest.story_arc;
       return arc && (direction === "previous" ? arc.previous_available : arc.next_available);
     },
 
     readerArcReturnUrl: function () {
       var arc = this.readerManifest && this.readerManifest.story_arc;
-      if (!arc) return "";
+      if (!arc || this.readerArcProblem === "arc_entry_unavailable") return "";
       var base = "/story-arcs/" + Number(arc.id);
       return cfg.readerArcReturnUrl && cfg.readerArcReturnUrl.split("?")[0] === base
         ? cfg.readerArcReturnUrl : base;
@@ -18988,14 +19006,28 @@ function readerMixin(config) {
       var generation = this.readerIssueGeneration;
       this.readerIssueTransitioning = true;
       this.stageDisplayedReaderPage();
+      var saved = false;
       try {
         await this.saveReaderProgress(false);
-        if (this.readerOpen && generation === this.readerIssueGeneration) {
-          window.location.assign(this.readerArcReturnUrl());
+        saved = true;
+        if (!this.readerOpen || generation !== this.readerIssueGeneration) return;
+        var destination = this.readerArcReturnUrl();
+        if (!destination) return;
+        var check = await fetch(destination, { method: "HEAD", cache: "no-store", redirect: "error" });
+        if (!this.readerOpen || generation !== this.readerIssueGeneration) return;
+        if (check.status === 404) {
+          this.readerArcProblem = "arc_entry_unavailable";
+          this.readerArcRecovery = null;
+          this.readerIssueSwitchError = "This story arc is no longer available. Your comic is still open.";
+          this.showReaderControls();
+          return;
         }
-      } catch (_saveError) {
+        if (check.status !== 204) throw new Error("Return unavailable");
+        window.location.assign(destination);
+      } catch (_error) {
         if (this.readerOpen && generation === this.readerIssueGeneration) {
-          this.readerIssueSwitchError = "Your reading position hasn’t saved yet. Try again before leaving the reader.";
+          this.readerIssueSwitchError = saved ? "Could not check the story arc. Try Back to story arc again." :
+            "Your reading position hasn’t saved yet. Try again before leaving the reader.";
           this.showReaderControls();
         }
       } finally {
@@ -19004,6 +19036,7 @@ function readerMixin(config) {
     },
 
     readerArcGapText: function () {
+      if (this.readerArcProblem) return "";
       var arc = this.readerManifest && this.readerManifest.story_arc;
       if (!arc) return "";
       var parts = [];
@@ -19023,6 +19056,7 @@ function readerMixin(config) {
     },
 
     readerEndMessage: function () {
+      if (this.readerArcProblem) return "The story arc reading order has changed.";
       var arc = this.readerManifest && this.readerManifest.story_arc;
       if (!arc) return "You’re caught up in this series.";
       return arc.next_gap || "You reached the last entry in this story arc.";
@@ -19125,6 +19159,11 @@ function readerMixin(config) {
       }
 
       if (!this.readerOpen || sourceGeneration !== this.readerIssueGeneration) return false;
+      if (this.readerArcProblem) {
+        this.readerIssueTransitioning = false;
+        this.showReaderControls();
+        return false;
+      }
       var previousIssue = this.captureReaderIssue();
       var generation = this.readerIssueGeneration + 1;
       this.readerIssueGeneration = generation;
@@ -19169,6 +19208,10 @@ function readerMixin(config) {
             (error && error.name === "AbortError")) return false;
         this.readerIssueSwitchError =
           (error && error.message) || "The next comic could not be opened.";
+        if (error.arcProblem) {
+          this.readerArcProblem = error.arcProblem;
+          this.readerArcRecovery = null;
+        }
         if (previousIssue.manifest.story_arc && attempted) {
           this.readerIssueSwitchError = attempted.issue_label + ": " + this.readerIssueSwitchError;
           if (error.arcContinuation === null) {
@@ -19396,6 +19439,7 @@ function readerMixin(config) {
         self.readerLoading ||
         self.readerPageLoading ||
         self.readerFatalError ||
+        self.readerArcProblem ||
         self.readerHelpVisible ||
         (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches)
       ) {

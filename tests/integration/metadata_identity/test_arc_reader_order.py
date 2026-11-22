@@ -103,6 +103,13 @@ async def test_reader_keeps_gaps_and_revalidates_the_current_entry(
         far_end = await load_arc_reader_order(session, arc_id, issues[1].id, chapters[1].id)
         assert far_end and far_end.position == 52 and far_end.previous_available
         assert far_end.previous_available.entry_id == entry_id and far_end.next_available is None
+        candidate = await session.get(IssueStoryArc, gap.id)
+        assert candidate is not None
+        candidate.resolution_state = StoryArcResolutionState.AMBIGUOUS
+        await session.flush()
+        changed = await load_arc_reader_order(session, arc_id, issue_id, entry_id)
+        assert changed and changed.next and changed.next.entry_id == gap.id
+        assert changed.next.issue_id is None and changed.next.gap
         await session.execute(delete(IssueStoryArc).where(IssueStoryArc.id == entry_id))
     async with factory.begin() as session:
         assert await load_arc_reader_order(session, arc_id, issue_id, entry_id) is None

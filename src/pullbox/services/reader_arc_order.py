@@ -152,7 +152,9 @@ async def load_arc_reader_order(
                     or "This entry"
                 )
                 gap = f"{label} has no confirmed issue match."
-            neighbors[row.id] = ArcNeighbor(row.id, row.issue_id, label, row.title, gap)
+            neighbors[row.id] = ArcNeighbor(
+                row.id, row.issue_id if matched else None, label, row.title, gap
+            )
         if len(neighbors) != len(ids):
             return None
     previous, following = neighbors.get(current.prev_id), neighbors.get(current.next_id)

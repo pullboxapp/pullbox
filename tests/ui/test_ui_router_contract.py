@@ -380,6 +380,12 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
         ("/import/history", ("GET",), "import_history_redirect", "import_history_redirect"),
         ("/import/orphaned", ("GET",), "import_orphaned_redirect", "import_orphaned_redirect"),
         (
+            "/import/orphaned/{imported_series_id}/find-series",
+            ("GET",),
+            "find_orphaned_series",
+            "find_orphaned_series",
+        ),
+        (
             "/import/orphaned/{imported_series_id}/cv-search",
             ("GET",),
             "import_orphaned_cv_search",
@@ -521,6 +527,12 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
         ("/story-arcs", ("GET",), "story_arc_list", "story_arc_list"),
         ("/story-arcs/add", ("GET",), "story_arc_add", "story_arc_add"),
         ("/story-arcs", ("POST",), "story_arc_create", "story_arc_create"),
+        (
+            "/story-arcs/{story_arc_id}",
+            ("HEAD",),
+            "check_story_arc_return",
+            "check_story_arc_return",
+        ),
         (
             "/story-arcs/{story_arc_id}",
             ("GET",),
