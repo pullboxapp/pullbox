@@ -34,11 +34,12 @@ from pullbox.schemas.reader import (
     ReaderProgressUpdate,
     ReaderStateMutationResponse,
     ReaderStateResponse,
+    ReaderStoryArcOption,
     ReaderStoryArcResponse,
     ReaderWantToReadUpdate,
 )
 from pullbox.services.reader_arc_bookmarks import save_arc_bookmark
-from pullbox.services.reader_arc_order import ArcNeighbor, load_arc_reader_order
+from pullbox.services.reader_arc_order import ArcNeighbor, list_reader_arcs, load_arc_reader_order
 from pullbox.services.reader_content_service import (
     ReaderContentService,
     ReaderWorkerBusyError,
@@ -260,6 +261,10 @@ async def reader_manifest(
     factory = get_request_session_factory(request)
     async with factory() as session:
         state = await load_reader_state(session, user_id=_user.id, issue_id=issue_id)
+        reading_arcs = [
+            ReaderStoryArcOption(id=arc_id, entry_id=member_id, name=name)
+            for arc_id, member_id, name in await list_reader_arcs(session, issue_id)
+        ]
         arc_context = None
         detail_url = f"/issues/{issue_id}"
         if story_arc_id is not None:
@@ -325,6 +330,7 @@ async def reader_manifest(
         previous_issue=previous,
         next_issue=following,
         story_arc=arc_context,
+        reading_arcs=reading_arcs,
     )
     return JSONResponse(
         content=response.model_dump(mode="json"),

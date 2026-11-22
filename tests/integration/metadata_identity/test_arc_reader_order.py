@@ -10,7 +10,7 @@ from pullbox.models.story_arc import (
     StoryArcLifecycle,
     StoryArcResolutionState,
 )
-from pullbox.services.reader_arc_order import load_arc_reader_order
+from pullbox.services.reader_arc_order import list_reader_arcs, load_arc_reader_order
 from tests.fixtures.metadata_identity_persistence import IdentityProbeDatabase
 
 
@@ -49,6 +49,9 @@ async def test_reader_keeps_gaps_and_revalidates_the_current_entry(
         arc_id, issue_id, entry_id = arc.id, issues[0].id, chapters[0].id
     async with factory.begin() as session:
         order = await load_arc_reader_order(session, arc_id, issue_id, entry_id)
+        assert await list_reader_arcs(session, issue_id) == [
+            (arc_id, entry_id, "Archived crossover")
+        ]
         assert order is not None and (order.position, order.total) == (51, 52)
         assert order.next and order.next.gap == "Crossovers #2 has no readable library file."
         assert order.previous and order.previous.gap
@@ -61,3 +64,4 @@ async def test_reader_keeps_gaps_and_revalidates_the_current_entry(
         await session.execute(delete(IssueStoryArc).where(IssueStoryArc.id == entry_id))
     async with factory.begin() as session:
         assert await load_arc_reader_order(session, arc_id, issue_id, entry_id) is None
+        assert await list_reader_arcs(session, issue_id) == []

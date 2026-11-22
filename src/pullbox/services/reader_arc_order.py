@@ -1,5 +1,6 @@
 """Resolve the current chapter and its immediate neighbors in saved arc order."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from sqlalchemy import func, select
@@ -30,6 +31,20 @@ class ArcReaderOrder:
     total: int
     previous: ArcNeighbor | None
     next: ArcNeighbor | None
+
+
+async def list_reader_arcs(session: AsyncSession, issue_id: int) -> Sequence[tuple[int, int, str]]:
+    """Return only confirmed memberships for this issue, including archived arcs."""
+    result = await session.execute(
+        select(StoryArc.id, IssueStoryArc.id, StoryArc.name)
+        .join(IssueStoryArc, IssueStoryArc.story_arc_id == StoryArc.id)
+        .where(
+            IssueStoryArc.issue_id == issue_id,
+            IssueStoryArc.resolution_state == StoryArcResolutionState.RESOLVED,
+        )
+        .order_by(StoryArc.normalized_name, StoryArc.id)
+    )
+    return result.tuples().all()
 
 
 async def load_arc_reader_order(

@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Reading order** lets you switch between series order and any confirmed
+  story arc without losing the page or zoom. Previous and next follow your
+  choice; closing the reader returns to the issue in that context.
 - **Read story arc** opens the first chapter. Once a page has been displayed
   and its progress saved, **Continue story arc** opens your bookmarked chapter
   using that comic's normal page progress. Each user and arc has a separate

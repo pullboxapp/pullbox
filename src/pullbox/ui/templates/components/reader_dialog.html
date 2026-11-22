@@ -29,6 +29,16 @@
         <h2 id="comic-reader-title" x-text="readerTitle || 'Comic reader'">Comic reader</h2>
         <p x-text="readerIssueLabel"></p>
         {% if not reader_preview|default(false) %}
+        <template x-if="readerManifest && readerManifest.reading_arcs && readerManifest.reading_arcs.length">
+          <select class="comic-reader__order-select" aria-label="Reading order"
+            :aria-busy="readerIssueTransitioning"
+            @change="switchReaderOrder($event.target)">
+            <option value="series" :selected="!readerManifest.story_arc">Series order</option>
+            <template x-for="arc in readerManifest.reading_arcs" :key="arc.id">
+              <option :value="arc.id" :selected="readerManifest.story_arc && readerManifest.story_arc.id === arc.id" x-text="arc.name"></option>
+            </template>
+          </select>
+        </template>
         <template x-if="readerManifest && readerManifest.story_arc">
           <div>
             <p data-testid="comic-reader-arc-position" x-text="'Reading: ' + readerManifest.story_arc.name + ' · ' + readerManifest.story_arc.position + ' of ' + readerManifest.story_arc.total"></p>

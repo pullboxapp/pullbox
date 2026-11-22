@@ -25,7 +25,12 @@ from pullbox.models.library import (
 )
 from pullbox.models.reader import IssueReaderState
 from pullbox.models.series import Series, SeriesStatus, SeriesType
-from pullbox.models.story_arc import IssueStoryArc, StoryArc, StoryArcResolutionState
+from pullbox.models.story_arc import (
+    IssueStoryArc,
+    StoryArc,
+    StoryArcLifecycle,
+    StoryArcResolutionState,
+)
 from pullbox.models.user import User
 from pullbox.services.auth_service import SESSION_COOKIE_NAME, AuthService
 from pullbox.services.reader_content_service import ReaderContentService, ReaderWorkerBusyError
@@ -525,12 +530,40 @@ async def test_arc_manifest_follows_saved_cross_series_order_without_skipping_ga
             for i, (number, issue) in enumerate([(30, a), (10, None), (20, b)], 1)
         ]
         session.add_all(entries)
+        archive = StoryArc(name="Archived arc", lifecycle=StoryArcLifecycle.ARCHIVED)
+        unresolved = StoryArc(name="Unconfirmed arc")
+        session.add_all([archive, unresolved])
+        await session.flush()
+        confirmed = IssueStoryArc(
+            story_arc_id=archive.id,
+            issue_id=b,
+            sequence_number=1,
+            source_ordinal=1,
+            resolution_state=StoryArcResolutionState.RESOLVED,
+        )
+        session.add_all(
+            [
+                confirmed,
+                IssueStoryArc(
+                    story_arc_id=unresolved.id,
+                    issue_id=b,
+                    sequence_number=1,
+                    source_ordinal=1,
+                    resolution_state=StoryArcResolutionState.AMBIGUOUS,
+                ),
+            ]
+        )
         await session.commit()
         arc_id, a_entry, b_entry = arc.id, entries[0].id, entries[2].id
     sec_app.state.reader_content_service = ReaderContentService(cache_dir=tmp_path / "cache")
     url = f"/api/v1/reader/issues/{b}/manifest"
     direct = (await authenticated_client.get(url)).json()
     assert direct["next_issue"] is None
+    assert direct["story_arc"] is None
+    assert direct["reading_arcs"] == [
+        {"id": archive.id, "entry_id": confirmed.id, "name": "Archived arc"},
+        {"id": arc_id, "entry_id": b_entry, "name": "Crossover"},
+    ]
     response = await authenticated_client.get(f"{url}?story_arc_id={arc_id}&entry_id={b_entry}")
     assert response.status_code == 200
     data = response.json()

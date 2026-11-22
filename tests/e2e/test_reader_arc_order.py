@@ -1,12 +1,13 @@
 """Read across series in the saved Story Arc order using real reader endpoints."""
 
+import re
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from zipfile import ZipFile
 
 import pytest
-from playwright.sync_api import Page, expect
+from playwright.sync_api import Page, Route, expect
 from sqlalchemy import delete
 
 from pullbox.database import get_session_factory
@@ -18,6 +19,116 @@ from tests.e2e.conftest import _TEST_COVER_PNG, _run_async_blocking
 from tests.e2e.pages.issue_detail import IssueDetailPage
 
 pytestmark = pytest.mark.e2e
+
+
+def test_switch_order_preserves_the_displayed_page_and_validates_before_switching(
+    authed_page: Page, seeded_server: str, seeded_reader_state_guard: None, arc_reader: int
+) -> None:
+    page = authed_page
+    issue = IssueDetailPage(page, seeded_server)
+    issue.goto(1)
+    issue.open_reader()
+    expect(issue.reader_status).to_have_text("Page 2 of 3")
+    issue.reader_page.evaluate("el => window.originalReaderImage = el")
+    original_url = issue.reader_page.get_attribute("src")
+    order = page.get_by_role("combobox", name="Reading order", exact=True)
+    expect(order).to_have_value("series")
+    next_issue = page.get_by_test_id("comic-reader-next-issue")
+    expect(next_issue).to_be_disabled()
+    page.get_by_test_id("comic-reader-fit-width").click()
+    failed = "**/api/v1/reader/issues/1/manifest?story_arc_id=*"
+    page.route(failed, lambda route: route.fulfill(status=409, json={"detail": "Arc changed."}))
+    order.select_option(label="Reader crossover")
+    expect(page.get_by_test_id("comic-reader-switch-error")).to_have_text("Arc changed.")
+    expect(order).to_have_value("series")
+    expect(next_issue).to_be_disabled()
+    page.unroute(failed)
+
+    def changed_archive(route: Route) -> None:
+        manifest = route.fetch().json()
+        route.fulfill(json={**manifest, "revision": "different-archive"})
+
+    page.route(failed, changed_archive)
+    order.select_option(label="Reader crossover")
+    expect(page.get_by_test_id("comic-reader-switch-error")).to_contain_text("The comic changed.")
+    expect(order).to_have_value("series")
+    expect(issue.reader_page).to_have_attribute("src", original_url)
+    page.unroute(failed)
+    order.select_option(label="Reader crossover")
+    expect(next_issue).to_have_accessible_name("Next issue, Batman Beyond #91")
+    expect(issue.reader_status).to_have_text("Page 2 of 3")
+    expect(issue.reader_page).to_have_attribute("src", original_url)
+    expect(issue.reader_page).to_have_attribute("data-fit-mode", "width")
+    assert issue.reader_page.evaluate("el => el === window.originalReaderImage")
+    expect(order).to_have_value(str(arc_reader))
+    page.reload()
+    expect(page.get_by_test_id("comic-reader-arc-position")).to_have_text(
+        "Reading: Reader crossover · 1 of 3"
+    )
+    page.reload()
+    expect(order).to_have_value(str(arc_reader))
+    expect(issue.reader_status).to_have_text("Page 2 of 3")
+    order.select_option(value="series")
+    expect(next_issue).to_be_disabled()
+    expect(page.get_by_test_id("comic-reader-arc-position")).not_to_be_visible()
+    issue.close_reader()
+    expect(page.get_by_test_id("issue-detail-back-link")).to_have_text("Back to series")
+
+
+def test_switch_saves_displayed_page_or_leaves_order_unchanged(
+    authed_page: Page, seeded_server: str, seeded_reader_state_guard: None, arc_reader: int
+) -> None:
+    page = authed_page
+    issue = IssueDetailPage(page, seeded_server)
+    issue.goto(1)
+    issue.open_reader()
+    expect(issue.reader_status).to_have_text("Page 2 of 3")
+    order = page.get_by_role("combobox", name="Reading order", exact=True)
+    progress = "**/api/v1/reader/issues/1/progress"
+    page.route(progress, lambda route: route.fulfill(status=503, body="Unavailable"))
+    page.get_by_test_id("comic-reader-next").click()
+    expect(issue.reader_status).to_have_text("Page 3 of 3")
+    order.select_option(label="Reader crossover")
+    expect(page.get_by_test_id("comic-reader-switch-error")).to_contain_text("not saved")
+    expect(order).to_have_value("series")
+    expect(issue.reader_status).to_have_text("Page 3 of 3")
+    page.unroute(progress)
+    order.select_option(label="Reader crossover")
+    expect(order).to_have_value(str(arc_reader))
+    expect(issue.reader_status).to_have_text("Page 3 of 3")
+    assert (
+        page.request.get(f"{seeded_server}/api/v1/reader/issues/1/manifest").json()["state"][
+            "page_index"
+        ]
+        == 2
+    )
+
+
+def test_switched_order_follows_next_issue_and_returns_to_arc_on_mobile(
+    authed_page: Page, seeded_server: str, seeded_reader_state_guard: None, arc_reader: int
+) -> None:
+    page = authed_page
+    page.set_viewport_size({"width": 390, "height": 844})
+    issue = IssueDetailPage(page, seeded_server)
+    issue.goto(1)
+    issue.open_reader()
+    order = page.get_by_role("combobox", name="Reading order", exact=True)
+    order.focus()
+    expect(order).to_be_focused()
+    assert_no_axe_violations(
+        page, name="reader-order-mobile", include=[".comic-reader__order-select"]
+    )
+    order.press("r")
+    expect(order).to_have_value(str(arc_reader))
+    page.get_by_test_id("comic-reader-next-issue").press("Enter")
+    expect(page.get_by_test_id("comic-reader-arc-position")).to_contain_text("2 of 3")
+    page.reload()
+    expect(page.get_by_test_id("comic-reader-arc-position")).to_contain_text("2 of 3")
+    issue.close_reader()
+    back = page.get_by_test_id("issue-detail-back-link")
+    expect(back).to_have_text("Back to story arc")
+    back.click()
+    expect(page).to_have_url(re.compile(rf"/story-arcs/{arc_reader}(?:\?|$)"))
 
 
 @pytest.fixture

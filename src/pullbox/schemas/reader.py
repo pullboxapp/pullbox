@@ -32,12 +32,17 @@ class ReaderAdjacentIssueResponse(BaseModel):
     download_url: str
 
 
-class ReaderStoryArcResponse(BaseModel):
-    """Active saved arc position, including neighbors that cannot be opened."""
+class ReaderStoryArcOption(BaseModel):
+    """A confirmed membership used to select an issue's reading order."""
 
     id: int
     name: str
     entry_id: int
+
+
+class ReaderStoryArcResponse(ReaderStoryArcOption):
+    """Active saved arc position, including neighbors that cannot be opened."""
+
     position: int
     total: int
     previous_gap: str | None
@@ -64,6 +69,7 @@ class ReaderManifestResponse(BaseModel):
     previous_issue: ReaderAdjacentIssueResponse | None
     next_issue: ReaderAdjacentIssueResponse | None
     story_arc: ReaderStoryArcResponse | None = None
+    reading_arcs: list[ReaderStoryArcOption] = Field(default_factory=list)
 
 
 class ReaderArcPosition(BaseModel):

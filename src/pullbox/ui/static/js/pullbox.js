@@ -18361,6 +18361,9 @@ function readerMixin(config) {
     readerIssueTransitioning: false,
     readerIssueStatusMessage: "",
     readerIssueSwitchError: "",
+    readerOrderChanged: false,
+    readerOriginDetail: "",
+    readerOriginLocation: "",
     readerCompletionVisible: false,
     readerCompletionUpdating: false,
     readerPageIndex: 0,
@@ -18426,12 +18429,13 @@ function readerMixin(config) {
             : null;
           if (!opener || !self.$refs.readerDialog) return;
           var currentUrl = new URL(window.location.href);
-          currentUrl.searchParams.delete("read");
-          window.history.replaceState(
-            window.history.state,
-            "",
-            currentUrl.pathname + currentUrl.search + currentUrl.hash
-          );
+          cfg.resumeExplicitOrder = currentUrl.searchParams.get("reading_order") === "selected";
+          if (!cfg.resumeExplicitOrder) {
+            currentUrl.searchParams.delete("read");
+            window.history.replaceState(
+              window.history.state, "", currentUrl.pathname + currentUrl.search + currentUrl.hash
+            );
+          }
           self.openReader({ currentTarget: opener });
         });
       }
@@ -18487,6 +18491,13 @@ function readerMixin(config) {
 
     resetReaderSession: function () {
       this.clearReaderWork();
+      this.readerOrderChanged = Boolean(cfg.resumeExplicitOrder);
+      cfg.resumeExplicitOrder = false;
+      this.readerOriginDetail = "";
+      var origin = new URL(window.location.href);
+      origin.searchParams.delete("read");
+      origin.searchParams.delete("reading_order");
+      this.readerOriginLocation = origin.pathname + origin.search + origin.hash;
       this.readerFitMode = "page";
       this.readerZoomPercent = 100;
       this.readerDirection = "ltr";
@@ -18590,6 +18601,14 @@ function readerMixin(config) {
     },
 
     finishReaderClose: function () {
+      if (this.readerOrderChanged) {
+        if (this.readerManifest && this.readerOriginDetail &&
+            this.readerOriginDetail !== this.readerManifest.issue_detail_url) {
+          window.location.replace(this.readerOrderDetailPath());
+          return;
+        }
+        window.history.replaceState(window.history.state, "", this.readerOriginLocation);
+      }
       var opener = this.readerOpener;
       var scrollX = this.readerSavedScrollX;
       var scrollY = this.readerSavedScrollY;
@@ -18659,6 +18678,8 @@ function readerMixin(config) {
       this.readerIssueLabel = String(manifest.issue_label || cfg.issueLabel || "");
       this.readerPageCount = Number(manifest.page_count);
       this.readerLoading = true;
+      if (!announce) this.readerOriginDetail = manifest.issue_detail_url;
+      if (this.readerOrderChanged) this.reflectReaderOrder();
       var initialPage = clampPage(
         Number(manifest.initial_page_index) || 0,
         this.readerPageCount
@@ -18677,6 +18698,7 @@ function readerMixin(config) {
     loadReaderPage: function (pageIndex, userInitiated) {
       var self = this;
       if (!self.readerManifest || !self.readerOpen) return Promise.resolve(false);
+      if (userInitiated && self.readerIssueTransitioning) return Promise.resolve(false);
       var nextIndex = clampPage(Number(pageIndex), self.readerPageCount);
       if (!Number.isInteger(nextIndex)) return Promise.resolve(false);
 
@@ -18858,6 +18880,79 @@ function readerMixin(config) {
         : this.readerManifest.next_issue;
     },
 
+    readerOrderDetailPath: function () {
+      var arc = this.readerManifest.story_arc;
+      var path = "/issues/" + Number(this.readerActiveIssueId);
+      return arc ? path + "?source=story-arc&story_arc_id=" + Number(arc.id) +
+        "&entry_id=" + Number(arc.entry_id) : path;
+    },
+
+    reflectReaderOrder: function () {
+      var current = this.readerManifest.issue_detail_url === this.readerOriginDetail
+        ? this.readerOriginLocation : this.readerOrderDetailPath();
+      var url = new URL(current, window.location.origin);
+      url.searchParams.set("read", "1");
+      url.searchParams.set("reading_order", "selected");
+      window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash);
+    },
+
+    switchReaderOrder: async function (control) {
+      var current = this.readerManifest;
+      if (!current) return;
+      var selected = control.value;
+      var prior = current.story_arc ? String(current.story_arc.id) : "series";
+      control.value = prior;
+      if (selected === prior || this.readerIssueTransitioning || this.readerCompletionUpdating ||
+          this.readerLoading || this.readerPageLoading || this.readerFatalError) return;
+      var arc = current.reading_arcs.find(function (item) { return String(item.id) === selected; });
+      if (!arc && selected !== "series") return;
+      var url = "/api/v1/reader/issues/" + Number(current.issue_id) + "/manifest";
+      if (arc) url += "?story_arc_id=" + Number(arc.id) + "&entry_id=" + Number(arc.entry_id);
+      this.readerIssueTransitioning = true;
+      this.readerIssueSwitchError = "";
+      this.readerIssueStatusMessage = "Changing reading order…";
+      var generation = this.readerIssueGeneration;
+      this.clearReaderTimer("readerSettledTimer");
+      // Switching explicitly saves the displayed page, but does not imply finishing it.
+      if (this.readerLastSettledPage !== this.readerPageIndex) {
+        this.readerLastSettledPage = this.readerPageIndex;
+        this.readerLastSettledCompletion = false;
+      }
+      try {
+        await this.saveReaderProgress(false);
+        if (!this.readerOpen || generation !== this.readerIssueGeneration) return;
+        var fresh = await this.fetchReaderManifest(url, generation);
+        if (!fresh) return;
+        if (fresh.issue_id !== current.issue_id || fresh.revision !== current.revision ||
+            fresh.page_count !== current.page_count) {
+          throw new Error("The comic changed. Reopen the reader before changing order.");
+        }
+        if (arc ? (!fresh.story_arc || fresh.story_arc.id !== arc.id ||
+            fresh.story_arc.entry_id !== arc.entry_id) : fresh.story_arc) {
+          throw new Error("This reading order changed. Reopen the issue to see its current story arcs.");
+        }
+        // Adopt navigation only; the current image, page, zoom and progress stay in place.
+        this.readerManifest = Object.assign({}, current, {
+          story_arc: fresh.story_arc, previous_issue: fresh.previous_issue, next_issue: fresh.next_issue,
+          issue_detail_url: fresh.issue_detail_url, reading_arcs: fresh.reading_arcs,
+        });
+        this.readerOrderChanged = true;
+        this.reflectReaderOrder();
+        control.value = selected;
+        this.readerIssueStatusMessage = "Reading order: " + (arc ? fresh.story_arc.name : "Series order");
+      } catch (error) {
+        if (!this.readerOpen || generation !== this.readerIssueGeneration || error.name === "AbortError") return;
+        this.readerIssueSwitchError = error.message || "The reading order could not be changed.";
+        this.readerIssueStatusMessage = this.readerIssueSwitchError;
+      } finally {
+        if (this.readerOpen && generation === this.readerIssueGeneration) {
+          this.readerIssueTransitioning = false;
+          this.scheduleReaderSettled(this.readerPageIndex, this.readerCurrentUserInitiated);
+          this.showReaderControls();
+        }
+      }
+    },
+
     readerArcGapText: function () {
       var arc = this.readerManifest && this.readerManifest.story_arc;
       if (!arc) return "";
@@ -18970,8 +19065,10 @@ function readerMixin(config) {
         if (!manifest) return false;
         var loaded = await this.activateReaderManifest(manifest, true);
         if (!loaded) {
+          if (!this.readerOpen || this.readerIssueGeneration !== generation) return false;
           this.clearReaderIssueWork();
           this.restoreReaderIssue(previousIssue);
+          if (this.readerOrderChanged) this.reflectReaderOrder();
           throw new Error("The next comic page could not be displayed.");
         }
         this.readerIssueTransitioning = false;
@@ -19095,6 +19192,7 @@ function readerMixin(config) {
     },
 
     commitReaderPageJump: function () {
+      if (this.readerIssueTransitioning) return;
       var pageNumber = Number.parseInt(String(this.readerPageDraft), 10);
       if (!Number.isInteger(pageNumber) || pageNumber < 1 || pageNumber > this.readerPageCount) {
         this.readerPageInputError =

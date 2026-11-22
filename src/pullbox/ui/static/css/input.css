@@ -9169,6 +9169,7 @@ input[type="range"].range-pb::-moz-range-thumb {
 
 .comic-reader__button,
 .comic-reader__zoom-label,
+.comic-reader__order-select,
 .comic-reader__fit-select,
 .comic-reader__page-jump input {
   min-height: 44px;
@@ -9202,6 +9203,7 @@ input[type="range"].range-pb::-moz-range-thumb {
 
 .comic-reader__button:focus-visible,
 .comic-reader__zoom-label:focus-visible,
+.comic-reader__order-select:focus-visible,
 .comic-reader__fit-select:focus-visible,
 .comic-reader__page-jump input:focus-visible,
 .comic-reader__viewport:focus-visible {
@@ -9446,6 +9448,13 @@ input[type="range"].range-pb::-moz-range-thumb {
 .comic-reader__page-jump input::-webkit-inner-spin-button {
   margin: 0;
   appearance: none;
+}
+
+.comic-reader__order-select {
+  max-width: 100%;
+  padding-inline: 0.5rem;
+  color-scheme: dark;
+  font-size: 0.78rem;
 }
 
 .comic-reader__fit-select {
