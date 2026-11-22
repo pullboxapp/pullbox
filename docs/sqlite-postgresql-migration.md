@@ -421,6 +421,49 @@ row transfer. Do not unlock the old stage, change an account, or clear import
 history to pass. Check the key and comic mounts separately below. Even after a
 confirmed review, `cutover_ready` remains false.
 
+### Check the intended deployment without starting it
+
+To bind a **new stage** to the intended deployment, generate a fresh secret
+in a private operator-owned directory. Do not reuse a Pullbox password,
+encryption key, or token from a previous attempt:
+
+```sh
+(umask 077; set -C; openssl rand -hex 32 > first-start.token)
+python scripts/stage_postgres_transfer.py --backup /backups/offline.db \
+  --create-offline-stage --review-library --first-start-token-file first-start.token
+```
+
+After you sign in and confirm the library, the report should say
+`first_start_bound: true`. The stage is still closed. Only its fingerprint
+is stored, never the secret. Cancelling review does not bind the target.
+
+In the **proposed PostgreSQL deployment**, mount that token read-only at
+`/run/secrets/pullbox-first-start`, readable by the Pullbox process only
+(a regular file with mode 0400 or 0600). Provide the proposed database URL
+through the service's normal protected configuration. Use this image's CLI
+instead of its normal entrypoint; do **not** start the app:
+
+```sh
+docker compose run --rm --no-deps --entrypoint python pullbox -m pullbox.cli \
+  migration-check-first-start --token-file /run/secrets/pullbox-first-start \
+  --snapshot-sha256 "$STAGED_SNAPSHOT_SHA256"
+```
+
+Use your actual Compose service name. This command connects only to the
+`postgres` maintenance database, not the library. Exit 0 and
+`first_start_binding_verified: true` mean that the configured owner, running
+server, closed database, snapshot and token match the review. A PostgreSQL
+restart invalidates this pending binding; use a fresh stage rather than
+editing the database label. Keep the token out of logs and support bundles.
+
+**This is not permission to switch.** The check cannot prove nobody previously
+reopened the target. It does not verify the source is still stopped,
+validate the independent backup or mounts, enable
+connections, or start workers. Pullbox refuses ordinary startup and migrations
+on a bound stage, including a clone containing its internal marker. Leave both
+the stage and the SQLite backup intact. Do not remove the marker or manually
+enable connections.
+
 ## Check the key and comic files
 
 Use `migration-check-assets` from a Pullbox version that includes it. Supply

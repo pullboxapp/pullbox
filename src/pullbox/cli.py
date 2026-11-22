@@ -151,6 +151,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Read the dedicated target URL from standard input, never the app configuration",
     )
     target.add_argument("--json", action="store_true", help="Print a redacted target report")
+    binding = subparsers.add_parser(
+        "migration-check-first-start",
+        help="Check this deployment against a reviewed offline target",
+    )
+    binding.add_argument("--token-file", type=Path, required=True)
+    binding.add_argument("--snapshot-sha256", required=True)
     restore = subparsers.add_parser(
         "migration-check-restore", help="Check independently restored deployment settings and key"
     )
@@ -273,6 +279,29 @@ def main() -> None:
                 print(f"- {reason}")
             print(target.next_step)
         if not target.target_checks_passed:
+            sys.exit(1)
+    elif args.command == "migration-check-first-start":
+        from pullbox.services.migration_first_start import BindingError, check_binding
+
+        blockers = {}
+        try:
+            asyncio.run(check_binding(get_settings().db_url, args.token_file, args.snapshot_sha256))
+        except BindingError as exc:
+            blockers["first_start_binding"] = str(exc)
+        except Exception:
+            # Connection and settings exceptions can contain credentials.
+            blockers["configuration"] = "Could not verify the deployment settings or connection."
+        print(
+            json.dumps(
+                {
+                    "first_start_binding_verified": not blockers,
+                    "cutover_ready": False,
+                    "blockers": blockers,
+                },
+                sort_keys=True,
+            )
+        )
+        if blockers:
             sys.exit(1)
     elif args.command == "migration-check-restore":
         from pullbox.services.migration_restore_config import check_restore

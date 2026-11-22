@@ -11,6 +11,7 @@ from alembic import context
 
 # Import all models so autogenerate detects them.
 from pullbox.models import Base
+from pullbox.services.migration_first_start import require_startable_target
 
 config = context.config
 
@@ -46,6 +47,13 @@ def run_migrations_offline() -> None:
 
 def do_run_migrations(connection: Connection) -> None:
     """Configure context and run migrations within a connection."""
+    if connection.dialect.name == "postgresql":
+        already_in_transaction = connection.in_transaction()
+        require_startable_target(
+            connection, stage_initializer=config.attributes.get("closed_stage_initializer") is True
+        )
+        if not already_in_transaction:
+            connection.rollback()
     # SQLite table rebuilds must not cascade into existing child tables. Keep
     # embedded Alembic callers consistent with the standalone migration process.
     sqlite_fk_enabled = False

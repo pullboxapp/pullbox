@@ -53,7 +53,7 @@ from pullbox.core.subscribers import (
     on_series_added,
     recover_recent_search_on_add_misses,
 )
-from pullbox.database import dispose_engine, get_session_factory
+from pullbox.database import dispose_engine, get_engine, get_session_factory
 from pullbox.logging import configure_logging
 from pullbox.services.debug_logging_service import (
     expire_debug_logging_override_if_needed,
@@ -238,6 +238,11 @@ async def _run_debug_logging_expiry_enforcer() -> None:
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     """Application startup and shutdown lifecycle."""
     settings = get_runtime_settings()
+    if database_backend_label(settings.db_url) == "PostgreSQL":
+        from pullbox.services.migration_first_start import require_startable_target
+
+        async with get_engine().connect() as connection:
+            await connection.run_sync(require_startable_target)
     configure_logging(
         "info",
         debug=settings.debug,

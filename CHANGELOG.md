@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- [Check the intended PostgreSQL deployment before startup](docs/sqlite-postgresql-migration.md#check-the-intended-deployment-without-starting-it).
+  A private token pairs the proposed deployment with the reviewed, offline database.
+  Checking the pair does not start Pullbox or authorize a switch.
+
 - [Rehearse restoring a SQLite migration backup and its configuration](docs/sqlite-postgresql-migration.md#back-up-and-rehearse-restoring-the-configuration).
   Verify that the restored deployment files match and its key can read saved credentials,
   without starting Pullbox or revealing keys.

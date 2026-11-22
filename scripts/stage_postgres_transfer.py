@@ -36,6 +36,11 @@ from pullbox.services.migration_backup_input import (  # noqa: E402
     BackupInputError,
     database_snapshot,
 )
+from pullbox.services.migration_first_start import (  # noqa: E402
+    BindingError,
+    bind_reviewed_stage,
+    read_token,
+)
 from pullbox.services.migration_target_preflight import (  # noqa: E402
     inspect_target_connection,
     parse_target_url,
@@ -46,6 +51,7 @@ def _initialize(connection):
     config = Config()
     config.set_main_option("script_location", str(ROOT / "alembic"))
     config.attributes["connection"] = connection
+    config.attributes["closed_stage_initializer"] = True
     command.upgrade(config, "head")
 
 
@@ -87,7 +93,10 @@ async def _unclaimed(conn, url, report):
     return True
 
 
-async def stage(path, raw, report, *, review=False):
+async def stage(path, raw, report, *, review=False, token_file=None):
+    if token_file is not None and not review:
+        raise RehearsalError("binding_requires_review")
+    key = read_token(token_file) if token_file is not None else None
     url = parse_target_url(raw)
     if url is None:
         raise RehearsalError("target_url")
@@ -184,6 +193,10 @@ async def stage(path, raw, report, *, review=False):
             from postgres_stage_review import review_library
 
             await review_library(conn, source_hash, report)
+            if key is not None and report["maintenance_review"]["status"] == "confirmed":
+                await conn.exec_driver_sql("SET LOCAL search_path TO pg_catalog")
+                await bind_reviewed_stage(conn, url.database, source_hash, key)
+                report["first_start_bound"] = True
 
 
 def main():
@@ -202,6 +215,11 @@ def main():
         "--review-library",
         action="store_true",
         help="After copying, sign in to inspect the sealed library in a private terminal.",
+    )
+    parser.add_argument(
+        "--first-start-token-file",
+        type=Path,
+        help="Bind a private deployment token after interactive review; the target stays closed.",
     )
     args = parser.parse_args()
     report = {
@@ -226,7 +244,17 @@ def main():
                 if args.url_stdin
                 else getpass.getpass("Dedicated EMPTY PostgreSQL target URL: ")
             )
-        asyncio.run(stage(args.backup, raw, report, review=args.review_library))
+        asyncio.run(
+            stage(
+                args.backup,
+                raw,
+                report,
+                review=args.review_library,
+                token_file=args.first_start_token_file,
+            )
+        )
+    except BindingError as exc:
+        report["blockers"] = {"first_start_binding": str(exc)}
     except (RehearsalError, BackupInputError) as exc:
         report["blockers"] = {str(exc): "Staging stopped; do not activate the target."}
     except KeyboardInterrupt:
