@@ -7,6 +7,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Annotated, Literal
 from urllib.parse import urlencode
+from uuid import UUID  # noqa: TC003 - FastAPI resolves this route parameter at runtime.
 
 from fastapi import APIRouter, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -52,6 +53,7 @@ from pullbox.services.story_arc_managed_reorder import (
     StoryArcManagedReorderService,
     StoryArcReorderPreview,
 )
+from pullbox.services.story_arc_member_cleanup import enqueue_member_recovery
 from pullbox.services.story_arc_member_review import member_files, sharing_arcs
 from pullbox.services.story_arc_placement_integration import (
     STORY_ARC_PLACEMENT_POLICY_SCHEMA_VERSION,
@@ -1255,11 +1257,15 @@ class _DeleteArcConfirmation(BaseModel):
 class _ArcFileSelection(BaseModel):
     model_config = ConfigDict(extra="forbid")
     ids: list[Annotated[int, Field(strict=True, gt=0, le=9223372036854775807)]] = Field(
-        min_length=1, max_length=1000
+        max_length=1000
+    )
+    member_ids: list[Annotated[int, Field(strict=True, gt=0, le=9223372036854775807)]] = Field(
+        default_factory=list, max_length=1000
     )
 
 
 class _ConfirmArcFiles(_ArcFileSelection):
+    allow_shared: bool = Field(default=False, strict=True)
     token: str = Field(min_length=1, max_length=512)
 
 
@@ -1268,10 +1274,12 @@ async def preview_selected_arc_files(
     story_arc_id: int, body: _ArcFileSelection, user: InteractiveOperatorUser, session: DbSession
 ) -> Response:
     try:
-        plan = await preview_cleanup(session, story_arc_id, user.id, body.ids)
+        plan = await preview_cleanup(
+            session, story_arc_id, user.id, body.ids, member_ids=body.member_ids
+        )
     except StoryArcNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
-    except StoryArcConflictError as exc:
+    except (StoryArcConflictError, ValidationError) as exc:
         raise HTTPException(409, str(exc)) from exc
     return JSONResponse(plan, headers={"Cache-Control": "no-store"})
 
@@ -1285,13 +1293,40 @@ async def confirm_selected_arc_files(
     manager = _get_manager()
     try:
         job = await enqueue_reviewed_cleanup(
-            session, manager, story_arc_id, user.id, user.username, body.ids, body.token
+            session,
+            manager,
+            story_arc_id,
+            user.id,
+            user.username,
+            body.ids,
+            body.token,
+            member_ids=body.member_ids,
+            allow_shared=body.allow_shared,
         )
         job_id = job.id
         await session.commit()
     except StoryArcNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
     except (StoryArcConflictError, ValidationError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    _schedule_dispatch(manager)
+    return JSONResponse({"job_id": job_id}, status_code=202, headers={"Cache-Control": "no-store"})
+
+
+@router.post("/story-arcs/{story_arc_id}/delete/recover/{operation}", include_in_schema=False)
+async def finish_arc_member_journal(
+    story_arc_id: int, operation: UUID, user: InteractiveOperatorUser, session: DbSession
+) -> Response:
+    from pullbox.utilities.router import _get_manager, _schedule_dispatch
+
+    manager = _get_manager()
+    try:
+        job = await enqueue_member_recovery(
+            session, manager, story_arc_id, operation, user.username
+        )
+        job_id = job.id
+        await session.commit()
+    except StoryArcConflictError as exc:
         raise HTTPException(409, str(exc)) from exc
     _schedule_dispatch(manager)
     return JSONResponse({"job_id": job_id}, status_code=202, headers={"Cache-Control": "no-store"})

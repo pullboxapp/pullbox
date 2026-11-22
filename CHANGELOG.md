@@ -15,7 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Choose **Review library comics** in the deletion preview to see each registered
   file's issue number, path, ownership, and links to import history. For shared
   issues, expand the list to see which other reading orders use them, including
-  archived arcs. This review does not select any library file for deletion.
+  archived arcs. No library files are selected by default.
+- You can now explicitly select original library comics when deleting a Story Arc.
+  The preview names the affected files and other arcs, and shows which issues
+  would become skipped because their last copy is being removed. Shared comics
+  require an extra confirmation. If cleanup is interrupted, you can finish the
+  recorded file operation without deleting the arc or starting another removal.
 - To clean up arc copies or links at the same time, choose **Review arc files**,
   select individual paths, and review whether they will go to Trash or be
   permanently removed. Follow progress in the Utilities queue. Cancelling keeps

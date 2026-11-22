@@ -36,6 +36,10 @@ _RECEIPT_BLOCKER = (
     "An arc file removal has an unfinished Trash receipt. Review arc files and "
     "select the interrupted removal before deleting this arc."
 )
+_ACTIVE_CLEANUP = "Arc cleanup is queued or running. Check its progress in Utilities."
+_MEMBER_RECEIPT = (
+    "A library file has interrupted cleanup. Finish its retained journal before deleting this arc."
+)
 
 
 @dataclass(frozen=True)
@@ -63,6 +67,7 @@ async def _snapshot(
     *,
     lock: bool,
     omit: frozenset[int] = frozenset(),
+    omit_files: frozenset[int] = frozenset(),
     cleanup_job: str | None = None,
 ) -> tuple[ArcDeleteReview, str]:
     sqlite = db.get_bind().dialect.name == "sqlite"
@@ -148,7 +153,11 @@ async def _snapshot(
             )
         )
     ):
-        blocker = "Arc cleanup is queued or running. Check its progress in Utilities."
+        blocker = _ACTIVE_CLEANUP
+    elif (arc.diagnostics or {}).get("pending_member_cleanup") and (
+        not cleanup_job or cleanup_job != pending
+    ):
+        blocker = _MEMBER_RECEIPT
     elif (
         arc.source_import_job_id is not None
         or import_binding is not None
@@ -182,7 +191,7 @@ async def _snapshot(
     review = ArcDeleteReview(
         arc.name,
         len(members),
-        *await _retained_library_counts(db, arc_id),
+        *await _retained_library_counts(db, arc_id, omit_files),
         len(placements),
         managed_count,
         len(placements) - managed_count,
@@ -199,9 +208,13 @@ async def _snapshot(
     return review, hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
 
 
-async def _retained_library_counts(db: AsyncSession, arc_id: int) -> tuple[int, int, int, int]:
+async def _retained_library_counts(
+    db: AsyncSession, arc_id: int, omit_files: frozenset[int]
+) -> tuple[int, int, int, int]:
     resolved = resolved_member_issue_ids(arc_id)
     files = select(func.count(LibraryFile.id)).where(LibraryFile.issue_id.in_(resolved))
+    if omit_files:
+        files = files.where(LibraryFile.id.not_in(omit_files))
     shared = select(func.count(func.distinct(IssueStoryArc.issue_id))).where(
         IssueStoryArc.story_arc_id != arc_id,
         IssueStoryArc.issue_id.in_(resolved),
@@ -221,8 +234,13 @@ async def _retained_library_counts(db: AsyncSession, arc_id: int) -> tuple[int, 
 
 async def preview_arc_deletion(db: AsyncSession, arc_id: int, user_id: int) -> dict[str, object]:
     review, binding = await _snapshot(db, arc_id, user_id, lock=False)
+    arc = await db.get(StoryArc, arc_id)
     return {
         **asdict(review),
+        "pending_member_cleanup": (arc.diagnostics or {}).get("pending_member_cleanup")
+        if arc and review.blocker == _MEMBER_RECEIPT
+        else None,
+        "active_cleanup": review.blocker == _ACTIVE_CLEANUP,
         "cleanup_allowed": review.blocker in (None, _RECEIPT_BLOCKER),
         "token": None if review.blocker else _signer().dumps(binding),
     }

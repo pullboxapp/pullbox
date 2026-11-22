@@ -33,7 +33,8 @@ function storyArcDetail() {
     coverModalOpen: false, coverModalUrl: '', reordering: false, reorderError: '',
     deletePreview: null, deletePhase: '', deleteError: '', deleteUrl: '', deleteGeneration: 0,
     showPaths: false, pathItems: [], pathCursors: [0], pathNext: null, pathBusy: false, pathError: '', pathRetry: [0],
-    selectedPaths: [], cleanupReview: null,
+    selectedPaths: [], selectedMembers: [], allowShared: false, cleanupReview: null,
+    get selectionCount() { return this.selectedPaths.length + this.selectedMembers.length; },
     reviewDelete(arcId) {
       if (this.$refs.deleteDialog.open) return;
       this.deleteUrl = '/story-arcs/' + Number(arcId) + '/delete';
@@ -54,6 +55,8 @@ function storyArcDetail() {
       this.deletePhase = 'loading';
       this.showPaths = false;
       this.selectedPaths = [];
+      this.selectedMembers = [];
+      this.allowShared = false;
       this.cleanupReview = null;
       this.pathBusy = false;
       this.pathItems = [];
@@ -97,17 +100,41 @@ function storyArcDetail() {
     },
     selectPath(id, selected) {
       this.cleanupReview = null;
+      this.deleteError = '';
+      this.allowShared = false;
       this.selectedPaths = selected ? [...this.selectedPaths, id] : this.selectedPaths.filter(x => x !== id);
     },
+    selectMember(id, selected) {
+      this.cleanupReview = null;
+      this.deleteError = '';
+      this.allowShared = false;
+      this.selectedMembers = selected ? [...this.selectedMembers, id] : this.selectedMembers.filter(x => x !== id);
+    },
+    async recoverMember() {
+      if (this.deletePhase || !this.deletePreview?.pending_member_cleanup) return;
+      this.deletePhase = 'deleting';
+      try {
+        const response = await fetch(this.deleteUrl + '/recover/' + encodeURIComponent(this.deletePreview.pending_member_cleanup.operation), {
+          method: 'POST', headers: {'X-CSRF-Token': readCsrfTokenFromBody()},
+        });
+        const result = await response.json();
+        if (!response.ok || !result.job_id) throw new Error(typeof result.detail === 'string' ? result.detail : 'Refresh the cleanup preview and try again.');
+        window.location.assign('/utilities?tab=queue');
+      } catch (error) {
+        this.deleteError = error.message;
+      } finally {
+        this.deletePhase = '';
+      }
+    },
     async confirmCleanup() {
-      if (this.deletePhase || this.deleteError || !this.selectedPaths.length) return;
+      if (this.deletePhase || this.deleteError || !this.selectionCount || (this.cleanupReview?.shared_arcs?.length && !this.allowShared)) return;
       const confirm = !!this.cleanupReview;
       const generation = this.deleteGeneration;
       this.deletePhase = confirm ? 'deleting' : 'reviewing';
       try {
         const response = await fetch(this.deleteUrl + (confirm ? '/cleanup' : '/cleanup/preview'), {
           method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': readCsrfTokenFromBody()},
-          body: JSON.stringify({ids: this.selectedPaths, ...(confirm ? {token: this.cleanupReview.token} : {})}),
+          body: JSON.stringify({ids: this.selectedPaths, member_ids: this.selectedMembers, ...(confirm ? {token: this.cleanupReview.token, allow_shared: this.allowShared} : {})}),
         });
         const result = await response.json();
         if (generation !== this.deleteGeneration) return;
@@ -127,7 +154,7 @@ function storyArcDetail() {
       }
     },
     async confirmDelete() {
-      if (this.selectedPaths.length) return this.confirmCleanup();
+      if (this.selectionCount) return this.confirmCleanup();
       if (this.deletePhase || !this.deletePreview?.token || this.deleteError) return;
       this.deletePhase = 'deleting';
       try {

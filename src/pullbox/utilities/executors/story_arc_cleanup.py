@@ -1,4 +1,4 @@
-"""Run only operator-reviewed arc placements through the existing removal service."""
+"""Remove only explicitly reviewed arc placements and library comics."""
 
 from typing import Any
 
@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from pullbox.core.exceptions import ValidationError
 from pullbox.services.story_arc_cleanup import finish_reviewed_cleanup, remove_reviewed_target
+from pullbox.services.story_arc_member_cleanup import recover_member_item, run_member_item
 from pullbox.services.story_arc_placement_integration import StoryArcPlacementIntegrationError
 from pullbox.services.story_arc_service import StoryArcServiceError
 from pullbox.utilities.base_executor import (
@@ -29,7 +30,15 @@ class StoryArcCleanupExecutor(JobExecutor):
         self, job_config: dict[str, Any], job_context: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
         return [
-            {"operation": "remove_arc_placement", "file_path": t["file_path"], "index": i}
+            {
+                "operation": "finish_member_cleanup"
+                if job_config.get("receipt_only")
+                else "remove_member_file"
+                if "original" in t
+                else "remove_arc_placement",
+                "file_path": t["file_path"],
+                "index": i,
+            }
             for i, t in enumerate(job_config["targets"])
         ]
 
@@ -51,14 +60,20 @@ class StoryArcCleanupExecutor(JobExecutor):
         item_id = item_data["id"]
         async with job_context["factory"]() as db:
             try:
-                result = await remove_reviewed_target(
-                    db, job_config, job_config["targets"][item_data["index"]], item_id
-                )
+                index = item_data["index"]
+                target = job_config["targets"][index]
+                if job_config.get("receipt_only"):
+                    result = await recover_member_item(db, job_config, item_id)
+                elif "original" in target:
+                    result = await run_member_item(db, job_config, index, item_id)
+                else:
+                    result = await remove_reviewed_target(db, job_config, target, item_id)
                 return ProcessedItem(item_id, ItemResult.COMPLETED, after_state=result)
             except (
                 StoryArcPlacementIntegrationError,
                 StoryArcServiceError,
                 ValidationError,
+                OSError,
             ) as exc:
                 return ProcessedItem(item_id, ItemResult.FAILED, error_message=str(exc))
 
@@ -76,8 +91,17 @@ class StoryArcCleanupExecutor(JobExecutor):
             raise ValueError(
                 "Not all selected files were removed. The arc was kept; review its remaining files."
             )
+        if job_config.get("receipt_only"):
+            return FinalizeResult(final_parts=["file cleanup journal resolved; arc kept"])
         await finish_reviewed_cleanup(session, job, job_config)
-        return FinalizeResult(final_parts=["arc record deleted; library comics preserved"])
+        removed = sum("original" in t for t in job_config["targets"])
+        return FinalizeResult(
+            final_parts=[
+                f"arc record deleted; {removed} selected library files removed"
+                if removed
+                else "arc record deleted; library comics preserved"
+            ]
+        )
 
     def rollback_item(
         self,

@@ -159,7 +159,7 @@ def arc_reader(seeded_server: str, tmp_path: Path) -> Iterator[int]:
                 file_name=path.name,
                 file_path=str(path),
                 file_size=path.stat().st_size,
-                file_modified_at=datetime.now(UTC),
+                file_modified_at=datetime.fromtimestamp(path.stat().st_mtime, UTC),
                 file_format=FileFormat.CBZ,
                 match_confidence=MatchConfidence.MANUAL,
             )
@@ -526,8 +526,9 @@ def test_review_arc_file_paths_before_deleting_or_cancelling(
     expect(opener).to_be_focused()
 
 
-def test_review_kept_member_comic_without_deleting_it(
-    authed_page: Page, seeded_server: str, arc_reader: int, tmp_path: Path
+@pytest.mark.parametrize("submit", [False, True], ids=["cancel", "confirm"])
+def test_review_shared_member_comic_before_removing_it(
+    authed_page: Page, seeded_server: str, arc_reader: int, tmp_path: Path, submit: bool
 ) -> None:
     path = tmp_path / "Batman Beyond 091.cbz"
     original = path.read_bytes()
@@ -575,8 +576,40 @@ def test_review_kept_member_comic_without_deleting_it(
         expect(book.get_by_text("Managed file", exact=True)).to_be_visible()
         book.get_by_role("button", name="Used by 1 other arc", exact=True).click()
         expect(book.get_by_text("Another reading order", exact=True)).to_be_visible()
-        expect(dialog.get_by_role("checkbox")).to_have_count(0)
+        selection = book.get_by_role("checkbox", name="Remove library file " + str(path))
+        expect(selection).not_to_be_checked()
+        selection.check()
+        dialog.get_by_role("button", name="Review selected files").click()
+        confirm = dialog.get_by_role("button", name="Delete arc and selected files")
+        expect(confirm).to_be_disabled()
+        consent = dialog.get_by_role("checkbox", name="I understand the impact on these other arcs")
+        expect(consent).not_to_be_checked()
+        consent.check()
+        expect(confirm).to_be_enabled()
         assert_no_axe_violations(page, name="arc-delete-library-review", include=["dialog[open]"])
+        if submit:
+            confirm.click()
+            expect(page).to_have_url(re.compile(r"/utilities\?tab=queue$"))
+            import time
+
+            for _ in range(100):
+                if not path.exists():
+                    break
+                time.sleep(0.05)
+            assert not path.exists()
+            for _ in range(100):
+                if (
+                    page.request.get(
+                        f"{seeded_server}/story-arcs/{arc_reader}/delete/preview"
+                    ).status
+                    == 404
+                ):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("The queued deletion did not remove the confirmed arc")
+            assert page.request.get(f"{seeded_server}/story-arcs/{other_id}/delete/preview").ok
+            return
         dialog.get_by_role("button", name="Cancel", exact=True).click()
         expect(opener).to_be_focused()
         opener.click()
