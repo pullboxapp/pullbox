@@ -24,7 +24,7 @@ def hex_digest(value: object) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[0-9A-Fa-f]{64}", value) is not None
 
 
-def _relative(root: str, path: str) -> tuple[str, ...]:
+def relative_parts(root: str, path: str) -> tuple[str, ...]:
     recorded, file = PurePosixPath(root), PurePosixPath(path)
     if not root.startswith("/") or not file.is_relative_to(recorded) or ".." in file.parts:
         raise AssetVerificationError("outside_library_root")
@@ -35,14 +35,24 @@ def _relative(root: str, path: str) -> tuple[str, ...]:
 
 
 @contextmanager
-def _open_regular(root_fd: int, parts: tuple[str, ...]) -> Iterator[int]:
+def open_directory(root_fd: int, parts: tuple[str, ...]) -> Iterator[int]:
+    """Walk already-validated relative components without following directory links."""
     with ExitStack() as stack:
         directory = root_fd
-        for part in parts[:-1]:
+        for part in parts:
+            if not part or part in {".", ".."} or "/" in part or "\0" in part:
+                raise AssetVerificationError("unsafe_path")
             directory = os.open(
                 part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory
             )
             stack.callback(os.close, directory)
+        yield directory
+
+
+@contextmanager
+def _open_regular(root_fd: int, parts: tuple[str, ...]) -> Iterator[int]:
+    with ExitStack() as stack:
+        directory = stack.enter_context(open_directory(root_fd, parts[:-1]))
         initial = os.stat(parts[-1], dir_fd=directory, follow_symlinks=False)
         if not stat.S_ISREG(initial.st_mode):
             raise AssetVerificationError("unsafe_path")
@@ -54,7 +64,7 @@ def _open_regular(root_fd: int, parts: tuple[str, ...]) -> Iterator[int]:
         yield fd
 
 
-def _stamp(s: os.stat_result) -> tuple[int, ...]:
+def file_stamp(s: os.stat_result) -> tuple[int, ...]:
     return (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
 
 
@@ -72,6 +82,25 @@ def _read_hash(fd: int, size: int) -> str:
     return digest.hexdigest()
 
 
+def regular_evidence(root_fd: int, parts: tuple[str, ...]) -> dict[str, object]:
+    """Produce the saved Story Arc regular-file proof, rechecking the complete path."""
+    with _open_regular(root_fd, parts) as fd:
+        before = os.fstat(fd)
+        digest = _read_hash(fd, before.st_size)
+        with _open_regular(root_fd, parts) as current:
+            if file_stamp(before) != file_stamp(os.fstat(current)):
+                raise AssetVerificationError("file_changed")
+    return {
+        "schema_version": 1,
+        "kind": "regular",
+        "size": before.st_size,
+        "device": before.st_dev,
+        "inode": before.st_ino,
+        "mtime_ns": before.st_mtime_ns,
+        "sha256": digest,
+    }
+
+
 def inspect_file(
     root_fd: int,
     recorded_root: str,
@@ -83,7 +112,7 @@ def inspect_file(
     sample: bool,
 ) -> tuple[str | None, bool]:
     """Return an observed content digest and whether it matched independent historical evidence."""
-    parts = _relative(recorded_root, path)
+    parts = relative_parts(recorded_root, path)
     evidence = json.loads(signature)
     if not isinstance(evidence, dict):
         raise AssetVerificationError("invalid_file_evidence")
@@ -110,7 +139,7 @@ def inspect_file(
                 raise AssetVerificationError("file_hash_mismatch")
             # Reopen the directory chain under the pinned root to detect replaced paths.
             with _open_regular(root_fd, parts) as current:
-                if _stamp(before) != _stamp(os.fstat(current)):
+                if file_stamp(before) != file_stamp(os.fstat(current)):
                     raise AssetVerificationError("file_changed")
             return observed, bool(observed and hashes)
     except FileNotFoundError:

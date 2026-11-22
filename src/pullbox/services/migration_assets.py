@@ -23,6 +23,8 @@ from pullbox.services.database_migration_preflight import (
 )
 from pullbox.services.migration_asset_files import AssetVerificationError, hex_digest, inspect_file
 from pullbox.services.migration_backup_input import BackupInputError, database_snapshot
+from pullbox.services.migration_covers import verify_covers
+from pullbox.services.migration_media import MediaMounts, verify_placements
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -37,6 +39,10 @@ class AssetReport:
     credentials_checked: int = 0
     files_checked: int = 0
     files_hashed: int = 0
+    placements_checked: int = 0
+    covers_checked: int = 0
+    cover_cache_mapped: bool = False
+    media_examples: dict[str, list[int]] = field(default_factory=dict)
     hash_scope: str = "sample"
     saved_hashes_matched: int = 0
     sample_sha256: str | None = None
@@ -57,6 +63,17 @@ class AssetReport:
                 "Do not generate a replacement key. Correct any file blockers and retry."
             )
         if self.blockers:
+            if any(code.startswith("arc_") for code in self.blockers):
+                return (
+                    "Check the original Story Arc placements, their canonical files and mount "
+                    "layout. Review missing or changed copies/links in Story Arcs; do not "
+                    "rebind ownership or delete files to pass this check."
+                )
+            if any("cover" in code for code in self.blockers):
+                return (
+                    "Check the series folders, --covers-dir and any separate --legacy-covers-dir "
+                    "on the original and proposed mounts. Keep existing artwork intact."
+                )
             return (
                 "Check the reported blockers and original root mappings; keep the backup "
                 "and files intact. Do not use this run as a baseline."
@@ -74,6 +91,12 @@ class AssetReport:
             examples = self.file_examples.setdefault(reason, [])
             if len(examples) < 5:
                 examples.append(file_id)
+
+    def media_block(self, reason: str, record_id: int) -> None:
+        self.block(reason)
+        examples = self.media_examples.setdefault(reason, [])
+        if len(examples) < 5:
+            examples.append(record_id)
 
 
 _STORES = (
@@ -177,9 +200,11 @@ def _files(
     *,
     all_files: bool,
     compare: str | None,
+    covers_dir: Path | None,
+    legacy_covers_dir: Path | None,
 ) -> None:
     fingerprint = hashlib.sha256(
-        f"pullbox-comic-sample-v1:{report.snapshot_sha256}:{all_files}\n".encode()
+        f"pullbox-media-sample-v2:{report.snapshot_sha256}:{all_files}\n".encode()
     )
     complete = True
     roots = dict(db.execute("SELECT id,path FROM library_roots"))
@@ -241,9 +266,20 @@ def _files(
             report.block(reason)
             report.root_problems[root_id] = reason
             complete = False
-    if complete and report.files_hashed:
+    with ExitStack() as handles:
+        mounts = MediaMounts(handles, roots, mappings, report.root_problems)
+        verify_placements(db, mounts, report, fingerprint.update)
+        verify_covers(db, mounts, report, fingerprint.update, covers_dir, legacy_covers_dir)
+        mounts.recheck()
+    if (
+        complete
+        and not report.blockers
+        and (
+            report.files_hashed or report.placements_checked or report.covers_checked or covers_dir
+        )
+    ):
         report.sample_sha256 = fingerprint.hexdigest()
-    if compare is not None and complete:
+    if compare is not None and complete and not report.blockers:
         if report.sample_sha256 != compare.lower():
             report.block("sample_mismatch")
         else:
@@ -259,6 +295,8 @@ def check_assets(
     all_files: bool,
     configured_url: str,
     config_path: Path,
+    covers_dir: Path | None = None,
+    legacy_covers_dir: Path | None = None,
 ) -> AssetReport:
     report = AssetReport(hash_scope="all" if all_files else "sample")
     try:
@@ -282,7 +320,15 @@ def check_assets(
                         report.block(code)
                 else:
                     _credentials(db, config_path, report)
-                    _files(db, _maps(root_args), report, all_files=all_files, compare=compare)
+                    _files(
+                        db,
+                        _maps(root_args),
+                        report,
+                        all_files=all_files,
+                        compare=compare,
+                        covers_dir=covers_dir,
+                        legacy_covers_dir=legacy_covers_dir,
+                    )
     except (BackupInputError, AssetVerificationError) as exc:
         report.block(str(exc))
     except (OSError, sqlite3.Error, ValueError, RuntimeError):

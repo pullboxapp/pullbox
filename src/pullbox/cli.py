@@ -163,6 +163,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--compare-sample", help="Expected sample fingerprint from the original mount"
     )
     assets.add_argument("--all-files", action="store_true", help="Hash every registered file")
+    assets.add_argument(
+        "--covers-dir", type=Path, help="Effective cover-cache directory on this mount"
+    )
+    assets.add_argument(
+        "--legacy-covers-dir", type=Path, help="Separate legacy covers directory, if configured"
+    )
 
     # reset-password
     rp = subparsers.add_parser(
@@ -265,6 +271,8 @@ def main() -> None:
             args.root,
             compare=args.compare_sample,
             all_files=args.all_files,
+            covers_dir=args.covers_dir,
+            legacy_covers_dir=args.legacy_covers_dir,
             configured_url=settings.db_url,
             config_path=settings.data_dir / "config.xml",
         )

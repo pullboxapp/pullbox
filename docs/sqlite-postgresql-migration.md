@@ -211,7 +211,7 @@ configuration and retry without repeating the transfer.
 
    ```sh
    python -m pullbox.cli migration-check-assets --backup /backups/pullbox.zip \
-     --snapshot-sha256 "$STAGED_SNAPSHOT_SHA256" --root 1=/comics
+     --snapshot-sha256 "$STAGED_SNAPSHOT_SHA256" --root 1=/comics --covers-dir /comics/.covers
    ```
 
 2. Run the same command in an isolated environment with the **proposed**
@@ -222,7 +222,15 @@ configuration and retry without repeating the transfer.
    for each nonempty root. Omit mappings to see root IDs and inventory counts;
    an unmapped nonempty root blocks the check. Never map the filesystem root.
 
-The report distinguishes three kinds of evidence:
+Use the effective cover-cache directory for this installation, not necessarily
+`/comics/.covers`. If Pullbox also uses a separate legacy cover cache, include
+`--legacy-covers-dir /path/to/legacy/cache` on both runs. Without `--covers-dir`,
+only cover files in mapped series folders can be checked; a pass with
+`cover_cache_mapped: false` is not evidence about a separate cache. Generate a
+new original fingerprint with this version; earlier comic-only fingerprints
+cannot verify Story Arc files or artwork.
+
+The report distinguishes these checks:
 
 - **Key:** `key_evidence: verified` means the effective application key decrypted
   the saved encrypted values, including metadata sources, download clients,
@@ -245,7 +253,22 @@ The report distinguishes three kinds of evidence:
   original fingerprint. A newly recorded sample alone is not a comparison.
   To compare every byte of every registered comic, use `--all-files` on **both**
   runs. This can read the entire library twice.
+- **Story Arc files:** Every recorded placement is checked against its canonical
+  comic and saved ownership evidence. A hardlink must still share the file's
+  identity, a symlink must point to the exact canonical path in the selected
+  mount layout, and a copy must still be independent. Adopted files stay
+  referenced. Run the check with the same container paths that Pullbox will use,
+  particularly for absolute symlinks. A changed inode or device can block the
+  check even when the bytes survived: the app cannot safely use its old ownership
+  proof. Review the placement in Story Arcs; do not delete files or edit the
+  database to pass. A purely logical reading order needs no physical placement.
+- **Local artwork:** The fingerprint includes local series, issue and arc artwork
+  found in supported folder/cache locations, even without a saved cover URL.
+  A missing issue cover is not satisfied by a series fallback. Empty files,
+  links and unsupported local references are not certified. No remote artwork
+  is downloaded. This compares bytes; it does not decode images or back up
+  unrelated files. Counts are per artwork reference, not unique inodes.
 
 Exit code 1 means the check was blocked; do not use a fingerprint from a failed
-run. A passing check does not freeze the source, verify unregistered covers or
-separate Story Arc placements, start workers, or authorize switching databases.
+run. A passing check does not freeze the source, inspect unrelated assets,
+start workers, or authorize switching databases.
