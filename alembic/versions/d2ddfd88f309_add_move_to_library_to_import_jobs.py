@@ -23,7 +23,7 @@ def upgrade() -> None:
     """Add move_to_library column to import_jobs."""
     op.add_column(
         "import_jobs",
-        sa.Column("move_to_library", sa.Boolean(), nullable=False, server_default=sa.text("1")),
+        sa.Column("move_to_library", sa.Boolean(), nullable=False, server_default=sa.true()),
     )
 
 

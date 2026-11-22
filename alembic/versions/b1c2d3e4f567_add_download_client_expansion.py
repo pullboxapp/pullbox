@@ -21,6 +21,10 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     """Add NZBGet, Transmission, and Deluge columns to download_client_configs."""
+    if op.get_bind().dialect.name == "postgresql":
+        op.execute("ALTER TYPE downloadclienttype ADD VALUE IF NOT EXISTS 'NZBGET'")
+        op.execute("ALTER TYPE downloadclienttype ADD VALUE IF NOT EXISTS 'TRANSMISSION'")
+        op.execute("ALTER TYPE downloadclienttype ADD VALUE IF NOT EXISTS 'DELUGE'")
     # NZBGet-specific options
     op.add_column(
         "download_client_configs",

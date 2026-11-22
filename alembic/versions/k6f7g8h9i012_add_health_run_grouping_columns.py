@@ -29,7 +29,7 @@ def upgrade() -> None:
             "is_summary",
             sa.Boolean(),
             nullable=False,
-            server_default=sa.text("1"),
+            server_default=sa.true(),
         ),
     )
     op.create_index(

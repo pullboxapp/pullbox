@@ -584,7 +584,7 @@ def _create_import_story_arc_tables() -> None:
         sa.ForeignKeyConstraint(
             ["imported_story_arc_id"],
             ["import_story_arcs.id"],
-            name="fk_import_story_arc_entries_imported_story_arc_id_import_story_arcs",
+            name=op.f("fk_import_story_arc_entries_imported_story_arc_id_import_story_arcs"),
             ondelete="CASCADE",
         ),
         sa.ForeignKeyConstraint(
@@ -602,7 +602,7 @@ def _create_import_story_arc_tables() -> None:
         sa.ForeignKeyConstraint(
             ["materialized_membership_id"],
             ["issue_story_arcs.id"],
-            name="fk_import_story_arc_entries_materialized_membership_id_issue_story_arcs",
+            name=op.f("fk_import_story_arc_entries_materialized_membership_id_issue_story_arcs"),
             ondelete="SET NULL",
         ),
         sa.PrimaryKeyConstraint("id", name="pk_import_story_arc_entries"),

@@ -1,11 +1,13 @@
-"""The target probe must never create, clean, or connect the application to a database."""
+"""Read-only target checks and fresh-install rehearsals on disposable databases."""
 
 import json
 import os
 import secrets
+import sqlite3
 import subprocess
 import sys
 import time
+from contextlib import closing
 from pathlib import Path
 from uuid import uuid4
 
@@ -190,3 +192,117 @@ def test_images_install_the_existing_postgres_extra(name):
     recipe = (Path(__file__).resolve().parents[2] / "docker" / name).read_text()
     group = "prod" if name == "Dockerfile" else "dev"
     assert f'".[{group},postgres]"' in recipe
+
+
+_CONFIG = str(Path(__file__).resolve().parents[2] / "alembic/alembic.ini")
+
+
+def _migrate(url, command, revision):
+    run = subprocess.run(
+        [sys.executable, "-m", "alembic", "-c", _CONFIG, command, revision],
+        env={**os.environ, "PULLBOX_DB_URL": url},
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if run.returncode:
+        from sqlalchemy.engine import make_url
+
+        step = [line for line in run.stderr.splitlines() if "Running " in line][-1:]
+        error = [line for line in run.stderr.splitlines() if "Error:" in line][-1:]
+        message = " ".join(step + error)
+        if password := make_url(url).password:
+            message = message.replace(password, "[redacted]")
+        pytest.fail(message, pytrace=False)
+    return run.stderr
+
+
+def test_fresh_postgres_migrations_reach_head(server):
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    from pullbox.models import Base
+
+    _, password, port, sql = server
+    database = "install_" + uuid4().hex
+    sql("postgres", f"CREATE DATABASE {database} OWNER probe_owner TEMPLATE template0")
+    url = f"postgresql+asyncpg://probe_owner:{password}@127.0.0.1:{port}/{database}"
+    head = ScriptDirectory.from_config(Config(_CONFIG)).get_current_head()
+    _migrate(url, "upgrade", "head")
+    assert "Running upgrade" not in _migrate(url, "upgrade", "head")
+    assert sql(database, "SELECT version_num FROM alembic_version") == head
+    tables = sql(database, "SELECT tablename FROM pg_tables WHERE schemaname='public'")
+    assert set(tables.splitlines()) == set(Base.metadata.tables) | {"alembic_version"}
+    defaults = sql(
+        database,
+        "SELECT column_default FROM information_schema.columns "
+        "WHERE table_schema='public' AND table_name='indexer_configs' "
+        "AND column_name IN ('enable_rss','enable_automatic_search',"
+        "'enable_interactive_search')",
+    )
+    assert defaults.splitlines() == ["true"] * 3
+
+
+def _populated_upgrade(url, execute, scalar):
+    _migrate(url, "upgrade", "b5e2a8f41c03")
+    for statement in (
+        "INSERT INTO series(id,title,sort_title,status,issue_count,monitored,monitor_type,"
+        "year_start) VALUES (71,'Test series','Test series','ENDED',1,true,'ALL',1993)",
+        "INSERT INTO issues(id,series_id,issue_number,status,release_date) "
+        "VALUES (82,71,0.5,'OWNED','1995-06-01')",
+        "INSERT INTO download_history(id,issue_id,title,download_url,download_client,state) "
+        "VALUES(93,82,'Existing download','fixture','QBITTORRENT','IMPORTED')",
+        "INSERT INTO system_config(key,value,value_type) "
+        "VALUES('search_log_retention_days','31','int')",
+        "INSERT INTO indexer_configs(id,name,indexer_type,url,api_key,enabled,"
+        "priority,failure_count) "
+        "VALUES(69,'Existing indexer','NEWZNAB','fixture','fixture',true,10,0)",
+    ):
+        execute(statement)
+    # Commit the type-creating revision, exercise rollback/reapply, then continue.
+    _migrate(url, "upgrade", "h3c4d5e6f789")
+    _migrate(url, "downgrade", "g2b3d4e5f678")
+    _migrate(url, "upgrade", "head")
+    checks = {
+        "SELECT value FROM system_config WHERE key='search_log_retention_days'": "31",
+        "SELECT year_end FROM series WHERE id=71 AND series_type='STANDARD'": "1995",
+        "SELECT status FROM issues WHERE id=82 AND series_id=71 AND issue_number=0.5": "OWNED",
+        "SELECT protocol FROM download_history WHERE id=93 AND issue_id=82 AND "
+        "download_client='QBITTORRENT' AND state='IMPORTED'": "torrent",
+        "SELECT count(*) FROM indexer_configs WHERE id=69 AND enable_rss "
+        "AND enable_automatic_search AND enable_interactive_search": "1",
+    }
+    for statement, expected in checks.items():
+        assert str(scalar(statement)) == expected
+
+
+def test_populated_postgres_migration_preserves_values_and_backfills(server):
+    _, password, port, sql = server
+    db = "upgrade_" + uuid4().hex
+    sql("postgres", f"CREATE DATABASE {db} OWNER probe_owner TEMPLATE template0")
+    url = f"postgresql+asyncpg://probe_owner:{password}@127.0.0.1:{port}/{db}"
+
+    def query(statement):
+        return sql(db, statement)
+
+    _populated_upgrade(url, query, query)
+    labels = query("SELECT enumlabel FROM pg_enum WHERE enumtypid='downloadclienttype'::regtype")
+    assert {"AIRDCPP", "NZBGET", "DELUGE", "TRANSMISSION", "DIRECT"} <= set(labels.splitlines())
+
+
+def test_populated_sqlite_migration_keeps_supported_layout_and_behavior(tmp_path):
+    from pullbox.services.database_migration_preflight import inspect_migration_backup
+
+    db = tmp_path / "legacy.db"
+
+    def execute(statement):
+        with closing(sqlite3.connect(db)) as conn, conn:
+            conn.execute(statement)
+
+    def scalar(statement):
+        with closing(sqlite3.connect(db)) as conn:
+            return conn.execute(statement).fetchone()[0]
+
+    _populated_upgrade(f"sqlite+aiosqlite:///{db}", execute, scalar)
+    report = inspect_migration_backup(db, configured_url="sqlite:///:memory:")
+    assert report.source_checks_passed, report.blockers

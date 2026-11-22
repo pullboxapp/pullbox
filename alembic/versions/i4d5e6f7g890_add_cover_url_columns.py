@@ -19,11 +19,7 @@ depends_on = None
 
 
 def _column_exists(table: str, column: str) -> bool:
-    """Check if a column already exists in the given table (SQLite)."""
-    conn = op.get_bind()
-    result = conn.execute(sa.text(f"PRAGMA table_info('{table}')"))
-    columns = [row[1] for row in result]
-    return column in columns
+    return any(col["name"] == column for col in sa.inspect(op.get_bind()).get_columns(table))
 
 
 def upgrade() -> None:

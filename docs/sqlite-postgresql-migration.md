@@ -60,8 +60,9 @@ blockers. It refuses populated databases (including unrelated objects), ambiguou
 ownership, read-only databases, and targets with other connected sessions or
 pending prepared transactions. Use a fresh target rather than clearing a database
 that fails inspection. The same exit codes as the source check apply. Target
-inspection has been exercised on PostgreSQL 16 and 18; this is not a claim that
-the whole application or migration is qualified on either version.
+inspection and application schema initialization have been rehearsed on
+PostgreSQL 16 and 18, including upgrades from a populated test database. This
+does not transfer a SQLite library or qualify the full application for cutover.
 
 **Neither pass is permission to cut over.** The checks do not reserve the
 target, stop live writers, initialize a schema, transfer rows, or verify a copy.

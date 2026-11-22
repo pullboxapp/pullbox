@@ -98,7 +98,10 @@ def upgrade() -> None:
     )
     op.execute(
         sa.text(
-            f"UPDATE download_history SET protocol = CASE download_client {cases} ELSE NULL END"
+            # Read existing labels as text; PostgreSQL must not cast a new enum
+            # label until the transaction adding it commits.
+            f"UPDATE download_history SET protocol = CASE CAST(download_client AS TEXT) "
+            f"{cases} ELSE NULL END"
         )
     )
 

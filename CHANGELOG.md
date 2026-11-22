@@ -139,6 +139,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fresh PostgreSQL installations can now run the historical schema migrations
+  to completion. Existing SQLite libraries do not need to rerun migrations.
+  This does not yet enable moving a library between database engines.
 - Deleting a series now keeps its chapters in surviving Story Arcs as missing,
   with their reading order and issue labels intact. Skipped chapters stay
   skipped. If an arc still has a managed copy or pending file work, the delete

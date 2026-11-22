@@ -31,18 +31,18 @@ def upgrade() -> None:
     )
     op.add_column(
         "indexer_configs",
-        sa.Column("enable_rss", sa.Boolean(), nullable=False, server_default=sa.text("1")),
+        sa.Column("enable_rss", sa.Boolean(), nullable=False, server_default=sa.true()),
     )
     op.add_column(
         "indexer_configs",
         sa.Column(
-            "enable_automatic_search", sa.Boolean(), nullable=False, server_default=sa.text("1")
+            "enable_automatic_search", sa.Boolean(), nullable=False, server_default=sa.true()
         ),
     )
     op.add_column(
         "indexer_configs",
         sa.Column(
-            "enable_interactive_search", sa.Boolean(), nullable=False, server_default=sa.text("1")
+            "enable_interactive_search", sa.Boolean(), nullable=False, server_default=sa.true()
         ),
     )
 

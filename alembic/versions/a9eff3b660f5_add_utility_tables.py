@@ -161,7 +161,11 @@ def upgrade() -> None:
         sa.Column(
             "timestamp",
             sa.Text(),
-            server_default=sa.text("(datetime('now', 'localtime'))"),
+            server_default=(
+                sa.text("to_char(CURRENT_TIMESTAMP, 'YYYY-MM-DD HH24:MI:SS')")
+                if op.get_bind().dialect.name == "postgresql"
+                else sa.text("(datetime('now', 'localtime'))")
+            ),
         ),
         sa.Column(
             "level",

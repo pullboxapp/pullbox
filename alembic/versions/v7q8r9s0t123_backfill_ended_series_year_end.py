@@ -40,7 +40,7 @@ def upgrade() -> None:
         sa.column("id", sa.Integer()),
         sa.column("year_start", sa.Integer()),
         sa.column("year_end", sa.Integer()),
-        sa.column("status", sa.String()),
+        sa.column("status", sa.Enum("CONTINUING", "ENDED", "UNKNOWN", name="seriesstatus")),
     )
     issues = sa.table(
         "issues",

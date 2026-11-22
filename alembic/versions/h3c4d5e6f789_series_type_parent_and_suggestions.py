@@ -14,52 +14,40 @@ down_revision = "g2b3d4e5f678"
 branch_labels = None
 depends_on = None
 
+_SERIES_TYPE = sa.Enum(
+    "STANDARD",
+    "ANNUAL",
+    "TPB",
+    "OMNIBUS",
+    "GRAPHIC_NOVEL",
+    "HARDCOVER",
+    "ONE_SHOT",
+    "SPECIAL",
+    "COMPENDIUM",
+    "DELUXE",
+    name="seriestype",
+)
+_SUGGESTION_STATUS = sa.Enum("pending", "accepted", "dismissed", name="suggestionstatus")
+
 
 def _column_exists(table: str, column: str) -> bool:
-    """Check if a column already exists in the given table (SQLite)."""
-    conn = op.get_bind()
-    result = conn.execute(sa.text(f"PRAGMA table_info('{table}')"))
-    return any(row[1] == column for row in result)
+    return any(col["name"] == column for col in sa.inspect(op.get_bind()).get_columns(table))
 
 
 def _index_exists(index_name: str) -> bool:
-    """Check if an index already exists (SQLite)."""
-    conn = op.get_bind()
-    result = conn.execute(
-        sa.text(f"SELECT 1 FROM sqlite_master WHERE type='index' AND name='{index_name}'")
-    )
-    return result.first() is not None
-
-
-def _table_exists(table: str) -> bool:
-    """Check if a table already exists (SQLite)."""
-    conn = op.get_bind()
-    result = conn.execute(
-        sa.text(f"SELECT 1 FROM sqlite_master WHERE type='table' AND name='{table}'")
-    )
-    return result.first() is not None
+    return sa.inspect(op.get_bind()).has_index("series", index_name)
 
 
 def upgrade() -> None:
     # Add series_type column to series table
     if not _column_exists("series", "series_type"):
+        if op.get_bind().dialect.name == "postgresql":
+            _SERIES_TYPE.create(op.get_bind(), checkfirst=True)
         op.add_column(
             "series",
             sa.Column(
                 "series_type",
-                sa.Enum(
-                    "STANDARD",
-                    "ANNUAL",
-                    "TPB",
-                    "OMNIBUS",
-                    "GRAPHIC_NOVEL",
-                    "HARDCOVER",
-                    "ONE_SHOT",
-                    "SPECIAL",
-                    "COMPENDIUM",
-                    "DELUXE",
-                    name="seriestype",
-                ),
+                _SERIES_TYPE,
                 nullable=False,
                 server_default="STANDARD",
             ),
@@ -77,7 +65,7 @@ def upgrade() -> None:
         op.create_index("ix_series_parent_series_id", "series", ["parent_series_id"])
 
     # Create matching_suggestions table (skip if already exists)
-    if _table_exists("matching_suggestions"):
+    if sa.inspect(op.get_bind()).has_table("matching_suggestions"):
         return
     op.create_table(
         "matching_suggestions",
@@ -104,7 +92,7 @@ def upgrade() -> None:
         sa.Column("reason", sa.Text(), nullable=True),
         sa.Column(
             "status",
-            sa.Enum("pending", "accepted", "dismissed", name="suggestionstatus"),
+            _SUGGESTION_STATUS,
             server_default="pending",
             nullable=False,
         ),
@@ -140,3 +128,6 @@ def downgrade() -> None:
         batch_op.drop_column("parent_series_id")
     op.drop_index("ix_series_series_type", "series")
     op.drop_column("series", "series_type")
+    if op.get_bind().dialect.name == "postgresql":
+        _SUGGESTION_STATUS.drop(op.get_bind(), checkfirst=True)
+        _SERIES_TYPE.drop(op.get_bind(), checkfirst=True)

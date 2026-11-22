@@ -33,8 +33,8 @@ def upgrade() -> None:
     # Seed search_log_retention_days config key
     op.execute(
         sa.text(
-            "INSERT OR IGNORE INTO system_config (key, value, value_type) "
-            "VALUES ('search_log_retention_days', '7', 'int')"
+            "INSERT INTO system_config (key, value, value_type) "
+            "VALUES ('search_log_retention_days', '7', 'int') ON CONFLICT (key) DO NOTHING"
         )
     )
 

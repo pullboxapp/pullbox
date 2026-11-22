@@ -982,6 +982,27 @@ existing progress or permits downgrading away stored bookmarks.
 - Prefer one logical schema change per migration.
 - Separate data migrations from schema migrations when the change is non-trivial.
 
+**Bounded v2 PostgreSQL compatibility exception.** Thirteen historical
+revisions prevented a fresh PostgreSQL 16 or 18 installation from reaching
+head. Only the following corrections to those merged files were approved:
+
+| Revisions | Correction |
+| --- | --- |
+| `c7a2d1e5f890`, `d2ddfd88f309`, `k6f7g8h9i012`, `n9i0j1k2l345`, `o0j1k2l3m456` | Compile boolean defaults for the active database. |
+| `h3c4d5e6f789`, `i4d5e6f7g890` | Inspect existing columns, indexes and tables portably; manage the PostgreSQL enum lifecycle. |
+| `b7a3c5d9e1f2`, `a9eff3b660f5` | Preserve an existing setting on key conflict; use a database-appropriate local log timestamp. |
+| `v7q8r9s0t123` | Bind the ended-series status using its database enum when backfilling the end year. |
+| `b1c2d3e4f567`, `r3s4t5u6v789` | Define the expanded client types and backfill protocols from stored labels without committing early. |
+| `a2b3c4d5e678` | Allow dialect-length truncation of two long Story Arc foreign-key names. |
+
+The revision IDs, ancestry and SQLite schema contract stay unchanged. Do not
+stamp or replay these revisions on installed libraries. This exception does
+not relax immutability for other revisions or authorize future edits. Rehearse
+from empty databases and from populated predecessors with
+`PULLBOX_TEST_MIGRATION_TARGET_DOCKER=1 pytest tests/integration/test_database_migration_target.py`.
+The Docker tests use only throwaway databases and require the local
+`postgres:16-bookworm` and `postgres:18-bookworm` images.
+
 **Current repo nuances**
 
 - Migration history can preserve old implementation details. Current runtime
