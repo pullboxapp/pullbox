@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- [Check that a Docker SQLite source is offline](docs/sqlite-postgresql-migration.md#check-whether-the-docker-source-is-offline)
+  before migration. The check identifies containers with overlapping writable
+  mounts and detects a source restart without changing the running stack.
+
 - Offline migration checks now verify physical Story Arc copies and links and
   compare local cover artwork, without recreating files or fetching images.
 

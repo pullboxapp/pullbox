@@ -33,6 +33,47 @@ For a database larger than 32 GiB, use a standalone SQLite snapshot produced
 by a consistent backup operation. A raw copy of a running database is not a
 substitute, even if it appears readable.
 
+## Check whether the Docker source is offline
+
+The online backup above is suitable for rehearsal. Before preparing a final
+snapshot, check that the source is actually offline. From a checkout on the
+**local Docker host**, run:
+
+```sh
+python scripts/check_sqlite_source_offline.py --container pullbox
+```
+
+You can run this while the source is live to see what blocks. The command
+does not stop or restart anything. For an offline check, first settle
+pending file operations in Pullbox, suspend any service that automatically
+redeploys it, disable the container restart policy, and stop it cleanly.
+Keep the stopped container for comparison; do not remove it or its volumes.
+A crash or forced kill is not accepted as a clean stop.
+If the report lists `other_writer_ids`, inspect those containers before doing
+anything to them. Even a client writing to a shared downloads folder can
+invalidate the offline assumption. Read-only peer mounts do not block.
+
+Save the successful `checkpoint_sha256`. Check again with the same source
+and fingerprint after the offline work:
+
+```sh
+python scripts/check_sqlite_source_offline.py --container pullbox --compare-checkpoint "$OFFLINE_CHECKPOINT"
+```
+
+A restart followed by another stop, a replacement source, or a newly observed
+writable peer invalidates the earlier evidence. A failed check returns exit
+code 1 and no usable fingerprint. This is a **Docker state fingerprint, not
+a backup checksum or a write lock**. It does not create the final snapshot,
+verify application journals, or authorize cutover.
+
+This check is for one standalone local Linux Docker Engine (including Docker
+Desktop) with an explicit absolute `PULLBOX_DB_URL` and persistent data and
+library directories. It compares writable bind paths and ordinary local
+volumes, including parent and child mounts. It does not qualify orchestrators,
+remote/shared storage, host writers, other daemons, filesystem aliases or
+writers created and removed between observations. Do not rely on it for those
+setups. Keep external automation disabled and the source offline throughout.
+
 ## Check the destination
 
 Before initializing the destination, check a **new, dedicated PostgreSQL database**.
