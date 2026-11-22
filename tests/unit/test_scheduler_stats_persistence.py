@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy import URL, select
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -25,6 +26,16 @@ from pullbox.models.scheduler_task_stat import ScheduledTaskStat
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
+
+
+@pytest.mark.asyncio
+async def test_postgresql_task_stats_compile_as_an_atomic_upsert() -> None:
+    session = MagicMock()
+    session.get_bind.return_value.dialect = postgresql.dialect()
+    session.execute = AsyncMock()
+    await upsert_task_stat_row(session, "monitor_downloads", TaskStats(last_status="completed"))
+    sql = str(session.execute.await_args.args[0].compile(dialect=session.get_bind().dialect))
+    assert "ON CONFLICT (task_id) DO UPDATE" in sql
 
 
 @pytest.mark.asyncio

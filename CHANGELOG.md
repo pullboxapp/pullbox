@@ -184,6 +184,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Scheduled task results now persist on PostgreSQL, so the last run and its
+  outcome remain available after restarting Pullbox.
+
 - Manual issue imports stop before moving or replacing a comic when the source
   is on a read-only mount. The issue page explains how to retry with **Copy**.
 

@@ -10,6 +10,7 @@ from typing import Any
 
 import structlog
 from sqlalchemy import delete, func, make_url, select
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import ArgumentError, DatabaseError, OperationalError
 
@@ -150,7 +151,8 @@ async def upsert_task_stat_row(session: Any, task_id: str, stats: TaskStats) -> 
     last_missed_dt = parse_stat_timestamp(stats.last_missed_at)
     last_overlap_dt = parse_stat_timestamp(stats.last_overlap_at)
     last_exclusive_block_dt = parse_stat_timestamp(stats.last_exclusive_block_at)
-    stmt = sqlite_insert(ScheduledTaskStat).values(
+    insert = postgres_insert if session.get_bind().dialect.name == "postgresql" else sqlite_insert
+    stmt = insert(ScheduledTaskStat).values(
         task_id=task_id,
         last_execution=execution_dt,
         last_duration_seconds=stats.last_duration_seconds,
