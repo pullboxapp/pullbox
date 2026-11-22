@@ -30,6 +30,25 @@ def test_system_task_status_pills_center_their_labels() -> None:
 class TestSystemRouteContracts:
     """Verify the system area renders a stable mounted shell."""
 
+    async def test_postgres_backup_tab_explains_native_restore_without_zip_controls(
+        self, authenticated_client, monkeypatch
+    ):
+        from pullbox.config import get_settings
+
+        settings = get_settings().model_copy(update={"db_url": "postgresql+asyncpg://host/library"})
+        monkeypatch.setattr("pullbox.config.get_settings", lambda: settings)
+        monkeypatch.setattr("pullbox.ui.settings_routes.get_settings", lambda: settings)
+        for path in ("/system?tab=backup", "/htmx/system/backup"):
+            response = await authenticated_client.get(path)
+            assert response.status_code == 200
+            assert "pg_dump" in response.text and "pg_restore" in response.text
+            assert 'x-data="backupManager()"' not in response.text
+            assert "Backup now" not in response.text
+        settings_page = await authenticated_client.get("/settings?tab=general")
+        assert settings_page.status_code == 200
+        assert 'aria-label="Backup interval in days"' not in settings_page.text
+        assert 'href="/system?tab=backup"' in settings_page.text
+
     async def test_system_renders_standardized_shell(
         self,
         authenticated_client,

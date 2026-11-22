@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from pullbox.config import get_settings
+from pullbox.core.backup_storage import sqlite_backup_path
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -102,7 +103,9 @@ def _idle_status() -> dict[str, Any]:
 
 def has_pending_restore_recovery(*, data_dir: Path | None = None) -> bool:
     """Return True when startup should run post-restore aftercare."""
-    return _marker_path(data_dir).is_file()
+    return (
+        sqlite_backup_path(get_settings().db_url) is not None and _marker_path(data_dir).is_file()
+    )
 
 
 def mark_restore_recovery_pending(
@@ -191,6 +194,8 @@ async def run_restore_recovery_if_pending(
     data_dir: Path | None = None,
 ) -> dict[str, Any] | None:
     """Run post-restore aftercare once when a restore marker is present."""
+    if sqlite_backup_path(get_settings().db_url) is None:
+        return None
     marker_path = _marker_path(data_dir)
     marker = _read_json(marker_path)
     if marker is None:

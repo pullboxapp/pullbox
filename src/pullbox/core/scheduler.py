@@ -269,6 +269,8 @@ class PullboxScheduler:
                 configuration via application settings.
         """
         for task in _task_registry:
+            if task.available is not None and not task.available():
+                continue
             kwargs = {**task.trigger_kwargs}
             if overrides and task.task_id in overrides:
                 kwargs.update(overrides[task.task_id])
@@ -295,7 +297,7 @@ class PullboxScheduler:
                     task = registered
                     self._registered_tasks[task_id] = registered
                     break
-        if task is None:
+        if task is None or (task.available is not None and not task.available()):
             return None
 
         if self._running_counts.get(task_id, 0) > 0 or self._manual_current_task_id == task_id:
@@ -350,7 +352,7 @@ class PullboxScheduler:
         task = self._registered_tasks.get(task_id)
         if task is None:
             task = next((item for item in _task_registry if item.task_id == task_id), None)
-        if task is None:
+        if task is None or (task.available is not None and not task.available()):
             return False
         job_id = self._continuation_job_id(task_id)
         wrapped = self._wrap_task(

@@ -4,6 +4,72 @@ Start with the read-only source and destination checks below. A disposable
 rehearsal or a retained **offline staging copy** is a separate, explicit action.
 None of these commands switches your running library.
 
+## Back up and restore a PostgreSQL library
+
+This procedure is for an **already running PostgreSQL library**, not for
+opening an offline migration stage. On PostgreSQL, **System > Backup** explains
+the native procedure. Pullbox does not schedule SQLite ZIP backups, prune old
+ZIPs or apply SQLite post-restore actions to PostgreSQL. Arrange your own
+backup schedule and off-host storage.
+
+1. Pause writers, finish outstanding operations, then stop Pullbox and keep it
+   stopped while capturing the database **and** matching files. Include your
+   comics, Story Arc placements, covers, configuration, encryption secret and
+   deployment settings. A database dump alone cannot undo a later file edit or
+   prove that a journaled operation is safe to replay.
+2. Use PostgreSQL client tools matching the server's major version. On a private
+   backup host set `PGHOST`, `PGPORT`, and `PGUSER` explicitly; use a protected
+   password file or your normal secret mechanism. The database owner needs
+   read access to the entire library. This example dumps one database, not
+   cluster roles or privileges. Preserve the role and access configuration
+   separately. Set `BACKUP_DIR` to an existing private directory and
+   `SOURCE_DB` to the running library's database name. In a shell:
+
+   ```sh
+   (
+     set -eu
+     umask 077
+     capture=$(mktemp -d "${BACKUP_DIR:?}/pullbox-pg.XXXXXXXX")
+     pg_dump --format=custom --dbname="${SOURCE_DB:?}" --file="$capture/library.partial"
+     pg_restore --list "$capture/library.partial" >/dev/null
+     mv "$capture/library.partial" "$capture/library.dump"
+     printf 'Database archive: %s\n' "$capture/library.dump"
+   )
+   ```
+
+   A failed dump is not a restore point. Protect the completed backup and key
+   separately; custom format does not encrypt the dump. A readable table of
+   contents is **not** a restore test.
+3. Rehearse on an isolated server with **no Pullbox instance connected**.
+   Set the connection variables to that server, `DUMP` to your trusted archive
+   and `RESTORE_DB` to a **new** database name. Use a dedicated database owner
+   authorized to create this rehearsal database; do not grant the running
+   app this privilege. Reapply any site-specific grants separately.
+
+   ```sh
+   (
+     set -eu
+     : "${DUMP:?}" "${RESTORE_DB:?}"
+     createdb --template=template0 -- "$RESTORE_DB"
+     pg_restore --single-transaction --exit-on-error --no-owner --no-privileges \
+       --dbname="$RESTORE_DB" "$DUMP"
+   )
+   ```
+
+   If the name is occupied, creation fails and the restore does not run.
+   Do not add `--clean` or `--create`, restore over your live database, or
+   reopen a sealed stage. Leave a failed rehearsal unconnected and investigate.
+4. With workers still off, compare the restored schema revision, ownership,
+   import follow-up, Story Arc reading order, file journals and at least one
+   change made **after** migration. Verify the original key can decrypt a saved
+   credential without printing it, and verify matching files against their
+   saved ownership evidence. If any evidence differs, do not start workers.
+   After new PostgreSQL writes, the old SQLite snapshot is **not** a current
+   rollback target. This rehearsal does not authorize a live switch.
+
+See PostgreSQL's [pg_dump reference](https://www.postgresql.org/docs/18/app-pgdump.html)
+and [pg_restore reference](https://www.postgresql.org/docs/16/app-pgrestore.html).
+
 ## Check the source
 
 1. On the SQLite instance, open **System > Backup** and choose **Backup now**.

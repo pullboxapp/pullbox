@@ -35,6 +35,58 @@ class _StubRuntimeService:
 
 
 class TestSystemBackupRoutes:
+    @pytest.mark.parametrize(
+        ("action", "needs_name"),
+        [
+            ("list_backups", False),
+            ("create_backup", False),
+            ("download_backup", True),
+            ("delete_backup", True),
+            ("restore_backup", True),
+            ("restore_recovery_status", False),
+        ],
+    )
+    async def test_postgres_zip_endpoints_are_unavailable(
+        self, monkeypatch, tmp_path, action, needs_name
+    ):
+        from fastapi import HTTPException
+
+        from pullbox.api.v1 import system
+        from pullbox.config import get_settings
+
+        settings = get_settings().model_copy(
+            update={
+                "db_url": "postgresql://user:secret-fixture@host/sqlite",
+                "backup_dir": tmp_path / "absent",
+            }
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(system, "get_settings", lambda: settings)
+        monkeypatch.setattr("pullbox.config.get_settings", lambda: settings)
+        args = ["backup.zip"] if needs_name else []
+        session = AsyncMock()
+        with pytest.raises(HTTPException) as exc:
+            await getattr(system, action)(*args, object(), session)
+        assert exc.value.status_code == 409
+        assert "pg_dump" in exc.value.detail and "pg_restore" in exc.value.detail
+        assert "secret-fixture" not in exc.value.detail
+        assert not settings.backup_dir.exists()
+        session.commit.assert_not_awaited()
+
+    async def test_postgres_leaves_sqlite_aftercare_marker_for_original_database(
+        self, tmp_path, monkeypatch
+    ):
+        from pullbox.config import get_settings
+        from pullbox.services import restore_recovery_service as recovery
+
+        recovery.mark_restore_recovery_pending("archive.zip", data_dir=tmp_path)
+        before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
+        settings = get_settings().model_copy(update={"db_url": "postgresql://host/library"})
+        monkeypatch.setattr(recovery, "get_settings", lambda: settings)
+        assert not recovery.has_pending_restore_recovery(data_dir=tmp_path)
+        assert await recovery.run_restore_recovery_if_pending(data_dir=tmp_path) is None
+        assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before
+
     @pytest.mark.parametrize("operation", ["create", "restore"])
     async def test_manual_maintenance_releases_request_transaction(self, monkeypatch, operation):
         from pullbox.api.v1 import system

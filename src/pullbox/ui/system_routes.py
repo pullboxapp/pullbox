@@ -86,6 +86,11 @@ async def load_system_tab(
     tab: str,
 ) -> dict[str, object]:
     """Load data needed for a system tab."""
+    if tab == "backup":
+        from pullbox.config import get_settings
+        from pullbox.core.backup_storage import sqlite_backup_path
+
+        return {"sqlite_zip_available": sqlite_backup_path(get_settings().db_url) is not None}
     if tab == "about":
         from pullbox.api.v1.system import get_about as _get_about
 

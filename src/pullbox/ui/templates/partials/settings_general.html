@@ -316,6 +316,12 @@
     title_style="plain",
     body_class="p-0"
   ) %}
+    {% if not sqlite_zip_available %}
+    <div class="section-body text-sm text-pb-text-sec">
+      SQLite ZIP scheduling and retention do not apply to this database.
+      <a class="btn-secondary btn-sm" href="/system?tab=backup">View backup instructions</a>
+    </div>
+    {% else %}
     <form x-data="dirtyForm()" @input="checkDirty()" @change="checkDirty()" @submit.prevent="saveBackupSettings().then(() => markClean())">
       <div class="settings-rows settings-rows-align-end">
         {% call settings_row(label="Backup Directory", help="Directory where backup archives are stored.") %}
@@ -347,6 +353,7 @@
         </div>
       {% endcall %}
     </form>
+    {% endif %}
   {% endcall %}
 
   {% include 'components/file_browser.html' %}

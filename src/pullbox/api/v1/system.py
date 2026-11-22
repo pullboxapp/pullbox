@@ -45,6 +45,7 @@ from pullbox.api.v1.system_logs import (
     validate_safe_filename as _validate_safe_filename,
 )
 from pullbox.config import get_settings
+from pullbox.core.backup_storage import ZIP_BACKUP_UNAVAILABLE, sqlite_backup_path
 from pullbox.core.build_metadata import get_build_metadata
 from pullbox.core.config_resolver import load_system_config_values
 from pullbox.core.shutdown import shutdown_manager
@@ -136,15 +137,10 @@ def _resolve_db_path() -> Path:
     """Extract the SQLite file path from the configured database URL."""
     from pullbox.config import get_settings
 
-    settings = get_settings()
-    db_url = settings.db_url
-    if ":///" in db_url:
-        raw_path = db_url.split(":///", 1)[1]
-    elif "://" in db_url:
-        raw_path = db_url.split("://", 1)[1]
-    else:
-        raw_path = db_url
-    return Path(raw_path)
+    path = sqlite_backup_path(get_settings().db_url)
+    if path is None:
+        raise HTTPException(status_code=409, detail=ZIP_BACKUP_UNAVAILABLE)
+    return path
 
 
 async def _get_backup_service(session: DbSession) -> BackupService:
@@ -328,6 +324,7 @@ async def restore_recovery_status(
     _session: DbSession,
 ) -> dict[str, Any]:
     """Return post-restore aftercare status for the Backup page."""
+    _resolve_db_path()
     return get_restore_recovery_status()
 
 
@@ -734,6 +731,8 @@ async def run_task(
     """Queue immediate execution of a scheduled task."""
     from pullbox.core.scheduler import get_scheduler
 
+    if task_id == "run_backups":
+        _resolve_db_path()
     manual_run_disabled_reason = await _task_manual_run_disabled_reason()
     if manual_run_disabled_reason:
         raise HTTPException(

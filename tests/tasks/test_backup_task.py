@@ -128,6 +128,34 @@ def _runtime_settings(backup_dir: Path) -> SimpleNamespace:
 class TestRunBackups:
     """Tests for the run_backups() scheduled task."""
 
+    async def test_postgres_preserves_old_sqlite_backups(self, db_factory, backup_dir):
+        from pullbox.tasks import backup_task
+
+        archive = _create_old_scheduled_backup(backup_dir, age_days=60)
+        original = archive.read_bytes()
+        settings = SimpleNamespace(
+            db_url="postgresql+asyncpg://host/library", backup_dir=backup_dir
+        )
+        with (
+            patch.object(backup_task, "get_settings", return_value=settings),
+            patch.object(backup_task, "get_session_factory", return_value=db_factory) as factory,
+        ):
+            await backup_task.run_backups()
+        assert archive.read_bytes() == original
+        factory.assert_not_called()
+
+    async def test_postgres_backup_cannot_be_scheduled_or_queued(self, monkeypatch):
+        from pullbox.core.scheduler import PullboxScheduler
+        from pullbox.tasks import backup_task
+
+        monkeypatch.setattr(
+            backup_task, "get_settings", lambda: SimpleNamespace(db_url="postgresql://db/library")
+        )
+        scheduler = PullboxScheduler()
+        scheduler.register_tasks()
+        assert scheduler._scheduler.get_job("run_backups") is None
+        assert scheduler.run_task_now("run_backups") is None
+
     @pytest.mark.asyncio
     async def test_creates_backup_when_no_previous_exists(
         self,

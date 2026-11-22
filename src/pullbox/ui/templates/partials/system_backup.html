@@ -1,6 +1,20 @@
 {#- System: Backup tab -#}
 {% from "components/settings_shell.html" import section_header, ui_icon %}
 
+{% if not sqlite_zip_available %}
+<div class="space-y-6 pt-6">
+  <section class="section-card">
+    {{ section_header(title="Database backups", eyebrow="Restore points", title_style="plain",
+        description="Pullbox creates ZIP restore points only for file-backed SQLite libraries.") }}
+    <div class="section-body space-y-4 text-sm leading-6 text-pb-text-sec">
+      <p>For PostgreSQL, back up with <code>pg_dump</code> and restore with <code>pg_restore</code>
+        into a new, empty database. Pullbox does not schedule those backups or prune your old SQLite ZIPs.</p>
+      <p>Stop Pullbox before capturing the database and files together. Keep your configuration,
+        encryption key and library files with that recovery point; a database dump contains none of them.</p>
+    </div>
+  </section>
+</div>
+{% else %}
 <div class="space-y-6 pt-6" x-data="backupManager()" x-init="init()">
   <section class="section-card">
     {% call section_header(
@@ -403,3 +417,4 @@ function backupManager() {
   };
 }
 </script>
+{% endif %}

@@ -13,6 +13,7 @@ from starlette.responses import Response
 
 from pullbox.api.deps import AuthenticatedUser, DbSession
 from pullbox.config import get_settings
+from pullbox.core.backup_storage import sqlite_backup_path
 from pullbox.core.naming import (
     resolve_collection_non_standard_file_template,
     resolve_single_non_standard_file_template,
@@ -238,6 +239,7 @@ async def load_settings_tab(request: Request, session: DbSession, tab: str) -> d
             "base_url_source": identity.base_url.source,
         }
         ctx["runtime_info"] = runtime_snapshot_to_dict(get_runtime_status_snapshot())
+        ctx["sqlite_zip_available"] = sqlite_backup_path(get_settings().db_url) is not None
         ctx["https_settings"] = https_settings_snapshot_to_dict(
             await load_https_settings_snapshot(session)
         )

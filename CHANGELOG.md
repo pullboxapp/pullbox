@@ -169,6 +169,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- On PostgreSQL, **System > Backup** now explains [native backup and restore](docs/sqlite-postgresql-migration.md#back-up-and-restore-a-postgresql-library).
+  Pullbox no longer schedules SQLite ZIP backups, prunes a previous SQLite
+  library's restore points, or processes its pending restore marker.
+
 - PostgreSQL now preserves import file sizes above 2 GiB, duplicate and
   safety-approved import outcomes, and series classified as volumes.
 - Fixed a dashboard error after signing in on PostgreSQL. On SQLite, pending

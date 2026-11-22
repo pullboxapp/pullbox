@@ -19,6 +19,7 @@ class RegisteredTask:
     trigger_kwargs: dict[str, Any]
     display_name: str = ""
     exclusive: bool = False
+    available: Callable[[], bool] | None = None
 
 
 task_registry: list[RegisteredTask] = []
@@ -30,6 +31,7 @@ def scheduled_task(
     trigger: str,
     display_name: str = "",
     exclusive: bool = False,
+    available: Callable[[], bool] | None = None,
     **trigger_kwargs: Any,
 ) -> Callable[[F], F]:
     """Register an async function as a scheduled background task."""
@@ -43,6 +45,7 @@ def scheduled_task(
                 trigger_kwargs=dict(trigger_kwargs),
                 display_name=display_name or task_id.replace("_", " ").title(),
                 exclusive=exclusive,
+                available=available,
             )
         )
         return func

@@ -7,7 +7,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 from urllib.parse import quote
 from uuid import uuid4
@@ -56,9 +56,14 @@ def test_unreachable_target_is_bounded_and_redacted():
 
 @pytest.fixture(scope="module", params=[16, 18])
 def server(request):
+    with disposable_server(request.param) as (_, info):
+        yield info
+
+
+@contextmanager
+def disposable_server(major):
     if os.environ.get("PULLBOX_TEST_MIGRATION_TARGET_DOCKER") != "1":
         pytest.skip("opt in to disposable Docker PostgreSQL 16 and 18")
-    major = request.param
     password = secrets.token_hex(20)
     container = "pullbox-target-probe-" + uuid4().hex
 
@@ -116,7 +121,7 @@ def server(request):
 
         sql("postgres", f"CREATE ROLE probe_owner LOGIN PASSWORD '{password}';")
         port = int(docker("port", container, "5432/tcp", check=True).stdout.strip().split(":")[-1])
-        yield major, password, port, sql
+        yield container, (major, password, port, sql)
     finally:
         docker("rm", "-f", container, check=True)
 

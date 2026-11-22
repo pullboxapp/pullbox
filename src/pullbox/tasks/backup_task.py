@@ -8,15 +8,19 @@ backups that exceed the retention period.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import structlog
 
 from pullbox.config import get_settings
+from pullbox.core.backup_storage import sqlite_backup_path
 from pullbox.core.config_resolver import get_int_setting, load_system_config_values
 from pullbox.core.scheduler import get_current_task_trigger_type, scheduled_task
 from pullbox.database import get_session_factory
 from pullbox.services.backup_runtime_service import BackupRuntimeService
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 logger = structlog.get_logger(__name__)
 
@@ -25,30 +29,23 @@ _DEFAULT_BACKUP_INTERVAL_DAYS = 7
 _DEFAULT_BACKUP_RETENTION_DAYS = 28
 
 
-def _resolve_db_path() -> Path:
-    """Extract the SQLite file path from the configured database URL."""
-    settings = get_settings()
-    db_url = settings.db_url
-    # db_url is like "sqlite+aiosqlite:///data/pullbox.db"
-    # Strip the scheme to get the file path
-    if ":///" in db_url:
-        raw_path = db_url.split(":///", 1)[1]
-    elif "://" in db_url:
-        raw_path = db_url.split("://", 1)[1]
-    else:
-        raw_path = db_url
-    return Path(raw_path)
+def _resolve_db_path() -> Path | None:
+    return sqlite_backup_path(get_settings().db_url)
 
 
 @scheduled_task(
     task_id="run_backups",
     trigger="cron",
     display_name="Backup",
+    available=lambda: _resolve_db_path() is not None,
     hour=3,
     exclusive=True,
 )
 async def run_backups() -> None:
     """Create a scheduled backup if the interval has elapsed, then enforce retention."""
+    db_path = _resolve_db_path()
+    if db_path is None:
+        return
     factory = get_session_factory()
     trigger_type = get_current_task_trigger_type()
 
@@ -71,7 +68,6 @@ async def run_backups() -> None:
             await session.rollback()
             raise
 
-    db_path = _resolve_db_path()
     runtime_svc = BackupRuntimeService(backup_dir=backup_dir, db_path=db_path)
     svc = runtime_svc.service
 
