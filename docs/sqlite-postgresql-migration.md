@@ -155,5 +155,56 @@ must show `accepts_connections = f`. On an incomplete stage, keep the source,
 correct the reported blocker and use a **fresh** empty target. The command
 does not resume, reopen or delete the old stage. Have the database owner
 confirm its identity before retiring it. Do not enable connections manually.
-Credential decryption, physical file verification and explicit cutover are
-separate steps; even a successful stage is **not ready for normal startup**.
+Even a successful stage is **not ready for normal startup**.
+
+## Check the key and comic files
+
+Use `migration-check-assets` from a Pullbox version that includes it. Supply
+the **same backup** and the `snapshot_sha256` from a successful stage report.
+This read-only command checks the backup whose rows matched PostgreSQL; it
+does not connect to PostgreSQL or reopen the stage. You can correct a mount or
+configuration and retry without repeating the transfer.
+
+1. With the original configuration and comic mounts available, record the
+   reference fingerprint. Example for library root ID 1:
+
+   ```sh
+   python -m pullbox.cli migration-check-assets --backup /backups/pullbox.zip \
+     --snapshot-sha256 "$STAGED_SNAPSHOT_SHA256" --root 1=/comics
+   ```
+
+2. Run the same command in an isolated environment with the **proposed**
+   configuration and read-only comic mounts. Add
+   `--compare-sample "$ORIGINAL_SAMPLE_SHA256"`, using the `sample_sha256`
+   from the successful **original** run. The two paths may differ, but the
+   library root IDs must refer to the same libraries. Repeat `--root ID=/mount`
+   for each nonempty root. Omit mappings to see root IDs and inventory counts;
+   an unmapped nonempty root blocks the check. Never map the filesystem root.
+
+The report distinguishes three kinds of evidence:
+
+- **Key:** `key_evidence: verified` means the effective application key decrypted
+  the saved encrypted values, including metadata sources, download clients,
+  indexers, direct providers, artifact hosts and resolver credentials. No provider
+  was contacted; this does not verify that a token is current or that a user can
+  sign in. `no_ciphertext` means the backup cannot prove which key was used.
+  Retain the original key even then. Use the original secret environment setting
+  or saved `config.xml`, following normal Pullbox precedence. Never send a key
+  in chat or put it in the command arguments. A missing configuration is not
+  created and legacy plaintext is not accepted as decryption evidence.
+- **Files:** Every registered library file, managed or referenced, must be a
+  readable regular file beneath its explicitly mapped root, with the recorded
+  size and any saved signature timestamp. Symlinks and paths outside the
+  mapped root block the check. File errors include counts and up to five
+  numeric library file IDs, not filenames. Verify original mounts before
+  treating a missing file as lost; do not clear import or recovery history.
+- **Content:** The default hashes the first, middle and last file by ID in each
+  nonempty root. It checks any saved SHA-256 or placement digest for those files.
+  `sample_compared: true` means the proposed mount also matched the independent
+  original fingerprint. A newly recorded sample alone is not a comparison.
+  To compare every byte of every registered comic, use `--all-files` on **both**
+  runs. This can read the entire library twice.
+
+Exit code 1 means the check was blocked; do not use a fingerprint from a failed
+run. A passing check does not freeze the source, verify unregistered covers or
+separate Story Arc placements, start workers, or authorize switching databases.

@@ -151,6 +151,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Read the dedicated target URL from standard input, never the app configuration",
     )
     target.add_argument("--json", action="store_true", help="Print a redacted target report")
+    assets = subparsers.add_parser(
+        "migration-check-assets", help="Check the key and comic mounts for a staged backup offline"
+    )
+    assets.add_argument("--backup", type=Path, required=True)
+    assets.add_argument(
+        "--snapshot-sha256", required=True, help="Fingerprint from the stage report"
+    )
+    assets.add_argument("--root", action="append", default=[], help="Library root ID=absolute path")
+    assets.add_argument(
+        "--compare-sample", help="Expected sample fingerprint from the original mount"
+    )
+    assets.add_argument("--all-files", action="store_true", help="Hash every registered file")
 
     # reset-password
     rp = subparsers.add_parser(
@@ -242,6 +254,25 @@ def main() -> None:
                 print(f"- {reason}")
             print(target.next_step)
         if not target.target_checks_passed:
+            sys.exit(1)
+    elif args.command == "migration-check-assets":
+        from pullbox.services.migration_assets import check_assets
+
+        settings = get_settings()
+        assets = check_assets(
+            args.backup,
+            args.snapshot_sha256,
+            args.root,
+            compare=args.compare_sample,
+            all_files=args.all_files,
+            configured_url=settings.db_url,
+            config_path=settings.data_dir / "config.xml",
+        )
+        output = asdict(assets)
+        output["credential_stores_with_errors"] = sorted(assets.credential_stores_with_errors)
+        output["next_step"] = assets.next_step
+        print(json.dumps(output, sort_keys=True))
+        if not assets.checks_passed:
             sys.exit(1)
     elif args.command == "migration-preflight":
         from pullbox.services.database_migration_preflight import inspect_migration_backup

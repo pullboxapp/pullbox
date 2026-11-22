@@ -46,15 +46,18 @@ def _get_fernet() -> Fernet:
     """
     from pullbox.core.config_resolver import get_application_secret
 
-    secret_key = get_application_secret().encode()
+    return derive_secret_cipher(get_application_secret())
 
+
+def derive_secret_cipher(secret: str) -> Fernet:
+    """Derive the storage cipher without loading or creating application configuration."""
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=32,
         salt=_SALT,
         iterations=480_000,
     )
-    derived = kdf.derive(secret_key)
+    derived = kdf.derive(secret.encode())
     fernet_key = base64.urlsafe_b64encode(derived)
     return Fernet(fernet_key)
 

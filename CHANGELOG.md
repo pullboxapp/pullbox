@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- [Check a staged migration's key and comic mounts offline](docs/sqlite-postgresql-migration.md#check-the-key-and-comic-files).
+  Compare a sample or the entire registered library without reopening PostgreSQL,
+  exposing credentials, or changing files.
+
 - [Keep an offline PostgreSQL staging copy](docs/sqlite-postgresql-migration.md#keep-an-offline-staging-copy)
   of a verified SQLite backup. The copy stays closed to application connections,
   including after an interruption; your running library is not switched.
