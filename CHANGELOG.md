@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- When a story arc has an unmatched chapter or no supported file for it,
+  the reader names the gap instead of silently skipping it. You can move
+  to the next or previous available issue, or return to the arc. Going
+  past a chapter does not mark it read or change its acquisition status.
 - Series Details now offers **Read series** at the first readable issue and
   **Continue series** at the issue you last read in series order. Reading
   through a story arc does not move your series bookmark. If the bookmarked

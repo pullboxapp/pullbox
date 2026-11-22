@@ -3,7 +3,7 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pullbox.core.issue_numbers import format_issue_number
@@ -31,6 +31,8 @@ class ArcReaderOrder:
     total: int
     previous: ArcNeighbor | None
     next: ArcNeighbor | None
+    previous_available: ArcNeighbor | None
+    next_available: ArcNeighbor | None
 
 
 async def list_reader_arcs(session: AsyncSession, issue_id: int) -> Sequence[tuple[int, int, str]]:
@@ -56,6 +58,8 @@ async def load_arc_reader_order(
     ranked = (
         select(
             member.id,
+            member.sequence_number,
+            member.source_ordinal,
             member.issue_id,
             member.resolution_state,
             func.row_number().over(order_by=order).label("position"),
@@ -104,6 +108,12 @@ async def load_arc_reader_order(
                 Issue.status,
                 Series.title.label("series_title"),
                 has_file.label("has_file"),
+                select(LibraryFile.file_format)
+                .where(LibraryFile.issue_id == Issue.id)
+                .order_by(LibraryFile.id)
+                .limit(1)
+                .scalar_subquery()
+                .label("registered_format"),
             )
             .outerjoin(Issue, Issue.id == member.issue_id)
             .outerjoin(Series, Series.id == Issue.series_id)
@@ -122,6 +132,9 @@ async def load_arc_reader_order(
                     if row.status == IssueStatus.OWNED and row.has_file
                     else f"{label} has no readable library file."
                 )
+                if row.status == IssueStatus.OWNED and not row.has_file and row.registered_format:
+                    fmt = row.registered_format.value.upper()
+                    gap = f"{label} is in {fmt} format, which the reader does not support."
             else:
                 label = (
                     row.source_issue_title
@@ -142,11 +155,60 @@ async def load_arc_reader_order(
             neighbors[row.id] = ArcNeighbor(row.id, row.issue_id, label, row.title, gap)
         if len(neighbors) != len(ids):
             return None
+    previous, following = neighbors.get(current.prev_id), neighbors.get(current.next_id)
+    key = (current.sequence_number, current.source_ordinal, current.id)
     return ArcReaderOrder(
         current.name,
         current.id,
         current.position,
         current.total,
-        neighbors.get(current.prev_id),
-        neighbors.get(current.next_id),
+        previous,
+        following,
+        await _nearest_readable(session, arc_id, key, backwards=True)
+        if previous and previous.gap
+        else None,
+        await _nearest_readable(session, arc_id, key, backwards=False)
+        if following and following.gap
+        else None,
     )
+
+
+async def _nearest_readable(
+    session: AsyncSession, arc_id: int, key: tuple[int, int, int], *, backwards: bool
+) -> ArcNeighbor | None:
+    """Seek from the anchor in saved order; never open archives or load an entire arc."""
+    member = IssueStoryArc
+    order = (member.sequence_number, member.source_ordinal, member.id)
+    cursor = tuple_(*order)
+    row = (
+        await session.execute(
+            select(
+                member.id,
+                Issue.id.label("issue_id"),
+                Issue.issue_number,
+                Issue.issue_number_text,
+                Issue.title,
+                Series.title.label("series_title"),
+            )
+            .join(Issue, Issue.id == member.issue_id)
+            .join(Series, Series.id == Issue.series_id)
+            .where(
+                member.story_arc_id == arc_id,
+                cursor < tuple_(*key) if backwards else cursor > tuple_(*key),
+                member.resolution_state == StoryArcResolutionState.RESOLVED,
+                Issue.status == IssueStatus.OWNED,
+                select(LibraryFile.id)
+                .where(
+                    LibraryFile.issue_id == Issue.id,
+                    LibraryFile.file_format.in_(SUPPORTED_READER_FORMATS),
+                )
+                .exists(),
+            )
+            .order_by(*(col.desc() if backwards else col.asc() for col in order))
+            .limit(1)
+        )
+    ).one_or_none()
+    if row is None:
+        return None
+    number = row.issue_number_text or format_issue_number(row.issue_number)
+    return ArcNeighbor(row.id, row.issue_id, f"{row.series_title} #{number}", row.title, None)

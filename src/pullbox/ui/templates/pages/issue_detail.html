@@ -24,6 +24,7 @@
     importCancelUrl: {{ ('/api/v1/issues/' ~ issue.id ~ '/import-file/cancel')|tojson|forceescape }},
     importProgressUrl: {{ ('/api/v1/issues/' ~ issue.id ~ '/import-file/progress')|tojson|forceescape }},
     readerManifestUrl: {{ reader_manifest_url|tojson|forceescape }},
+    readerArcReturnUrl: {{ (issue_detail_back_url if issue_story_arc_origin else none)|tojson|forceescape }},
     openReaderOnLoad: {{ open_reader_on_load|default(false)|tojson }},
     toggleUrl: {{ ('/htmx/issues/' ~ issue.id ~ '/toggle')|tojson|forceescape }}
   })"

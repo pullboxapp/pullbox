@@ -42,7 +42,6 @@
         <template x-if="readerManifest && readerManifest.story_arc">
           <div>
             <p data-testid="comic-reader-arc-position" x-text="'Reading: ' + readerManifest.story_arc.name + ' · ' + readerManifest.story_arc.position + ' of ' + readerManifest.story_arc.total"></p>
-            <p data-testid="comic-reader-arc-gaps" x-show="readerArcGapText()" x-text="readerArcGapText()"></p>
           </div>
         </template>
         {% endif %}
@@ -96,6 +95,22 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5" /></svg>
         </button>
       </div>
+      {% if not reader_preview|default(false) %}
+      <template x-if="readerArcGapText() || (readerIssueSwitchError && readerManifest && readerManifest.story_arc)">
+        <div class="comic-reader__gap-actions" data-testid="comic-reader-gap-actions">
+          <p data-testid="comic-reader-arc-gaps" x-show="readerArcGapText()" x-text="readerArcGapText()"></p>
+          <template x-for="direction in ['previous', 'next']" :key="direction">
+            <template x-if="readerGapTarget(direction)">
+              <button type="button" class="comic-reader__button"
+                :disabled="readerIssueTransitioning || readerCompletionUpdating || readerLoading || readerPageLoading"
+                @click="switchReaderIssue(direction, true)"
+                x-text="(direction === 'next' ? 'Continue to next available: ' : 'Return to previous available: ') + readerGapTarget(direction).issue_label"></button>
+            </template>
+          </template>
+          <a :href="readerArcReturnUrl()" @click="returnToReaderArc($event)" hx-boost="false" class="comic-reader__button">Back to story arc</a>
+        </div>
+      </template>
+      {% endif %}
     </header>
 
     <main

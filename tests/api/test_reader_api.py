@@ -604,6 +604,49 @@ async def test_arc_manifest_follows_saved_cross_series_order_without_skipping_ga
     stale_next = await authenticated_client.get(data["next_issue"]["manifest_url"])
     assert stale_next.status_code == 409
     assert "reading order changed" in stale_next.json()["detail"]
+    # Reordering put the unresolved chapter between A and B. Ordinary navigation
+    # must remain blocked even when a distinct, explicitly authorized jump exists.
+    a_url = f"/api/v1/reader/issues/{a}/manifest?story_arc_id={arc_id}&entry_id={a_entry}"
+    start = (await authenticated_client.get(a_url)).json()
+    assert start["next_issue"] is None
+    jump = start["story_arc"]["next_available"]
+    assert jump["issue_id"] == b
+    dest = (await authenticated_client.get(jump["manifest_url"])).json()
+    assert dest["previous_issue"] is None
+    back = dest["story_arc"]["previous_available"]
+    assert (await authenticated_client.get(back["manifest_url"])).json()["issue_id"] == a
+    assert (await authenticated_client.get(a_url + "&across_gap_from_issue=1")).status_code == 422
+    async with sec_db.begin() as session:
+        gap = await session.get(IssueStoryArc, entries[1].id)
+        recovered = await session.get(Issue, other)
+        assert gap and recovered
+        assert gap.resolution_state == StoryArcResolutionState.MISSING
+        assert not await session.scalar(select(IssueReaderState.id))
+        gap.issue_id = other
+        gap.resolution_state = StoryArcResolutionState.RESOLVED
+        recovered.status = IssueStatus.OWNED
+        root_id = await session.scalar(
+            select(LibraryFile.library_root_id).where(LibraryFile.issue_id == a)
+        )
+        ready = tmp_path / "recovered.cbz"
+        _write_cbz(ready)
+        session.add(
+            LibraryFile(
+                issue_id=other,
+                library_root_id=root_id,
+                file_path=str(ready),
+                file_name=ready.name,
+                file_size=ready.stat().st_size,
+                file_format=FileFormat.CBZ,
+                file_modified_at=datetime.now(UTC),
+                match_confidence=MatchConfidence.HIGH,
+            )
+        )
+    assert (await authenticated_client.get(jump["manifest_url"])).status_code == 409
+    assert (await authenticated_client.get(back["manifest_url"])).status_code == 409
+    refreshed = (await authenticated_client.get(a_url)).json()
+    assert refreshed["next_issue"]["issue_id"] == other
+    assert refreshed["story_arc"]["next_available"] is None
 
 
 @pytest.mark.asyncio

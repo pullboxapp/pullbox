@@ -18901,6 +18901,16 @@ function readerMixin(config) {
       window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash);
     },
 
+    stageDisplayedReaderPage: function () {
+      // Explicit navigation saves this page, but does not imply finishing it.
+      this.clearReaderTimer("readerSettledTimer");
+      if (!this.readerImageUrl || this.readerFatalError || this.readerPageLoading) return;
+      if (this.readerLastSettledPage !== this.readerPageIndex) {
+        this.readerLastSettledPage = this.readerPageIndex;
+        this.readerLastSettledCompletion = false;
+      }
+    },
+
     switchReaderOrder: async function (control) {
       var current = this.readerManifest;
       if (!current) return;
@@ -18917,12 +18927,7 @@ function readerMixin(config) {
       this.readerIssueSwitchError = "";
       this.readerIssueStatusMessage = "Changing reading order…";
       var generation = this.readerIssueGeneration;
-      this.clearReaderTimer("readerSettledTimer");
-      // Switching explicitly saves the displayed page, but does not imply finishing it.
-      if (this.readerLastSettledPage !== this.readerPageIndex) {
-        this.readerLastSettledPage = this.readerPageIndex;
-        this.readerLastSettledCompletion = false;
-      }
+      this.stageDisplayedReaderPage();
       try {
         await this.saveReaderProgress(false);
         if (!this.readerOpen || generation !== this.readerIssueGeneration) return;
@@ -18959,11 +18964,59 @@ function readerMixin(config) {
       }
     },
 
+    readerGapTarget: function (direction) {
+      var arc = this.readerManifest && this.readerManifest.story_arc;
+      return arc && (direction === "previous" ? arc.previous_available : arc.next_available);
+    },
+
+    readerArcReturnUrl: function () {
+      var arc = this.readerManifest && this.readerManifest.story_arc;
+      if (!arc) return "";
+      var base = "/story-arcs/" + Number(arc.id);
+      return cfg.readerArcReturnUrl && cfg.readerArcReturnUrl.split("?")[0] === base
+        ? cfg.readerArcReturnUrl : base;
+    },
+
+    returnToReaderArc: async function (event) {
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
+      event.preventDefault();
+      if (this.readerIssueTransitioning || this.readerCompletionUpdating || this.readerLoading ||
+          this.readerPageLoading || !this.readerArcReturnUrl()) return;
+      var generation = this.readerIssueGeneration;
+      this.readerIssueTransitioning = true;
+      this.stageDisplayedReaderPage();
+      try {
+        await this.saveReaderProgress(false);
+        if (this.readerOpen && generation === this.readerIssueGeneration) {
+          window.location.assign(this.readerArcReturnUrl());
+        }
+      } catch (_saveError) {
+        if (this.readerOpen && generation === this.readerIssueGeneration) {
+          this.readerIssueSwitchError = "Your reading position hasn’t saved yet. Try again before leaving the reader.";
+          this.showReaderControls();
+        }
+      } finally {
+        if (generation === this.readerIssueGeneration) this.readerIssueTransitioning = false;
+      }
+    },
+
     readerArcGapText: function () {
       var arc = this.readerManifest && this.readerManifest.story_arc;
       if (!arc) return "";
-      return [arc.previous_gap && "Previous: " + arc.previous_gap,
-              arc.next_gap && "Next: " + arc.next_gap].filter(Boolean).join(" ");
+      var parts = [];
+      if (arc.previous_gap) {
+        parts.push("Previous: " + arc.previous_gap);
+        if (!arc.previous_available) parts.push("No earlier readable entry.");
+      }
+      if (arc.next_gap) {
+        parts.push("Next: " + arc.next_gap);
+        if (!arc.next_available) {
+          var remaining = arc.total - arc.position;
+          parts.push("No later readable entry. " + remaining +
+            (remaining === 1 ? " entry remains unavailable." : " entries remain unavailable."));
+        }
+      }
+      return parts.join(" ");
     },
 
     readerEndMessage: function () {
@@ -19035,7 +19088,7 @@ function readerMixin(config) {
       if (this.readerManifest) this.prefetchReaderNeighbors(this.readerPageIndex);
     },
 
-    switchReaderIssue: async function (direction) {
+    switchReaderIssue: async function (direction, acrossGap) {
       if (
         this.readerIssueTransitioning ||
         this.readerCompletionUpdating ||
@@ -19044,17 +19097,20 @@ function readerMixin(config) {
       ) {
         return false;
       }
-      var adjacent = this.readerAdjacentIssue(direction);
+      var adjacent = acrossGap ? this.readerGapTarget(direction) : this.readerAdjacentIssue(direction);
       if (!adjacent || !adjacent.manifest_url) return false;
 
       this.readerIssueTransitioning = true;
       this.readerIssueSwitchError = "";
       this.readerIssueStatusMessage =
         "Opening " + String(adjacent.issue_label || "another issue") + "…";
-      this.clearReaderTimer("readerSettledTimer");
+      if (acrossGap) this.stageDisplayedReaderPage();
+      else this.clearReaderTimer("readerSettledTimer");
+      var sourceGeneration = this.readerIssueGeneration;
       try {
         await this.saveReaderProgress(false);
       } catch (_saveError) {
+        if (!this.readerOpen || sourceGeneration !== this.readerIssueGeneration) return false;
         this.readerIssueSwitchError =
           "Your reading position hasn’t saved yet. Try again before changing issues.";
         this.readerIssueStatusMessage = this.readerIssueSwitchError;
@@ -19063,6 +19119,7 @@ function readerMixin(config) {
         return false;
       }
 
+      if (!this.readerOpen || sourceGeneration !== this.readerIssueGeneration) return false;
       var previousIssue = this.captureReaderIssue();
       var generation = this.readerIssueGeneration + 1;
       this.readerIssueGeneration = generation;
@@ -19081,9 +19138,13 @@ function readerMixin(config) {
         this.showReaderControls();
         return loaded;
       } catch (error) {
-        if (error && error.name === "AbortError") return false;
+        if (!this.readerOpen || this.readerIssueGeneration !== generation ||
+            (error && error.name === "AbortError")) return false;
         this.readerIssueSwitchError =
           (error && error.message) || "The next comic could not be opened.";
+        if (previousIssue.manifest.story_arc && adjacent.issue_label) {
+          this.readerIssueSwitchError = adjacent.issue_label + ": " + this.readerIssueSwitchError;
+        }
         this.readerIssueStatusMessage = this.readerIssueSwitchError;
         this.readerIssueTransitioning = false;
         this.showReaderControls();

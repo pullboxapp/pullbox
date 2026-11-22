@@ -47,6 +47,8 @@ class ReaderStoryArcResponse(ReaderStoryArcOption):
     total: int
     previous_gap: str | None
     next_gap: str | None
+    previous_available: ReaderAdjacentIssueResponse | None = None
+    next_available: ReaderAdjacentIssueResponse | None = None
 
 
 class ReaderManifestResponse(BaseModel):

@@ -9163,6 +9163,26 @@ input[type="range"].range-pb::-moz-range-thumb {
   min-width: 0;
 }
 
+.comic-reader__gap-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.5rem;
+}
+
+.comic-reader__gap-actions p {
+  flex-basis: 100%;
+  font-size: 0.8rem;
+  color: var(--pb-reader-text);
+}
+
+.comic-reader__gap-actions .comic-reader__button {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 .comic-reader__issue-navigation .comic-reader__button {
   gap: 0.35rem;
 }

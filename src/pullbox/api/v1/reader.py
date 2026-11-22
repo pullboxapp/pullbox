@@ -245,6 +245,7 @@ async def reader_manifest(
     entry_id: Annotated[int | None, Query(ge=1)] = None,
     after_entry: Annotated[int | None, Query(ge=1)] = None,
     before_entry: Annotated[int | None, Query(ge=1)] = None,
+    across_gap_from_issue: Annotated[int | None, Query(ge=1)] = None,
     reading_series_id: Annotated[int | None, Query(ge=1)] = None,
 ) -> JSONResponse:
     """Return a side-effect-free reader manifest after closing the DB session."""
@@ -253,6 +254,10 @@ async def reader_manifest(
         story_arc_id is None and any((entry_id, after_entry, before_entry))
     ):
         raise HTTPException(422, "Invalid story arc navigation.")
+    if across_gap_from_issue is not None and (
+        entry_id is None or not (after_entry or before_entry)
+    ):
+        raise HTTPException(422, "Invalid story arc gap navigation.")
     source = await _resolved_source(request, issue_id)
     if reading_series_id is not None and source.series_id != reading_series_id:
         raise HTTPException(409, "This issue changed series. Reopen the series to choose an issue.")
@@ -279,13 +284,23 @@ async def reader_manifest(
                     "This issue is no longer a confirmed entry in this story arc. "
                     "Reopen the story arc to see its current reading order.",
                 )
-            if (
-                after_entry is not None
-                and (not arc.previous or arc.previous.entry_id != after_entry)
-            ) or (before_entry is not None and (not arc.next or arc.next.entry_id != before_entry)):
-                raise HTTPException(
-                    409, "The arc reading order changed. Reopen the story arc to continue."
-                )
+            if boundary := after_entry or before_entry:
+                neighbor = arc.previous if after_entry else arc.next
+                if across_gap_from_issue is not None:
+                    # Walk back from the proposed target. A newly readable chapter
+                    # between it and the original issue invalidates the old jump.
+                    neighbor = arc.previous_available if after_entry else arc.next_available
+                if (
+                    neighbor is None
+                    or neighbor.entry_id != boundary
+                    or (
+                        across_gap_from_issue is not None
+                        and neighbor.issue_id != across_gap_from_issue
+                    )
+                ):
+                    raise HTTPException(
+                        409, "The arc reading order changed. Reopen the story arc to continue."
+                    )
             arc_context = ReaderStoryArcResponse(
                 id=story_arc_id,
                 name=arc.name,
@@ -294,6 +309,16 @@ async def reader_manifest(
                 total=arc.total,
                 previous_gap=arc.previous.gap if arc.previous else None,
                 next_gap=arc.next.gap if arc.next else None,
+                previous_available=_arc_adjacent_response(
+                    arc.previous_available,
+                    story_arc_id,
+                    f"before_entry={arc.entry_id}&across_gap_from_issue={issue_id}",
+                ),
+                next_available=_arc_adjacent_response(
+                    arc.next_available,
+                    story_arc_id,
+                    f"after_entry={arc.entry_id}&across_gap_from_issue={issue_id}",
+                ),
             )
             detail_url += f"?source=story-arc&story_arc_id={story_arc_id}&entry_id={arc.entry_id}"
             previous = _arc_adjacent_response(

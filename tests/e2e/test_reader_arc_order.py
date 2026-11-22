@@ -258,6 +258,98 @@ def test_series_resume_is_independent_of_arc_position_and_list_filter(
     expect(issue_page.reader_dialog).not_to_be_visible()
 
 
+@pytest.mark.parametrize("theme", ["light", "dark", "tron"])
+def test_reader_explicitly_continues_in_either_direction_across_a_gap(
+    authed_page: Page,
+    seeded_server: str,
+    seeded_reader_state_guard: None,
+    arc_reader: int,
+    theme: str,
+) -> None:
+    async def separate_chapters() -> None:
+        async with get_session_factory().begin() as session:
+            second = (
+                await session.scalars(
+                    select(IssueStoryArc).where(
+                        IssueStoryArc.story_arc_id == arc_reader, IssueStoryArc.sequence_number == 2
+                    )
+                )
+            ).one()
+            second.sequence_number = 4
+            session.add(
+                IssueStoryArc(
+                    story_arc_id=arc_reader,
+                    sequence_number=5,
+                    source_ordinal=5,
+                    source_issue_title="Missing finale",
+                    resolution_state=StoryArcResolutionState.MISSING,
+                )
+            )
+
+    _run_async_blocking(separate_chapters())
+    page = authed_page
+    page.add_init_script(f"localStorage.setItem('pullbox-theme', '{theme}')")
+    if theme == "dark":
+        page.set_viewport_size({"width": 390, "height": 844})
+    page.goto(f"{seeded_server}/story-arcs/{arc_reader}?page=1&per_page=1")
+    page.get_by_role("link", name="Read story arc", exact=True).click()
+    context = page.get_by_test_id("comic-reader-arc-position")
+    expect(context).to_contain_text("1 of 4")
+    expect(page.get_by_test_id("comic-reader-next-issue")).to_be_disabled()
+    expect(page.get_by_test_id("comic-reader-arc-gaps")).to_contain_text("Lost chapter")
+    forward = page.get_by_role("button", name=re.compile("^Continue to next available"))
+    expect(forward).to_have_accessible_name(re.compile("Batman Beyond #91"))
+    forward.focus()
+    expect(forward).to_be_focused()
+    assert_no_axe_violations(
+        page, name=f"reader-arc-gap-{theme}", include=["[data-testid='comic-reader-gap-actions']"]
+    )
+    if theme == "light":
+        progress = "**/api/v1/reader/issues/1/progress"
+        page.route(progress, lambda route: route.fulfill(status=503, body="Unavailable"))
+        page.get_by_test_id("comic-reader-previous").click()
+        expect(page.get_by_test_id("comic-reader-page-status")).to_have_text("Page 1 of 3")
+        forward.click()
+        expect(page.get_by_test_id("comic-reader-switch-error")).to_contain_text("reading position")
+        expect(context).to_contain_text("1 of 4")
+        page.unroute(progress)
+    forward.press("Enter")
+    expect(context).to_contain_text("3 of 4")
+    expect(page.get_by_test_id("comic-reader-previous-issue")).to_be_disabled()
+    expect(forward).not_to_be_visible()
+    expect(page.get_by_test_id("comic-reader-arc-gaps")).to_contain_text("Missing finale")
+    expect(page.get_by_test_id("comic-reader-arc-gaps")).to_contain_text("No later readable entry")
+    page.get_by_role("button", name=re.compile("^Return to previous available")).press("Enter")
+    expect(context).to_contain_text("1 of 4")
+    page.get_by_role("dialog").get_by_role("link", name="Back to story arc").click()
+    expect(page).to_have_url(f"{seeded_server}/story-arcs/{arc_reader}?page=1&per_page=1")
+
+
+def test_damaged_next_chapter_keeps_current_page_and_offers_return(
+    authed_page: Page,
+    seeded_server: str,
+    seeded_reader_state_guard: None,
+    arc_reader: int,
+    tmp_path: Path,
+) -> None:
+    damaged = tmp_path / "Batman Beyond 091.cbz"
+    damaged.write_bytes(b"not a readable comic archive")
+    page = authed_page
+    arc_url = f"{seeded_server}/story-arcs/{arc_reader}?page=1&per_page=1"
+    page.goto(arc_url)
+    page.get_by_role("link", name="Read story arc", exact=True).click()
+    issue = IssueDetailPage(page, seeded_server)
+    expect(issue.reader_status).to_have_text("Page 2 of 3")
+    current = issue.reader_page.get_attribute("src")
+    page.get_by_test_id("comic-reader-next-issue").click()
+    expect(page.get_by_test_id("comic-reader-switch-error")).to_contain_text("Batman Beyond #91")
+    expect(issue.reader_page).to_have_attribute("src", current)
+    expect(issue.reader_status).to_have_text("Page 2 of 3")
+    page.get_by_role("dialog").get_by_role("link", name="Back to story arc").click()
+    expect(page).to_have_url(arc_url)
+    assert damaged.read_bytes() == b"not a readable comic archive"
+
+
 def test_read_in_arc_order_then_open_independently(
     authed_page: Page, seeded_server: str, seeded_reader_state_guard: None, arc_reader: int
 ) -> None:
