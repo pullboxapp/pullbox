@@ -25,6 +25,7 @@ from pullbox.models.library import (
 )
 from pullbox.models.reader import IssueReaderState
 from pullbox.models.series import Series, SeriesStatus, SeriesType
+from pullbox.models.story_arc import IssueStoryArc, StoryArc, StoryArcResolutionState
 from pullbox.models.user import User
 from pullbox.services.auth_service import SESSION_COOKIE_NAME, AuthService
 from pullbox.services.reader_content_service import ReaderContentService, ReaderWorkerBusyError
@@ -441,6 +442,72 @@ async def test_manifest_builds_server_owned_adjacent_issue_links(
         "issue_detail_url": f"/issues/{next_issue_id}",
         "download_url": f"/api/v1/issues/{next_issue_id}/download-file",
     }
+
+
+@pytest.mark.asyncio
+async def test_arc_manifest_follows_saved_cross_series_order_without_skipping_gaps(
+    authenticated_client: AsyncClient,
+    sec_db: async_sessionmaker[AsyncSession],
+    sec_app: object,
+    tmp_path: Path,
+) -> None:
+    first, second = tmp_path / "first.cbz", tmp_path / "second.cbz"
+    for path in (first, second):
+        _write_cbz(path)
+    a = await _seed_reader_issue(sec_db, first)
+    b = await _seed_adjacent_reader_issue(sec_db, current_issue_id=a, source=second)
+    other = await _seed_catalog_issue_without_file(sec_db)
+    async with sec_db() as session:
+        book = await session.get(Issue, b)
+        parent = await session.get(Issue, other)
+        assert book and parent
+        book.series_id = parent.series_id
+        arc = StoryArc(name="Crossover")
+        session.add(arc)
+        await session.flush()
+        entries = [
+            IssueStoryArc(
+                story_arc_id=arc.id,
+                issue_id=issue,
+                sequence_number=number,
+                source_ordinal=i,
+                source_issue_title="Lost chapter" if issue is None else None,
+                resolution_state=(
+                    StoryArcResolutionState.RESOLVED if issue else StoryArcResolutionState.MISSING
+                ),
+            )
+            for i, (number, issue) in enumerate([(30, a), (10, None), (20, b)], 1)
+        ]
+        session.add_all(entries)
+        await session.commit()
+        arc_id, a_entry, b_entry = arc.id, entries[0].id, entries[2].id
+    sec_app.state.reader_content_service = ReaderContentService(cache_dir=tmp_path / "cache")
+    url = f"/api/v1/reader/issues/{b}/manifest"
+    direct = (await authenticated_client.get(url)).json()
+    assert direct["next_issue"] is None
+    response = await authenticated_client.get(f"{url}?story_arc_id={arc_id}&entry_id={b_entry}")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["next_issue"] and data["next_issue"]["issue_id"] == a
+    assert data["story_arc"]["name"] == "Crossover"
+    assert (data["story_arc"]["position"], data["story_arc"]["total"]) == (2, 3)
+    assert data["previous_issue"] is None
+    assert "Lost chapter" in data["story_arc"]["previous_gap"]
+    assert data["progress_url"] == direct["progress_url"]
+    forward = (await authenticated_client.get(data["next_issue"]["manifest_url"])).json()
+    assert forward["story_arc"]["entry_id"] == a_entry
+    assert forward["previous_issue"]["issue_id"] == b
+    assert forward["next_issue"] is None and forward["story_arc"]["next_gap"] is None
+    assert f"story_arc_id={arc_id}" in forward["issue_detail_url"]
+    for invalid in (f"story_arc_id={arc_id}&entry_id={a_entry}", "story_arc_id=999999"):
+        assert (await authenticated_client.get(f"{url}?{invalid}")).status_code == 409
+    async with sec_db.begin() as session:
+        chapter = await session.get(IssueStoryArc, a_entry)
+        assert chapter
+        chapter.sequence_number = 1
+    stale_next = await authenticated_client.get(data["next_issue"]["manifest_url"])
+    assert stale_next.status_code == 409
+    assert "reading order changed" in stale_next.json()["detail"]
 
 
 @pytest.mark.asyncio

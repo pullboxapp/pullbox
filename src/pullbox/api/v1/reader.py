@@ -34,8 +34,10 @@ from pullbox.schemas.reader import (
     ReaderProgressUpdate,
     ReaderStateMutationResponse,
     ReaderStateResponse,
+    ReaderStoryArcResponse,
     ReaderWantToReadUpdate,
 )
+from pullbox.services.reader_arc_order import ArcNeighbor, load_arc_reader_order
 from pullbox.services.reader_content_service import (
     ReaderContentService,
     ReaderWorkerBusyError,
@@ -236,9 +238,17 @@ async def reader_manifest(
     request: Request,
     issue_id: int,
     _user: AuthenticatedStreamUser,
+    story_arc_id: Annotated[int | None, Query(ge=1)] = None,
+    entry_id: Annotated[int | None, Query(ge=1)] = None,
+    after_entry: Annotated[int | None, Query(ge=1)] = None,
+    before_entry: Annotated[int | None, Query(ge=1)] = None,
 ) -> JSONResponse:
     """Return a side-effect-free reader manifest after closing the DB session."""
     _require_reader_enabled()
+    if (after_entry is not None and before_entry is not None) or (
+        story_arc_id is None and any((entry_id, after_entry, before_entry))
+    ):
+        raise HTTPException(422, "Invalid story arc navigation.")
     source = await _resolved_source(request, issue_id)
     try:
         manifest = await _content_service(request).get_manifest(source)
@@ -249,12 +259,50 @@ async def reader_manifest(
     factory = get_request_session_factory(request)
     async with factory() as session:
         state = await load_reader_state(session, user_id=_user.id, issue_id=issue_id)
-        adjacent = await load_adjacent_readable_issues(
-            session,
-            series_id=source.series_id,
-            current_issue_number=source.issue_number_value,
-            current_issue_id=issue_id,
-        )
+        arc_context = None
+        detail_url = f"/issues/{issue_id}"
+        if story_arc_id is not None:
+            arc = await load_arc_reader_order(session, story_arc_id, issue_id, entry_id)
+            if arc is None:
+                raise HTTPException(
+                    409,
+                    "This issue is no longer a confirmed entry in this story arc. "
+                    "Reopen the story arc to see its current reading order.",
+                )
+            if (
+                after_entry is not None
+                and (not arc.previous or arc.previous.entry_id != after_entry)
+            ) or (before_entry is not None and (not arc.next or arc.next.entry_id != before_entry)):
+                raise HTTPException(
+                    409, "The arc reading order changed. Reopen the story arc to continue."
+                )
+            arc_context = ReaderStoryArcResponse(
+                id=story_arc_id,
+                name=arc.name,
+                entry_id=arc.entry_id,
+                position=arc.position,
+                total=arc.total,
+                previous_gap=arc.previous.gap if arc.previous else None,
+                next_gap=arc.next.gap if arc.next else None,
+            )
+            detail_url += f"?source=story-arc&story_arc_id={story_arc_id}&entry_id={arc.entry_id}"
+            previous = _arc_adjacent_response(
+                arc.previous, story_arc_id, f"before_entry={arc.entry_id}"
+            )
+            following = _arc_adjacent_response(
+                arc.next, story_arc_id, f"after_entry={arc.entry_id}"
+            )
+        else:
+            adjacent = await load_adjacent_readable_issues(
+                session,
+                series_id=source.series_id,
+                current_issue_number=source.issue_number_value,
+                current_issue_id=issue_id,
+            )
+            previous, following = (
+                _adjacent_response(adjacent.previous),
+                _adjacent_response(adjacent.next),
+            )
     initial_page_index = _manifest_initial_page(state, current_page_count=manifest.page_count)
     response = ReaderManifestResponse(
         issue_id=manifest.issue_id,
@@ -270,11 +318,12 @@ async def reader_manifest(
         progress_url=f"/api/v1/reader/issues/{issue_id}/progress",
         completion_url=f"/api/v1/reader/issues/{issue_id}/completion",
         want_to_read_url=f"/api/v1/reader/issues/{issue_id}/want-to-read",
-        issue_detail_url=f"/issues/{issue_id}",
+        issue_detail_url=detail_url,
         download_url=f"/api/v1/issues/{issue_id}/download-file",
         state=_state_response(state),
-        previous_issue=_adjacent_response(adjacent.previous),
-        next_issue=_adjacent_response(adjacent.next),
+        previous_issue=previous,
+        next_issue=following,
+        story_arc=arc_context,
     )
     return JSONResponse(
         content=response.model_dump(mode="json"),
@@ -482,6 +531,22 @@ def _state_response(state: ReaderStateSnapshot | None) -> ReaderStateResponse:
         want_to_read=state.want_to_read,
         want_to_read_updated_at=state.want_to_read_updated_at,
         state_version=state.state_version,
+    )
+
+
+def _arc_adjacent_response(
+    item: ArcNeighbor | None, arc_id: int, boundary: str
+) -> ReaderAdjacentIssueResponse | None:
+    if item is None or item.gap or item.issue_id is None:
+        return None
+    query = f"story_arc_id={arc_id}&entry_id={item.entry_id}"
+    return ReaderAdjacentIssueResponse(
+        issue_id=item.issue_id,
+        issue_label=item.label,
+        title=item.title,
+        manifest_url=f"/api/v1/reader/issues/{item.issue_id}/manifest?{query}&{boundary}",
+        issue_detail_url=f"/issues/{item.issue_id}?source=story-arc&{query}",
+        download_url=f"/api/v1/issues/{item.issue_id}/download-file",
     )
 
 

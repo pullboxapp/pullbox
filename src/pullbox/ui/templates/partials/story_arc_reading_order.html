@@ -79,7 +79,7 @@
                 <td class="series-domain-issue-title-cell">
                   {% if membership.issue_id %}
                     <a
-                      href="/issues/{{ membership.issue_id }}?source=story-arc&amp;story_arc_id={{ story_arc.id }}&amp;story_arc_page={{ story_arc.page }}&amp;story_arc_per_page={{ story_arc.per_page }}"
+                      href="/issues/{{ membership.issue_id }}?source=story-arc&amp;story_arc_id={{ story_arc.id }}&amp;story_arc_page={{ story_arc.page }}&amp;story_arc_per_page={{ story_arc.per_page }}&amp;entry_id={{ membership.id }}"
                       data-testid="story-arc-open-issue-{{ membership.issue_id }}"
                       class="series-domain-issue-title-link"
                     >{{ membership.series_name }} <span class="font-mono">#{{ membership.exact_issue_number }}</span></a>
@@ -119,7 +119,7 @@
                   <div class="series-domain-issue-actions">
                     {% if membership.issue_id %}
                       <a
-                        href="/issues/{{ membership.issue_id }}?source=story-arc&amp;story_arc_id={{ story_arc.id }}&amp;story_arc_page={{ story_arc.page }}&amp;story_arc_per_page={{ story_arc.per_page }}"
+                        href="/issues/{{ membership.issue_id }}?source=story-arc&amp;story_arc_id={{ story_arc.id }}&amp;story_arc_page={{ story_arc.page }}&amp;story_arc_per_page={{ story_arc.per_page }}&amp;entry_id={{ membership.id }}"
                         class="series-domain-issue-action-btn"
                         aria-label="Open issue {{ membership.exact_issue_number }}"
                         data-tip="Open issue"

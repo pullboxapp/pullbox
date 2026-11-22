@@ -335,6 +335,7 @@ async def issue_detail(
     story_arc_id: Annotated[int | None, Query(ge=1)] = None,
     story_arc_page: Annotated[int, Query(ge=1)] = 1,
     story_arc_per_page: Annotated[int, Query(ge=1, le=100)] = 25,
+    entry_id: Annotated[int | None, Query(ge=1)] = None,
 ) -> Response:
     """Render the issue detail page, fetching metadata on-demand if missing."""
     issue = await _load_issue_detail_record(session, issue_id)
@@ -342,7 +343,11 @@ async def issue_detail(
         return RedirectResponse(url="/series", status_code=302)
 
     story_arc_origin = None
+    reader_manifest_url = f"/api/v1/reader/issues/{issue_id}/manifest"
     if source == "story-arc" and story_arc_id is not None:
+        reader_manifest_url += f"?story_arc_id={story_arc_id}"
+        if entry_id is not None:
+            reader_manifest_url += f"&entry_id={entry_id}"
         story_arc_origin = await session.scalar(
             select(StoryArc)
             .join(IssueStoryArc, IssueStoryArc.story_arc_id == StoryArc.id)
@@ -430,6 +435,7 @@ async def issue_detail(
             paired_import_metadata_enabled=paired_import_metadata_enabled,
             issue_metadata_credits=credits.get(issue.id, ()),
             issue_story_arc_origin=story_arc_origin,
+            reader_manifest_url=reader_manifest_url,
             issue_detail_back_url=issue_detail_back_url,
             reader_enabled=reader_enabled,
             issue_reading=issue_reading,

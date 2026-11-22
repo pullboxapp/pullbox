@@ -18858,6 +18858,19 @@ function readerMixin(config) {
         : this.readerManifest.next_issue;
     },
 
+    readerArcGapText: function () {
+      var arc = this.readerManifest && this.readerManifest.story_arc;
+      if (!arc) return "";
+      return [arc.previous_gap && "Previous: " + arc.previous_gap,
+              arc.next_gap && "Next: " + arc.next_gap].filter(Boolean).join(" ");
+    },
+
+    readerEndMessage: function () {
+      var arc = this.readerManifest && this.readerManifest.story_arc;
+      if (!arc) return "You’re caught up in this series.";
+      return arc.next_gap || "You reached the last entry in this story arc.";
+    },
+
     readerIssueControlLabel: function (direction) {
       var adjacent = this.readerAdjacentIssue(direction);
       var action = direction === "previous" ? "Previous issue" : "Next issue";

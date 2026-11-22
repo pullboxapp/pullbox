@@ -32,6 +32,18 @@ class ReaderAdjacentIssueResponse(BaseModel):
     download_url: str
 
 
+class ReaderStoryArcResponse(BaseModel):
+    """Active saved arc position, including neighbors that cannot be opened."""
+
+    id: int
+    name: str
+    entry_id: int
+    position: int
+    total: int
+    previous_gap: str | None
+    next_gap: str | None
+
+
 class ReaderManifestResponse(BaseModel):
     """Thin manifest consumed by the embedded web reader."""
 
@@ -51,6 +63,7 @@ class ReaderManifestResponse(BaseModel):
     state: ReaderStateResponse
     previous_issue: ReaderAdjacentIssueResponse | None
     next_issue: ReaderAdjacentIssueResponse | None
+    story_arc: ReaderStoryArcResponse | None = None
 
 
 class ReaderProgressUpdate(BaseModel):

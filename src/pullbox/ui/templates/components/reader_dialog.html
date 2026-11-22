@@ -28,6 +28,14 @@
       <div class="comic-reader__identity">
         <h2 id="comic-reader-title" x-text="readerTitle || 'Comic reader'">Comic reader</h2>
         <p x-text="readerIssueLabel"></p>
+        {% if not reader_preview|default(false) %}
+        <template x-if="readerManifest && readerManifest.story_arc">
+          <div>
+            <p data-testid="comic-reader-arc-position" x-text="'Reading: ' + readerManifest.story_arc.name + ' · ' + readerManifest.story_arc.position + ' of ' + readerManifest.story_arc.total"></p>
+            <p data-testid="comic-reader-arc-gaps" x-show="readerArcGapText()" x-text="readerArcGapText()"></p>
+          </div>
+        </template>
+        {% endif %}
       </div>
       {% if not reader_preview|default(false) %}
       <nav class="comic-reader__issue-navigation" aria-label="Issue navigation">
@@ -137,7 +145,7 @@
         aria-labelledby="comic-reader-completion-title"
       >
         <strong id="comic-reader-completion-title" x-text="'Finished ' + readerIssueLabel"></strong>
-        <p x-show="!readerAdjacentIssue('next')">You’re caught up in this series.</p>
+        <p x-show="!readerAdjacentIssue('next')" x-text="readerEndMessage()"></p>
         <div class="comic-reader__state-actions">
           <button
             x-show="readerAdjacentIssue('next')"
