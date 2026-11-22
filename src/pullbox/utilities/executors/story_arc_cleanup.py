@@ -30,7 +30,7 @@ class StoryArcCleanupExecutor(JobExecutor):
     async def generate_items(
         self, job_config: dict[str, Any], job_context: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
-        if "record_series" in job_config:
+        if "record_series" in job_config and not job_config.get("targets"):
             return [
                 {"operation": "check_series_record", "index": i}
                 for i in range(len(job_config["record_series"]))
@@ -67,7 +67,7 @@ class StoryArcCleanupExecutor(JobExecutor):
         async with job_context["factory"]() as db:
             try:
                 index = item_data["index"]
-                if "record_series" in job_config:
+                if "record_series" in job_config and not job_config.get("targets"):
                     record = job_config["record_series"][index]
                     await check_series_item(db, job_config["arc_id"], record)
                     return ProcessedItem(
@@ -103,16 +103,23 @@ class StoryArcCleanupExecutor(JobExecutor):
             return FinalizeResult()
         if "record_series" in job_config:
             count = len(job_config["record_series"])
+            removing = len(job_config.get("targets", ()))
             if (
                 job.state != JobState.COMPLETED
-                or summary.completed != count
+                or summary.completed != (removing or count)
                 or summary.failed
                 or summary.skipped
             ):
-                raise ValueError("The selection was not completed. No series records were removed.")
+                raise ValueError(
+                    "Cleanup did not finish. The series records were kept; "
+                    "review completed items before retrying."
+                )
             await finish_series_records(session, job_config, job.id)
             return FinalizeResult(
-                final_parts=[f"arc and {count} selected series removed; all files kept"]
+                final_parts=[
+                    f"arc and {count} selected series removed; "
+                    + (f"{removing} reviewed files removed" if removing else "all files kept")
+                ]
             )
         if summary.failed or summary.skipped or summary.completed != len(job_config["targets"]):
             raise ValueError(

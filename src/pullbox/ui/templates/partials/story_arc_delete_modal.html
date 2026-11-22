@@ -52,15 +52,20 @@
               </nav>
             </div>
           </section>
-          <p x-show="selectedSeries.length" x-text="selectedSeries.length + ' series selected. Clear your series selection to choose file removal instead.'"></p>
+          <p x-show="selectedSeries.length" x-text="selectedSeries.length + ' series selected; ' + seriesFiles.length + ' series files selected for removal.'"></p>
           <p x-show="selectedMembers.length || selectedPaths.length" x-text="selectedMembers.length + ' library files and ' + selectedPaths.length + ' separate arc files selected for removal.'"></p>
           <p x-show="selectionCount >= 1000">You can select up to 1,000 files. Unselected files stay on disk.</p>
           <template x-if="cleanupReview?.record_series">
             <section class="space-y-2" role="status" aria-label="Selected series records">
-              <p>All comic files will stay on disk.</p>
+              <p x-show="!cleanupReview.paths.length">All comic files will stay on disk.</p>
+              <template x-if="cleanupReview.paths.length"><div class="space-y-1">
+                <p x-text="cleanupReview.trash_enabled ? 'These files will go to Trash:' : 'Trash is off. These files will be permanently removed:'"></p>
+                <ul><template x-for="path in cleanupReview.paths" :key="path"><li class="break-all font-mono text-xs" x-text="path"></li></template></ul>
+                <p>Cancelling stops further removals. Files already removed are not restored. Series records are deleted only after all selected files finish.</p>
+              </div></template>
               <p>The arc and these series records will be permanently removed together:</p>
               <ul><template x-for="s in cleanupReview.record_series" :key="s.id">
-                <li x-text="s.title + ': ' + s.issues + ' issue records, ' + s.outside + ' outside this arc, ' + s.files + ' registered files kept on disk.'"></li>
+                <li x-text="s.title + ': ' + s.issues + ' issue records, ' + s.outside + ' outside this arc, ' + (s.files - cleanupReview.removed_by_series[s.id]) + ' registered files kept on disk.'"></li>
               </template></ul>
               <template x-if="cleanupReview.shared_arcs.length">
                 <div class="space-y-1">
@@ -107,7 +112,7 @@
     <footer class="modal-footer">
       <button x-ref="deleteCancel" type="button" class="btn-secondary" :disabled="deletePhase === 'deleting'" @click="closeDelete()">Cancel</button>
       <button type="button" class="btn-danger" :disabled="!!deletePhase || !!deleteError || (selectionCount ? !deletePreview?.cleanup_allowed : !deletePreview?.token) || (!!cleanupReview?.shared_arcs?.length && !allowShared)" @click="confirmDelete()"
-              x-text="deletePhase === 'deleting' ? 'Submitting...' : deletePhase === 'reviewing' ? 'Reviewing...' : selectedSeries.length ? (cleanupReview ? 'Delete arc and selected series' : 'Review selected series') : cleanupReview ? 'Delete arc and selected files' : selectionCount ? 'Review selected files' : 'Delete arc only'">Delete arc only</button>
+              x-text="deletePhase === 'deleting' ? 'Submitting...' : deletePhase === 'reviewing' ? 'Reviewing...' : selectedSeries.length ? (cleanupReview ? (seriesFiles.length ? 'Delete arc, series and selected files' : 'Delete arc and selected series') : 'Review selected series') : cleanupReview ? 'Delete arc and selected files' : selectionCount ? 'Review selected files' : 'Delete arc only'">Delete arc only</button>
     </footer>
   </div>
 </dialog>

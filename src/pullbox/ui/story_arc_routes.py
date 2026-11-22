@@ -63,7 +63,12 @@ from pullbox.services.story_arc_placement_integration import (
     StoryArcPlacementSyncService,
     validate_story_arc_placement_policy_input,
 )
-from pullbox.services.story_arc_series_review import outside_issues, related_series, series_peers
+from pullbox.services.story_arc_series_review import (
+    outside_issues,
+    related_series,
+    series_files,
+    series_peers,
+)
 from pullbox.services.story_arc_service import (
     StoryArcConflictError,
     StoryArcNotFoundError,
@@ -1257,6 +1262,9 @@ class _DeleteArcConfirmation(BaseModel):
 
 class _ArcFileSelection(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    series_file_ids: list[Annotated[int, Field(strict=True, gt=0, le=9223372036854775807)]] = Field(
+        default_factory=list, max_length=1000
+    )
     series_ids: list[Annotated[int, Field(strict=True, gt=0, le=9223372036854775807)]] = Field(
         default_factory=list, max_length=100
     )
@@ -1285,6 +1293,7 @@ async def preview_selected_arc_files(
             body.ids,
             member_ids=body.member_ids,
             series_ids=body.series_ids,
+            series_file_ids=body.series_file_ids,
         )
     except StoryArcNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
@@ -1312,6 +1321,7 @@ async def confirm_selected_arc_files(
             member_ids=body.member_ids,
             allow_shared=body.allow_shared,
             series_ids=body.series_ids,
+            series_file_ids=body.series_file_ids,
         )
         job_id = job.id
         await session.commit()
@@ -1401,12 +1411,14 @@ async def story_arc_related_series(
 async def story_arc_related_series_detail(
     story_arc_id: int,
     series_id: int,
-    detail: Literal["outside-issues", "other-arcs"],
+    detail: Literal["outside-issues", "other-arcs", "files"],
     _user: InteractiveOperatorUser,
     session: DbSession,
     after: Annotated[int, Query(ge=0, le=9223372036854775807)] = 0,
 ) -> Response:
-    read = outside_issues if detail == "outside-issues" else series_peers
+    read = {"outside-issues": outside_issues, "other-arcs": series_peers, "files": series_files}[
+        detail
+    ]
     try:
         page = await read(session, story_arc_id, series_id, after)
     except StoryArcNotFoundError as exc:

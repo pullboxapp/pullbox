@@ -26,6 +26,7 @@ from pullbox.services.story_arc_member_removal import (
     review_member_removal,
     stage_member_removal,
 )
+from pullbox.services.story_arc_series_cleanup import verify_series_progress
 from pullbox.services.story_arc_service import StoryArcConflictError
 from pullbox.utilities.job_queue import JobQueueManager
 from pullbox.utilities.models import ItemState, JobState, JobType, UtilityJob, UtilityJobItem
@@ -133,6 +134,11 @@ async def run_member_item(
     arc, item = await _owner(db, config, item_id)
     targets = config["targets"]
     review = MemberRemovalReview.model_validate(targets[index]["original"])
+    if review.parent_scope_id is not None and (
+        not config.get("series_file_binding")
+        or review.parent_scope_id not in {s["id"] for s in config["record_series"]}
+    ):
+        raise StoryArcConflictError("The file does not belong to a reviewed parent series.")
     if (
         item.item_index != index
         or item.operation != "remove_member_file"
@@ -191,9 +197,16 @@ async def run_member_item(
             }
     else:
         # Don't reserve a changed source or leave a workspace for an ineligible target.
+        if review.parent_scope_id is not None:
+            await verify_series_progress(db, config, item.job_id, index)
         if (
             await review_member_removal(
-                db, review.arc_id, review.file.id, shared_arcs=review.shared_arcs, lock=True
+                db,
+                review.arc_id,
+                review.file.id,
+                shared_arcs=review.shared_arcs,
+                lock=True,
+                parent_scope_id=review.parent_scope_id,
             )
             != review
         ):
@@ -232,17 +245,22 @@ async def run_member_item(
         await db.commit()
     try:
         _, item = await _owner(db, config, item_id)
-        _, binding = await _snapshot(
-            db,
-            review.arc_id,
-            config["actor"],
-            lock=True,
-            cleanup_job=item.job_id,
-            omit=frozenset(t["id"] for t in targets if "original" not in t),
-            omit_files=frozenset(t["id"] for t in targets if "original" in t),
-        )
+        if review.parent_scope_id is not None:
+            await verify_series_progress(db, config, item.job_id, index, operation)
+        else:
+            _, binding = await _snapshot(
+                db,
+                review.arc_id,
+                config["actor"],
+                lock=True,
+                cleanup_job=item.job_id,
+                omit=frozenset(t["id"] for t in targets if "original" not in t),
+                omit_files=frozenset(t["id"] for t in targets if "original" in t),
+            )
+            if binding != config["residual"]:
+                raise StoryArcConflictError("The arc changed before removal.")
         trash = await resolve_configured_utility_trash_dir(db)
-        if binding != config["residual"] or (str(trash) if trash else None) != config["trash"]:
+        if (str(trash) if trash else None) != config["trash"]:
             raise StoryArcConflictError("The arc or Trash settings changed before removal.")
         await stage_member_removal(db, review, plan)
         await db.commit()

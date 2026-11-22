@@ -25,7 +25,11 @@ from pullbox.services.issue_file_service import resolve_configured_utility_trash
 from pullbox.services.story_arc_deletion import _delete_arc_record, _snapshot
 from pullbox.services.story_arc_member_removal import review_member_removal
 from pullbox.services.story_arc_placement_integration import StoryArcPlacementSyncService
-from pullbox.services.story_arc_series_cleanup import series_record_plan
+from pullbox.services.story_arc_series_cleanup import (
+    SeriesFileProgress,
+    series_binding,
+    series_record_plan,
+)
 from pullbox.services.story_arc_service import StoryArcConflictError
 from pullbox.utilities.import_guards import ensure_no_active_import_file_mutation
 from pullbox.utilities.models import JobState, JobType, UtilityJob, UtilityJobItem
@@ -65,6 +69,77 @@ def _target(p: StoryArcPlacement) -> dict[str, Any]:
     }
 
 
+async def _series_files_plan(
+    db: AsyncSession,
+    arc_id: int,
+    actor: int,
+    series_ids: list[int],
+    file_ids: list[int],
+    *,
+    lock: bool,
+) -> dict[str, Any]:
+    if len(file_ids) > 1000 or len(set(file_ids)) != len(file_ids):
+        raise StoryArcConflictError("Select up to 1,000 distinct files from the reviewed series.")
+    plan = await series_record_plan(db, arc_id, actor, series_ids, lock=lock)
+    if not file_ids:
+        return plan
+    rows = (
+        await db.execute(
+            select(LibraryFile.id, Issue.series_id, Issue.status, Issue.manual_skip)
+            .join(Issue, Issue.id == LibraryFile.issue_id)
+            .where(LibraryFile.id.in_(file_ids), Issue.series_id.in_(series_ids))
+            .order_by(LibraryFile.id)
+        )
+    ).all()
+    if len(rows) != len(file_ids):
+        raise StoryArcConflictError("Choose only files registered to the selected series.")
+    evidence_bytes = 0
+    targets = []
+    for fid, sid, status, skip in rows:
+        peers = list(
+            await db.scalars(
+                select(IssueStoryArc.story_arc_id)
+                .join(LibraryFile, LibraryFile.issue_id == IssueStoryArc.issue_id)
+                .where(
+                    LibraryFile.id == fid,
+                    IssueStoryArc.story_arc_id != arc_id,
+                    IssueStoryArc.resolution_state == StoryArcResolutionState.RESOLVED,
+                )
+                .order_by(IssueStoryArc.story_arc_id)
+            )
+        )
+        evidence = await review_member_removal(
+            db, arc_id, fid, shared_arcs=peers, parent_scope_id=sid, lock=lock
+        )
+        encoded = evidence.model_dump_json()
+        evidence_bytes += len(encoded.encode())
+        if evidence_bytes > 2 * 1024 * 1024:
+            raise StoryArcConflictError("Too much evidence for one review. Select fewer files.")
+        targets.append(
+            {
+                "id": fid,
+                "file_path": str(evidence.file.path),
+                "original": json.loads(encoded),
+                "initial_issue": [status.value, skip],
+            }
+        )
+    stable = await series_record_plan(
+        db,
+        arc_id,
+        actor,
+        series_ids,
+        lock=lock,
+        progress=SeriesFileProgress.from_items(targets, 0, None),
+    )
+    trash = await resolve_configured_utility_trash_dir(db)
+    return {
+        **plan,
+        "targets": targets,
+        "trash": str(trash) if trash else None,
+        "series_file_binding": series_binding(stable),
+    }
+
+
 async def _plan(
     db: AsyncSession,
     arc_id: int,
@@ -74,13 +149,18 @@ async def _plan(
     member_ids: list[int],
     lock: bool,
     series_ids: list[int] | None = None,
+    series_file_ids: list[int] | None = None,
 ) -> dict[str, Any]:
     if series_ids:
         if ids or member_ids:
             raise StoryArcConflictError(
                 "Review series records separately from physical file removal."
             )
-        return await series_record_plan(db, arc_id, actor, series_ids, lock=lock)
+        return await _series_files_plan(
+            db, arc_id, actor, series_ids, series_file_ids or [], lock=lock
+        )
+    if series_file_ids:
+        raise StoryArcConflictError("Select the parent series before selecting its files.")
     selected = frozenset(ids)
     originals = frozenset(member_ids)
     if (
@@ -195,13 +275,27 @@ async def preview_cleanup(
     *,
     member_ids: list[int] | None = None,
     series_ids: list[int] | None = None,
+    series_file_ids: list[int] | None = None,
 ) -> dict[str, Any]:
     plan = await _plan(
-        db, arc_id, actor, ids, member_ids=member_ids or [], series_ids=series_ids, lock=False
+        db,
+        arc_id,
+        actor,
+        ids,
+        member_ids=member_ids or [],
+        series_ids=series_ids,
+        series_file_ids=series_file_ids,
+        lock=False,
     )
     if series_ids:
         return {k: plan[k] for k in ("impact", "record_series", "shared_arcs")} | {
-            "token": _signer().dumps(_digest(plan))
+            "token": _signer().dumps(_digest(plan)),
+            "paths": [t["file_path"] for t in plan.get("targets", ())],
+            "removed_by_series": {
+                s["id"]: sum(t["original"]["series_id"] == s["id"] for t in plan.get("targets", ()))
+                for s in plan["record_series"]
+            },
+            "trash_enabled": bool(plan.get("trash")),
         }
     return {
         "paths": [p["file_path"] for p in plan["targets"]],
@@ -226,9 +320,17 @@ async def enqueue_reviewed_cleanup(
     member_ids: list[int] | None = None,
     allow_shared: bool = False,
     series_ids: list[int] | None = None,
+    series_file_ids: list[int] | None = None,
 ) -> UtilityJob:
     plan = await _plan(
-        db, arc_id, actor, ids, member_ids=member_ids or [], series_ids=series_ids, lock=True
+        db,
+        arc_id,
+        actor,
+        ids,
+        member_ids=member_ids or [],
+        series_ids=series_ids,
+        series_file_ids=series_file_ids,
+        lock=True,
     )
     if plan["shared_arcs"] and not allow_shared:
         raise StoryArcConflictError("Confirm the shared comic impact before continuing.")

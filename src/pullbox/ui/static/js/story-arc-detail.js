@@ -33,7 +33,7 @@ function storyArcDetail() {
     coverModalOpen: false, coverModalUrl: '', reordering: false, reorderError: '',
     deletePreview: null, deletePhase: '', deleteError: '', deleteUrl: '', deleteGeneration: 0,
     showPaths: false, pathItems: [], pathCursors: [0], pathNext: null, pathBusy: false, pathError: '', pathRetry: [0],
-    selectedPaths: [], selectedMembers: [], selectedSeries: [], allowShared: false, cleanupReview: null,
+    selectedPaths: [], selectedMembers: [], selectedSeries: [], seriesFiles: [], allowShared: false, cleanupReview: null,
     get selectionCount() { return this.selectedPaths.length + this.selectedMembers.length + this.selectedSeries.length; },
     reviewDelete(arcId) {
       if (this.$refs.deleteDialog.open) return;
@@ -57,6 +57,7 @@ function storyArcDetail() {
       this.selectedPaths = [];
       this.selectedMembers = [];
       this.selectedSeries = [];
+      this.seriesFiles = [];
       this.allowShared = false;
       this.cleanupReview = null;
       this.pathBusy = false;
@@ -116,6 +117,14 @@ function storyArcDetail() {
       this.deleteError = '';
       this.allowShared = false;
       this.selectedSeries = selected ? [...this.selectedSeries, id] : this.selectedSeries.filter(x => x !== id);
+      if (!selected) this.seriesFiles = this.seriesFiles.filter(x => x.series !== id);
+    },
+    selectSeriesFile(series, file, selected) {
+      this.cleanupReview = null;
+      this.deleteError = '';
+      this.allowShared = false;
+      this.seriesFiles = this.seriesFiles.filter(x => x.file !== file);
+      if (selected && this.selectedSeries.includes(series)) this.seriesFiles.push({series, file});
     },
     async recoverMember() {
       if (this.deletePhase || !this.deletePreview?.pending_member_cleanup) return;
@@ -141,7 +150,7 @@ function storyArcDetail() {
       try {
         const response = await fetch(this.deleteUrl + (confirm ? '/cleanup' : '/cleanup/preview'), {
           method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': readCsrfTokenFromBody()},
-          body: JSON.stringify({ids: this.selectedPaths, member_ids: this.selectedMembers, ...(this.selectedSeries.length ? {series_ids: this.selectedSeries} : {}), ...(confirm ? {token: this.cleanupReview.token, allow_shared: this.allowShared} : {})}),
+          body: JSON.stringify({ids: this.selectedPaths, member_ids: this.selectedMembers, ...(this.selectedSeries.length ? {series_ids: this.selectedSeries, series_file_ids: this.seriesFiles.map(x => x.file)} : {}), ...(confirm ? {token: this.cleanupReview.token, allow_shared: this.allowShared} : {})}),
         });
         const result = await response.json();
         if (generation !== this.deleteGeneration) return;

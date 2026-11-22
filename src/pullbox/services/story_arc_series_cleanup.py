@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -19,7 +19,7 @@ from pullbox.models.import_job import (
     ImportJobActionStatus,
 )
 from pullbox.models.issue import Issue, IssueStatus
-from pullbox.models.library import LibraryFile, MatchConfidence
+from pullbox.models.library import LibraryFile, LibraryFileStorageMode, MatchConfidence
 from pullbox.models.pending_match import PendingMatch, PendingMatchStatus
 from pullbox.models.series import Series
 from pullbox.models.story_arc import IssueStoryArc, StoryArc
@@ -109,6 +109,40 @@ async def _guard_retained_work(db: AsyncSession, ids: list[int], *, lock: bool) 
             )
 
 
+@dataclass(frozen=True)
+class SeriesFileProgress:
+    """Normalize only changes made by completed, ordered items of this job."""
+
+    files: dict[int, tuple[int, str, int]]
+    removed: frozenset[int]
+    issue_states: dict[int, tuple[str, bool, str, bool]]
+    operation: str | None
+
+    @classmethod
+    def from_items(
+        cls, targets: list[dict[str, Any]], completed: int, operation: str | None
+    ) -> SeriesFileProgress:
+        removed: set[int] = set()
+        states = {}
+        files = {}
+        for i, target in enumerate(targets):
+            original = target["original"]
+            iid, fid = original["issue_id"], original["file"]["id"]
+            files[fid] = iid, target["file_path"], original["file"]["root_id"]
+            if i < completed:
+                removed.add(fid)
+                owns = any(c["id"] not in removed for c in original["remaining"])
+                status, skip = target["initial_issue"]
+                states[iid] = (status, skip, "owned" if owns else "skipped", skip if owns else True)
+        return cls(files, frozenset(removed), states, operation)
+
+
+def series_binding(plan: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps({**plan, "previous_job": None}, sort_keys=True).encode()
+    ).hexdigest()
+
+
 async def series_record_plan(
     db: AsyncSession,
     arc_id: int,
@@ -117,6 +151,7 @@ async def series_record_plan(
     *,
     lock: bool,
     job_id: str | None = None,
+    progress: SeriesFileProgress | None = None,
 ) -> dict[str, Any]:
     if not 1 <= len(ids) <= 100 or len(set(ids)) != len(ids) or min(ids) < 1:
         raise StoryArcConflictError("Select between 1 and 100 distinct related series.")
@@ -126,12 +161,25 @@ async def series_record_plan(
         await reserve_series_arc_work(db, ids)
     else:
         await check_series_arc_work(db, ids)
-    review, residual = await _snapshot(db, arc_id, actor, lock=lock, cleanup_job=job_id)
+    review, residual = await _snapshot(
+        db,
+        arc_id,
+        actor,
+        lock=lock,
+        cleanup_job=job_id,
+        omit_files=frozenset(progress.files) if progress else frozenset(),
+    )
     if review.blocker:
         raise StoryArcConflictError(review.blocker)
     arc = await db.get(StoryArc, arc_id)
     assert arc is not None
-    if (arc.diagnostics or {}).get("pending_member_cleanup"):
+    receipt = (arc.diagnostics or {}).get("pending_member_cleanup") or {}
+    if receipt and not (
+        progress
+        and job_id
+        and progress.operation
+        and receipt.get("operation") == progress.operation
+    ):
         raise StoryArcConflictError(
             "Finish this arc's interrupted file cleanup before deleting series."
         )
@@ -169,6 +217,7 @@ async def series_record_plan(
             Issue.status,
             Issue.title,
             Issue.id.in_(members).label("member"),
+            Issue.manual_skip,
         )
         .where(Issue.series_id.in_(ids))
         .order_by(Issue.id)
@@ -177,10 +226,23 @@ async def series_record_plan(
             raise StoryArcConflictError(
                 "A selected issue is downloading. Finish or cancel its download first."
             )
-        bind(tuple(issue))
+        value = list(issue)
+        if progress:
+            restore = progress.issue_states.get(issue.id)
+            if restore:
+                status, skip, expected_status, expected_skip = restore
+                if (issue.status.value, issue.manual_skip) != (expected_status, expected_skip):
+                    raise StoryArcConflictError(
+                        "Issue ownership changed during cleanup. Review again."
+                    )
+                value[5], value[-1] = status, skip
+        else:
+            value.pop()  # Keep existing record-only job signatures compatible.
+        bind(tuple(value))
         records[issue.series_id]["issues"] += 1
         records[issue.series_id]["outside"] += int(not issue.member)
     paths = []
+    outstanding: set[int] = set()
     for f in await db.execute(
         select(
             Issue.series_id,
@@ -195,9 +257,22 @@ async def series_record_plan(
         .where(Issue.series_id.in_(ids))
         .order_by(LibraryFile.id)
     ):
+        if progress and f.id in progress.files:
+            if (
+                f.id in progress.removed
+                or progress.files[f.id] != (f.issue_id, f.file_path, f.library_root_id)
+                or f.storage_mode != LibraryFileStorageMode.MANAGED
+            ):
+                raise StoryArcConflictError("A selected file registration changed. Review again.")
+            outstanding.add(f.id)
+            if f.file_path != receipt.get("path"):
+                paths.append(Path(f.file_path))
+            continue
         bind(tuple(f))
         records[f.series_id]["files"] += 1
         paths.append(Path(f.file_path))
+    if progress and outstanding != progress.files.keys() - progress.removed:
+        raise StoryArcConflictError("A selected series file is no longer registered. Review again.")
     if paths:
         await require_no_archive_publication(db, *paths, include_descendants=False)
     busy = (
@@ -272,19 +347,53 @@ async def check_series_item(db: AsyncSession, arc_id: int, expected: dict[str, A
         raise StoryArcConflictError("This catalog changed. No records were removed. Review again.")
 
 
+async def verify_series_progress(
+    db: AsyncSession,
+    plan: dict[str, Any],
+    job_id: str,
+    completed: int,
+    operation: str | None = None,
+) -> dict[str, Any]:
+    projection = SeriesFileProgress.from_items(plan["targets"], completed, operation)
+    current = await series_record_plan(
+        db,
+        plan["arc_id"],
+        plan["actor"],
+        [s["id"] for s in plan["record_series"]],
+        lock=True,
+        job_id=job_id,
+        progress=projection,
+    )
+    if current["previous_job"] != job_id or series_binding(current) != plan["series_file_binding"]:
+        raise StoryArcConflictError(
+            "The selected series or reading orders changed. Review the remaining files."
+        )
+    return current
+
+
 async def finish_series_records(db: AsyncSession, plan: dict[str, Any], job_id: str) -> None:
     ids = [s["id"] for s in plan["record_series"]]
     arc_id, actor = plan["arc_id"], plan["actor"]
-    current = await series_record_plan(db, arc_id, actor, ids, lock=True, job_id=job_id)
-    if current != {**plan, "previous_job": job_id}:
-        raise StoryArcConflictError(
-            "The selected series or another reading order changed. "
-            "No records were removed. Review again."
-        )
+    removed = len(plan.get("targets", ()))
+    if removed:
+        current = await verify_series_progress(db, plan, job_id, removed)
+    else:
+        current = await series_record_plan(db, arc_id, actor, ids, lock=True, job_id=job_id)
+        if current != {**plan, "previous_job": job_id}:
+            raise StoryArcConflictError(
+                "The selected series or another reading order changed. "
+                "No records were removed. Review again."
+            )
     # The job's cancellation lock and this transaction cover the whole selection.
     # Release only this arc first; detachment must retain chapters in surviving arcs.
     await _delete_arc_record(
-        db, arc_id, actor, ArcDeleteReview(**current["impact"]), job_id=job_id, series_ids=ids
+        db,
+        arc_id,
+        actor,
+        ArcDeleteReview(**current["impact"]),
+        job_id=job_id,
+        series_ids=ids,
+        removed_series_files=removed,
     )
     issues = select(Issue.id).where(Issue.series_id.in_(ids))
     for did in await db.scalars(

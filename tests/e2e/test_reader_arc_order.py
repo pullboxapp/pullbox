@@ -663,6 +663,18 @@ def test_related_series_review_is_read_only(
     expect(choice).not_to_be_checked()
     expect(dialog.get_by_role("button", name="Delete arc only")).to_be_enabled()
     choice.check()
+    row.get_by_role("button", name="Choose series files").click()
+    file = row.get_by_role("checkbox", name=re.compile("Remove series file .*Batman Beyond 091"))
+    expect(file).not_to_be_checked()
+    file.check()
+    dialog.get_by_role("button", name="Review selected series").click()
+    expect(dialog.get_by_role("status", name="Selected series records")).to_contain_text(
+        "Batman Beyond 091.cbz"
+    )
+    expect(
+        dialog.get_by_role("button", name="Delete arc, series and selected files")
+    ).to_be_visible()
+    file.uncheck()
     dialog.get_by_role("button", name="Review selected series").click()
     expect(dialog.get_by_text("All comic files will stay on disk.")).to_be_visible()
     expect(dialog.get_by_role("button", name="Delete arc and selected series")).to_be_visible()
@@ -723,10 +735,14 @@ def test_deleting_a_parent_series_preserves_a_reviewable_chapter(
         _run_async_blocking(cleanup(sid))
 
 
-def test_arc_delete_confirms_explicit_series_without_removing_comics(
-    authed_page: Page, seeded_server: str, arc_reader: int, tmp_path: Path
+@pytest.mark.parametrize("remove_file", [False, True])
+def test_arc_delete_confirms_explicit_series_file_disposition(
+    authed_page: Page, seeded_server: str, arc_reader: int, tmp_path: Path, remove_file: bool
 ) -> None:
     import asyncio
+
+    outside_path = tmp_path / "Disposable records 002.cbz"
+    outside_path.write_bytes(b"outside issue")
 
     async def setup() -> int:
         async with get_session_factory().begin() as db:
@@ -740,7 +756,18 @@ def test_arc_delete_confirms_explicit_series_without_removing_comics(
                     resolution_state=StoryArcResolutionState.RESOLVED,
                 )
             )
-            db.add(Issue(series=parent, issue_number=2))
+            root = await db.scalar(select(LibraryRoot).where(LibraryRoot.path == str(tmp_path)))
+            db.add(
+                LibraryFile(
+                    issue=Issue(series=parent, issue_number=2),
+                    library_root=root,
+                    file_name=outside_path.name,
+                    file_path=str(outside_path),
+                    file_size=outside_path.stat().st_size,
+                    file_modified_at=datetime.fromtimestamp(outside_path.stat().st_mtime, UTC),
+                    file_format=FileFormat.CBZ,
+                )
+            )
             await db.flush()
             return parent.id
 
@@ -756,6 +783,7 @@ def test_arc_delete_confirms_explicit_series_without_removing_comics(
 
     async def cleanup(sid: int) -> None:
         async with get_session_factory().begin() as db:
+            await db.execute(delete(LibraryFile).where(LibraryFile.file_path == str(outside_path)))
             await db.execute(delete(Series).where(Series.id == sid))
 
     sid = _run_async_blocking(setup())
@@ -768,14 +796,23 @@ def test_arc_delete_confirms_explicit_series_without_removing_comics(
         dialog = page.get_by_role("dialog")
         dialog.get_by_role("button", name="Review related series").click()
         dialog.get_by_role("checkbox", name="Remove series record: Disposable records").check()
+        if remove_file:
+            dialog.get_by_role("button", name="Choose series files").click()
+            dialog.get_by_role("checkbox", name=f"Remove series file {outside_path}").check()
         dialog.get_by_role("button", name="Review selected series").click()
         expect(dialog.get_by_role("status", name="Selected series records")).to_contain_text(
             "2 issue records, 1 outside this arc"
         )
-        dialog.get_by_role("button", name="Delete arc and selected series").click()
+        confirm = (
+            "Delete arc, series and selected files"
+            if remove_file
+            else "Delete arc and selected series"
+        )
+        dialog.get_by_role("button", name=confirm).click()
         expect(page).to_have_url(re.compile(r"/utilities\?tab=queue$"))
         _run_async_blocking(await_removal(sid))
         assert canonical.read_bytes() == original
+        assert outside_path.exists() != remove_file
     finally:
         _run_async_blocking(cleanup(sid))
 

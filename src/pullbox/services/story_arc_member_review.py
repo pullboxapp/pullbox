@@ -32,6 +32,13 @@ def resolved_member_issue_ids(arc_id: int) -> Select[int | None]:
 async def member_files(db: AsyncSession, arc_id: int, after: int) -> dict[str, object]:
     if await db.scalar(select(StoryArc.id).where(StoryArc.id == arc_id)) is None:
         raise StoryArcNotFoundError("Story Arc not found.")
+    return await registered_file_page(db, arc_id, after, series_id=None)
+
+
+async def registered_file_page(
+    db: AsyncSession, arc_id: int, after: int, *, series_id: int | None
+) -> dict[str, object]:
+    """Page registered paths after the caller has checked the arc or related series."""
     shared = (
         select(func.count(IssueStoryArc.id))
         .where(
@@ -62,7 +69,10 @@ async def member_files(db: AsyncSession, arc_id: int, after: int) -> dict[str, o
             .join(Series, Series.id == Issue.series_id)
             .join(LibraryRoot, LibraryRoot.id == LibraryFile.library_root_id)
             .where(
-                LibraryFile.issue_id.in_(resolved_member_issue_ids(arc_id)), LibraryFile.id > after
+                Issue.series_id == series_id
+                if series_id is not None
+                else LibraryFile.issue_id.in_(resolved_member_issue_ids(arc_id)),
+                LibraryFile.id > after,
             )
             .order_by(LibraryFile.id)
             .limit(_LIMIT + 1)

@@ -4,7 +4,7 @@
   <button type="button" class="btn-secondary btn-sm" @click="toggleReview()"
           :aria-expanded="expanded.toString()" aria-controls="arc-related-series">Review related series</button>
   <div id="arc-related-series" x-show="expanded" class="space-y-2">
-    <p class="text-pb-text-sec">Keep these series unless you select them. Removing a series deletes every issue record, including those outside this reading order, but keeps its files on disk.</p>
+    <p class="text-pb-text-sec">Removing a selected series deletes every issue record, including issues outside this reading order. Files stay on disk unless you separately select their paths.</p>
     <p x-show="selectedMembers.length || selectedPaths.length">Clear your file selections to choose series records instead.</p>
     <p x-show="selectedSeries.length >= 100">You can review up to 100 series at a time.</p>
     <ul class="space-y-3">
@@ -21,6 +21,27 @@
             <span x-text="series.outside + ' outside'"></span>.
             <span x-text="series.files + (series.files === 1 ? ' registered file' : ' registered files') + ' across the series.'"></span>
           </p>
+          <template x-if="selectedSeries.includes(series.id) && series.files">
+            <div x-data="storyArcReviewPage(deleteUrl + '/related-series/' + series.id + '/files')" class="space-y-1">
+              <button type="button" class="btn-secondary btn-sm" @click="toggleReview()"
+                      :aria-expanded="expanded.toString()" :aria-controls="'series-files-' + series.id">Choose series files</button>
+              <div x-show="expanded" :id="'series-files-' + series.id">
+                <ul class="space-y-2"><template x-for="book in records" :key="book.id">
+                  <li><span class="block break-all font-mono text-xs" x-text="book.path"></span>
+                    <template x-if="book.ownership === 'managed' && book.root_enabled && book.root_writable && !book.import_linked">
+                      <label class="flex items-center gap-2"><input type="checkbox" :aria-label="'Remove series file ' + book.path"
+                             :checked="seriesFiles.some(x => x.file === book.id)"
+                             :disabled="!!deletePhase || (seriesFiles.length >= 1000 && !seriesFiles.some(x => x.file === book.id))"
+                             @change="selectSeriesFile(series.id, book.id, $event.target.checked)">
+                        <span x-text="'Remove file for #' + book.issue"></span></label>
+                    </template>
+                    <span class="text-xs text-pb-text-sec" x-text="book.import_linked ? 'Kept: import history' : book.ownership === 'referenced' ? 'Kept: referenced file' : !book.root_enabled || !book.root_writable ? 'Kept: root does not allow writes' : ''"></span>
+                  </li>
+                </template></ul>
+                {{ review_controls('series files', 'No registered files for this series.') }}
+              </div>
+            </div>
+          </template>
           <template x-if="series.outside">
             <div x-data="storyArcReviewPage(deleteUrl + '/related-series/' + series.id + '/outside-issues')" class="space-y-1">
               <button type="button" class="btn-secondary btn-sm" @click="toggleReview()"

@@ -51,6 +51,7 @@ class MemberRemovalReview(BaseModel):
     member_id: int
     issue_id: int
     series_id: int
+    parent_scope_id: int | None = None
     file: _Copy
     remaining: tuple[_Copy, ...]
     shared_arcs: tuple[int, ...]
@@ -96,6 +97,20 @@ def _inspect(book: LibraryFile, root: LibraryRoot, *, removing: bool) -> _Copy:
             info.st_mode,
         ),
     )
+
+
+def _check_nested_roots(copy: _Copy, other_roots: Sequence[str]) -> None:
+    # Legacy configurations may contain nested roots. The outer registration
+    # cannot authorize removal inside a different, more specific root.
+    try:
+        for other in other_roots:
+            root = Path(other).resolve(strict=False)
+            if root.is_relative_to(copy.root_path) and copy.path.is_relative_to(root):
+                raise StoryArcConflictError(
+                    "Another library root covers this file. Review its location before removal."
+                )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise StoryArcConflictError("Library root locations could not be verified.") from exc
 
 
 async def _guard_work(db: AsyncSession, issue_id: int, book: LibraryFile) -> None:
@@ -168,7 +183,13 @@ async def _guard_work(db: AsyncSession, issue_id: int, book: LibraryFile) -> Non
 
 
 async def review_member_removal(
-    db: AsyncSession, arc_id: int, file_id: int, *, shared_arcs: Sequence[int], lock: bool = False
+    db: AsyncSession,
+    arc_id: int,
+    file_id: int,
+    *,
+    shared_arcs: Sequence[int],
+    lock: bool = False,
+    parent_scope_id: int | None = None,
 ) -> MemberRemovalReview:
     """Resolve exact membership and verify every surviving copy before predicting ownership."""
     query = (
@@ -183,6 +204,29 @@ async def review_member_removal(
             IssueStoryArc.resolution_state == StoryArcResolutionState.RESOLVED,
         )
     )
+    if parent_scope_id is not None:
+        # An outside issue needs two exact relationships: the file belongs to
+        # the selected series, and a resolved chapter proves that series is related.
+        witness = (
+            select(IssueStoryArc.id)
+            .join(Issue, Issue.id == IssueStoryArc.issue_id)
+            .where(
+                IssueStoryArc.story_arc_id == arc_id,
+                Issue.series_id == parent_scope_id,
+                IssueStoryArc.resolution_state == StoryArcResolutionState.RESOLVED,
+            )
+            .order_by(IssueStoryArc.id)
+            .limit(1)
+            .correlate(None)
+        )
+        query = (
+            select(StoryArc.revision, IssueStoryArc.id, Issue.id, Issue.series_id)
+            .select_from(LibraryFile)
+            .join(Issue, Issue.id == LibraryFile.issue_id)
+            .join(IssueStoryArc, IssueStoryArc.id == witness.scalar_subquery())
+            .join(StoryArc, StoryArc.id == IssueStoryArc.story_arc_id)
+            .where(LibraryFile.id == file_id, Issue.series_id == parent_scope_id)
+        )
     row = (await db.execute(query.with_for_update() if lock else query)).one_or_none()
     if row is None:
         raise StoryArcConflictError("Only an exactly matched member file can be removed.")
@@ -224,6 +268,9 @@ async def review_member_removal(
             await _guard_work(db, issue_id, book)
         copy = await asyncio.to_thread(_inspect, book, root, removing=removing)
         if removing:
+            other_roots = select(LibraryRoot.path).where(LibraryRoot.id != root.id)
+            paths = (await db.scalars(other_roots)).all()
+            await asyncio.to_thread(_check_nested_roots, copy, paths)
             selected = copy
         else:
             survivors.append(copy)
@@ -235,6 +282,7 @@ async def review_member_removal(
         member_id=member_id,
         issue_id=issue_id,
         series_id=series_id,
+        parent_scope_id=parent_scope_id,
         file=selected,
         remaining=tuple(survivors),
         shared_arcs=peers,
@@ -251,7 +299,12 @@ async def stage_member_removal(
     """
     await lock_file_mutation_admission(db)
     current = await review_member_removal(
-        db, review.arc_id, review.file.id, shared_arcs=review.shared_arcs, lock=True
+        db,
+        review.arc_id,
+        review.file.id,
+        shared_arcs=review.shared_arcs,
+        lock=True,
+        parent_scope_id=review.parent_scope_id,
     )
     journal = await db.scalar(
         select(LibraryRemoval.plan_json)

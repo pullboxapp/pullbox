@@ -11,7 +11,7 @@ from pullbox.models.issue import Issue
 from pullbox.models.library import LibraryFile
 from pullbox.models.series import Series
 from pullbox.models.story_arc import IssueStoryArc, StoryArc
-from pullbox.services.story_arc_member_review import resolved_member_issue_ids
+from pullbox.services.story_arc_member_review import registered_file_page, resolved_member_issue_ids
 from pullbox.services.story_arc_service import StoryArcNotFoundError
 
 if TYPE_CHECKING:
@@ -110,6 +110,13 @@ async def outside_issues(
             for r in rows
         ]
     )
+
+
+async def series_files(
+    db: AsyncSession, arc_id: int, series_id: int, after: int
+) -> dict[str, object]:
+    await _require_parent(db, arc_id, series_id)
+    return await registered_file_page(db, arc_id, after, series_id=series_id)
 
 
 async def series_peers(db: AsyncSession, arc_id: int, series_id: int, after: int) -> dict[str, Any]:
