@@ -24,6 +24,7 @@ from pullbox.models.story_arc import (
 )
 from pullbox.models.story_arc_import import ImportedStoryArc
 from pullbox.models.story_arc_sync import StoryArcSyncWork, StoryArcSyncWorkState
+from pullbox.services.story_arc_member_review import resolved_member_issue_ids
 from pullbox.services.story_arc_service import StoryArcConflictError, StoryArcNotFoundError
 from pullbox.utilities.models import JobState, UtilityJob
 
@@ -199,10 +200,7 @@ async def _snapshot(
 
 
 async def _retained_library_counts(db: AsyncSession, arc_id: int) -> tuple[int, int, int, int]:
-    resolved = select(IssueStoryArc.issue_id).where(
-        IssueStoryArc.story_arc_id == arc_id,
-        IssueStoryArc.resolution_state == StoryArcResolutionState.RESOLVED,
-    )
+    resolved = resolved_member_issue_ids(arc_id)
     files = select(func.count(LibraryFile.id)).where(LibraryFile.issue_id.in_(resolved))
     shared = select(func.count(func.distinct(IssueStoryArc.issue_id))).where(
         IssueStoryArc.story_arc_id != arc_id,

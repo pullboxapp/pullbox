@@ -52,6 +52,7 @@ from pullbox.services.story_arc_managed_reorder import (
     StoryArcManagedReorderService,
     StoryArcReorderPreview,
 )
+from pullbox.services.story_arc_member_review import member_files, sharing_arcs
 from pullbox.services.story_arc_placement_integration import (
     STORY_ARC_PLACEMENT_POLICY_SCHEMA_VERSION,
     StoryArcPlacementIntegrationError,
@@ -1316,6 +1317,37 @@ async def story_arc_delete_placements(
 ) -> Response:
     try:
         page = await review_arc_placement_paths(session, story_arc_id, after)
+    except StoryArcNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return JSONResponse(page, headers={"Cache-Control": "no-store"})
+
+
+@router.get("/story-arcs/{story_arc_id}/delete/member-files", include_in_schema=False)
+async def story_arc_member_files(
+    story_arc_id: int,
+    _user: InteractiveOperatorUser,
+    session: DbSession,
+    after: Annotated[int, Query(ge=0, le=9223372036854775807)] = 0,
+) -> Response:
+    try:
+        page = await member_files(session, story_arc_id, after)
+    except StoryArcNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return JSONResponse(page, headers={"Cache-Control": "no-store"})
+
+
+@router.get(
+    "/story-arcs/{story_arc_id}/delete/member-files/{file_id}/shared-arcs", include_in_schema=False
+)
+async def story_arc_member_file_sharing(
+    story_arc_id: int,
+    file_id: int,
+    _user: InteractiveOperatorUser,
+    session: DbSession,
+    after: Annotated[int, Query(ge=0, le=9223372036854775807)] = 0,
+) -> Response:
+    try:
+        page = await sharing_arcs(session, story_arc_id, file_id, after)
     except StoryArcNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
     return JSONResponse(page, headers={"Cache-Control": "no-store"})

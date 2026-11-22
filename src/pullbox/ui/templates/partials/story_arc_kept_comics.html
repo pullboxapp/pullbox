@@ -1,0 +1,51 @@
+{% macro review_controls(label, empty) %}
+<p role="status" x-show="busy">Loading {{ label }}...</p>
+<p role="status" x-show="loaded && !records.length && !busy && !failed">{{ empty }}</p>
+<div x-show="failed">
+  <p role="alert">Could not load {{ label }}.</p>
+  <button class="btn-secondary btn-sm" type="button" @click="readPage(retryPage)">Retry</button>
+</div>
+<nav aria-label="{{ label|capitalize }} pages" class="flex items-center gap-2"
+     x-show="nextPage || cursors.length > 1">
+  <button class="btn-secondary btn-sm" type="button" :disabled="busy || cursors.length === 1"
+          @click="readPage(cursors.slice(0, -1))">Previous</button>
+  <span x-text="'Page ' + cursors.length"></span>
+  <button class="btn-secondary btn-sm" type="button" :disabled="busy || !nextPage"
+          @click="readPage([...cursors, nextPage])">Next</button>
+</nav>
+{% endmacro %}
+<section x-show="deletePreview.files" x-data="storyArcReviewPage(deleteUrl + '/member-files')" class="space-y-2">
+  <button class="btn-secondary btn-sm" type="button" @click="toggleReview()"
+          :aria-expanded="expanded.toString()" aria-controls="arc-kept-files">Review library comics</button>
+  <div id="arc-kept-files" x-show="expanded" class="space-y-2">
+    <p class="text-pb-text-sec">These are the registered library files, not the separate arc copies or links. They stay in place.</p>
+    <ul class="space-y-2">
+      <template x-for="book in records" :key="book.id">
+        <li class="space-y-1">
+          <strong x-text="book.series + ' #' + book.issue"></strong>
+          <span class="block break-all font-mono text-xs" x-text="book.path"></span>
+          <div class="flex flex-wrap gap-2 text-xs text-pb-text-sec">
+            <span x-text="book.ownership === 'referenced' ? 'Referenced file' : 'Managed file'"></span>
+            <span x-show="!book.root_enabled">Library root disabled</span>
+            <span x-show="!book.root_writable">Managed writes disabled</span>
+            <span x-show="book.import_linked">Linked to import history</span>
+          </div>
+          <template x-if="book.shared">
+            <div x-data="storyArcReviewPage(deleteUrl + '/member-files/' + book.id + '/shared-arcs')" class="space-y-1">
+              <button type="button" class="btn-secondary btn-sm" @click="toggleReview()"
+                      :aria-expanded="expanded.toString()" :aria-controls="'arc-shared-' + book.id"
+                      x-text="'Used by ' + book.shared + (book.shared === 1 ? ' other arc' : ' other arcs')"></button>
+              <div x-show="expanded" :id="'arc-shared-' + book.id">
+                <ul><template x-for="peer in records" :key="peer.id">
+                  <li><span x-text="peer.name"></span> <span x-show="peer.lifecycle === 'archived'">(Archived)</span></li>
+                </template></ul>
+                {{ review_controls('shared arcs', 'No other arcs currently use this issue.') }}
+              </div>
+            </div>
+          </template>
+        </li>
+      </template>
+    </ul>
+    {{ review_controls('library comics', 'No registered library files remain for these issues.') }}
+  </div>
+</section>

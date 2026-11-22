@@ -1,3 +1,33 @@
+function storyArcReviewPage(url) {
+  return {
+    expanded: false, loaded: false, busy: false, failed: false, records: [],
+    cursors: [0], nextPage: null, retryPage: [0],
+    toggleReview() {
+      this.expanded = !this.expanded;
+      if (this.expanded && !this.loaded) this.readPage([0]);
+    },
+    async readPage(cursors) {
+      if (this.busy) return;
+      this.busy = true;
+      this.failed = false;
+      this.retryPage = cursors;
+      try {
+        const response = await fetch(url + '?after=' + cursors.at(-1), {cache: 'no-store'});
+        if (!response.ok) throw new Error();
+        const page = await response.json();
+        this.records = page.items;
+        this.nextPage = page.next_after;
+        this.cursors = cursors;
+        this.loaded = true;
+      } catch {
+        this.failed = true;
+      } finally {
+        this.busy = false;
+      }
+    },
+  };
+}
+
 function storyArcDetail() {
   return {
     coverModalOpen: false, coverModalUrl: '', reordering: false, reorderError: '',

@@ -526,6 +526,68 @@ def test_review_arc_file_paths_before_deleting_or_cancelling(
     expect(opener).to_be_focused()
 
 
+def test_review_kept_member_comic_without_deleting_it(
+    authed_page: Page, seeded_server: str, arc_reader: int, tmp_path: Path
+) -> None:
+    path = tmp_path / "Batman Beyond 091.cbz"
+    original = path.read_bytes()
+
+    async def seed_other() -> int:
+        async with get_session_factory().begin() as db:
+            issue_id = await db.scalar(
+                select(LibraryFile.issue_id).where(LibraryFile.file_path == str(path))
+            )
+            other = StoryArc(name="Another reading order")
+            db.add(
+                IssueStoryArc(
+                    story_arc=other,
+                    issue_id=issue_id,
+                    sequence_number=1,
+                    source_ordinal=1,
+                    resolution_state=StoryArcResolutionState.RESOLVED,
+                )
+            )
+            await db.flush()
+            return other.id
+
+    async def cleanup(other_id: int) -> None:
+        async with get_session_factory().begin() as db:
+            await db.execute(delete(StoryArc).where(StoryArc.id == other_id))
+
+    other_id = _run_async_blocking(seed_other())
+    page = authed_page
+    try:
+        page.goto(f"{seeded_server}/story-arcs/{arc_reader}")
+        opener = page.get_by_role("button", name="Delete Story Arc", exact=True)
+        opener.click()
+        dialog = page.get_by_role("dialog", name="Delete Reader crossover?")
+        page.route(
+            f"**/story-arcs/{arc_reader}/delete/member-files?*",
+            lambda r: r.fulfill(status=503),
+            times=1,
+        )
+        dialog.get_by_role("button", name="Review library comics").click(timeout=5000)
+        expect(dialog.get_by_text("Could not load library comics.")).to_be_visible()
+        dialog.get_by_role("button", name="Retry", exact=True).click()
+        book = dialog.get_by_role("listitem").filter(
+            has=dialog.page.get_by_text(str(path), exact=True)
+        )
+        expect(book.get_by_text("Managed file", exact=True)).to_be_visible()
+        book.get_by_role("button", name="Used by 1 other arc", exact=True).click()
+        expect(book.get_by_text("Another reading order", exact=True)).to_be_visible()
+        expect(dialog.get_by_role("checkbox")).to_have_count(0)
+        assert_no_axe_violations(page, name="arc-delete-library-review", include=["dialog[open]"])
+        dialog.get_by_role("button", name="Cancel", exact=True).click()
+        expect(opener).to_be_focused()
+        opener.click()
+        expect(dialog.get_by_role("button", name="Review library comics")).to_have_attribute(
+            "aria-expanded", "false"
+        )
+        assert path.read_bytes() == original
+    finally:
+        _run_async_blocking(cleanup(other_id))
+
+
 def test_delete_arc_with_an_explicitly_selected_copy(
     authed_page: Page,
     seeded_server: str,
