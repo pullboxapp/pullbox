@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- [Rehearse restoring a SQLite migration backup and its configuration](docs/sqlite-postgresql-migration.md#back-up-and-rehearse-restoring-the-configuration).
+  Verify that the restored deployment files match and its key can read saved credentials,
+  without starting Pullbox or revealing keys.
+
 - [Capture a verified offline SQLite snapshot](docs/sqlite-postgresql-migration.md#capture-the-offline-sqlite-snapshot)
   for PostgreSQL migration without starting Pullbox. Committed WAL changes are
   included; a source restart or unfinished library operation blocks publication.

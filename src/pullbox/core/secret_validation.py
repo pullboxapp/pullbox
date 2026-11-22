@@ -31,12 +31,12 @@ def _allows_weak_test_secret() -> bool:
     }
 
 
-def validate_application_secret(secret: str) -> None:
+def validate_application_secret(secret: str, *, allow_test_override: bool = True) -> None:
     """Raise when an application secret is empty, common, or too short."""
     normalized = secret.strip()
     if not normalized:
         raise WeakApplicationSecretError("Application secret key must not be empty.")
-    if _allows_weak_test_secret():
+    if allow_test_override and _allows_weak_test_secret():
         return
     if len(normalized) < MIN_APPLICATION_SECRET_LENGTH:
         raise WeakApplicationSecretError(

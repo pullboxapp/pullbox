@@ -111,6 +111,71 @@ database contents, unlike the Docker checkpoint. This does not save your
 configuration, encryption key, artwork or comics. The source stays stopped,
 and **`cutover_ready` remains false**.
 
+## Back up and rehearse restoring the configuration
+
+Keep the SQLite source offline. The database contains editable application settings and
+encrypted credentials, but it does **not** contain the key needed to read them. Preserve
+the **SQLite deployment as it actually ran**, not the edited settings you plan to use
+for PostgreSQL.
+
+1. In the directory containing the verified `pullbox-offline.db`, make a **new**
+   owner-only directory named `settings` (`mkdir -m 700 settings`). Copy the original
+   Compose file or exported deployment definition, overrides, environment files and
+   required deployment-specific configuration there. Keep their relative layout.
+   Do not put comics, catalogs, logs or database files inside `settings`.
+2. For a file-managed key, copy the existing `config.xml` into `settings/config.xml`.
+   For example, inside this private directory use
+   `docker cp pullbox:/data/config.xml ./config.xml` with the **stopped** source's actual
+   data path, then `chmod 600 config.xml`. Do not start Pullbox to generate a new file.
+3. If the source used **`PULLBOX_SECRET_KEY`**, save its original value from your
+   protected secret store as `settings/application-key`, a mode-600 file containing one
+   UTF-8 line. Preserve any existing `config.xml` too. The override wins even if the XML
+   contains a different key. Do not dump the container environment, put secrets in
+   commands, or share these files or their diffs. The recovery file is not a runtime
+   environment setting; on a real restore, supply that value through your secret store.
+4. Back up the snapshot and settings together using protected, preferably encrypted
+   backup storage. **Restore from that backup into a separate empty directory**.
+   Keep the original reference settings for comparison. For example, with `CAPTURE`
+   pointing to the snapshot's directory, `STORE` to a private encrypted backup
+   location, and `RESTORE` to a new directory:
+
+   ```sh
+   (umask 077; set -C; tar -C "$CAPTURE" -cf - settings pullbox-offline.db > "$STORE/pullbox-pre-migration.tar")
+   mkdir -m 700 "$RESTORE"
+   tar -C "$RESTORE" -xf "$STORE/pullbox-pre-migration.tar"
+   ```
+
+   This example does not encrypt the archive itself. Only extract your trusted backup,
+   and keep the encryption key for the backup storage recoverable separately.
+5. From a checkout with Pullbox dependencies installed, run:
+
+   ```sh
+   python -m pullbox.cli migration-check-restore \
+     --backup "$RESTORE/pullbox-offline.db" --snapshot-sha256 "$SNAPSHOT_SHA256" \
+     --original-settings "$CAPTURE/settings" --restored-settings "$RESTORE/settings" \
+     --key-source config-xml
+   ```
+
+   Use `--key-source secret-file` for an environment-managed key. If your deployment
+   definition is not `compose.yaml`, give its relative path with `--deployment-file`.
+   Use the **database digest** from the original snapshot report, not its Docker
+   checkpoint. Recheck the Docker checkpoint separately before going further.
+
+A successful report means the restored database passed preflight and matched its
+digest, the supplied configuration trees have identical names and file contents,
+and the explicitly selected restored key was validated. `key_evidence: verified`
+means it also decrypted the saved credentials. `no_ciphertext` means there were none
+to test: matching copies do not establish which key the historical app used. A key
+in the checking shell or its local `.env` cannot make the restore pass.
+
+The check reads only; it does not render or execute the deployment definition, set
+file ownership for your container, or discover files you forgot to preserve. Both
+settings directories must be private and independent, without symlinks or hardlinked
+files (up to 128 entries, 4 MiB per file and 32 MiB per set). Preserve media, artwork,
+external mount definitions, and any other required appdata separately. Keep the report,
+not the private recovery material, for troubleshooting. **Do not cut over on this
+report alone.**
+
 ## Check the destination
 
 Before initializing the destination, check a **new, dedicated PostgreSQL database**.

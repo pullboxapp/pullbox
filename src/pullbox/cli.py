@@ -151,6 +151,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Read the dedicated target URL from standard input, never the app configuration",
     )
     target.add_argument("--json", action="store_true", help="Print a redacted target report")
+    restore = subparsers.add_parser(
+        "migration-check-restore", help="Check independently restored deployment settings and key"
+    )
+    restore.add_argument("--backup", type=Path, required=True)
+    restore.add_argument("--snapshot-sha256", required=True)
+    restore.add_argument("--original-settings", type=Path, required=True)
+    restore.add_argument("--restored-settings", type=Path, required=True)
+    restore.add_argument("--key-source", choices=("config-xml", "secret-file"), required=True)
+    restore.add_argument(
+        "--deployment-file",
+        default="compose.yaml",
+        help="Relative pathname of the saved deployment definition",
+    )
     assets = subparsers.add_parser(
         "migration-check-assets", help="Check the key and comic mounts for a staged backup offline"
     )
@@ -260,6 +273,21 @@ def main() -> None:
                 print(f"- {reason}")
             print(target.next_step)
         if not target.target_checks_passed:
+            sys.exit(1)
+    elif args.command == "migration-check-restore":
+        from pullbox.services.migration_restore_config import check_restore
+
+        recovery = check_restore(
+            args.backup,
+            args.snapshot_sha256,
+            args.original_settings,
+            args.restored_settings,
+            args.key_source,
+            get_settings().db_url,
+            deployment_file=args.deployment_file,
+        )
+        print(json.dumps({**asdict(recovery), "next_step": recovery.next_step}, sort_keys=True))
+        if not recovery.restore_verified:
             sys.exit(1)
     elif args.command == "migration-check-assets":
         from pullbox.services.migration_assets import check_assets

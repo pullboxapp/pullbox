@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 import sqlite3
-from contextlib import ExitStack, closing
+from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass, field
 from itertools import groupby
 from operator import itemgetter
@@ -27,7 +27,7 @@ from pullbox.services.migration_covers import verify_covers
 from pullbox.services.migration_media import MediaMounts, verify_placements
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Iterator
 
 
 @dataclass
@@ -140,11 +140,17 @@ def _credential_values(raw: object, kind: str) -> Iterable[object]:
 def _credentials(db: sqlite3.Connection, config: Path, report: AssetReport) -> None:
     try:
         # secret_key() only reads existing config or its environment override.
-        cipher = derive_secret_cipher(ConfigFileProvider(config).secret_key())
+        secret = ConfigFileProvider(config).secret_key()
     except (ConfigFileError, OSError):
         report.block("application_key_unavailable")
         report.key_evidence = "unavailable"
         return
+    check_saved_credentials(db, secret, report)
+
+
+def check_saved_credentials(db: sqlite3.Connection, secret: str, report: AssetReport) -> None:
+    """Test ciphertext with the caller's selected key, without loading runtime settings."""
+    cipher = derive_secret_cipher(secret)
     for store, query, kind in _STORES:
         for (raw,) in db.execute(query):
             try:
@@ -286,6 +292,24 @@ def _files(
             report.sample_compared = True
 
 
+@contextmanager
+def checked_snapshot(
+    path: Path, expected: str, configured_url: str
+) -> Iterator[tuple[sqlite3.Connection, PreflightReport]]:
+    if not hex_digest(expected):
+        raise AssetVerificationError("invalid_fingerprint")
+    with database_snapshot(path, configured_url) as (snapshot, _):
+        with snapshot.open("rb") as stream:
+            if hashlib.file_digest(stream, "sha256").hexdigest() != expected.lower():
+                raise AssetVerificationError("snapshot_mismatch")
+        with closing(sqlite3.connect(snapshot.as_uri() + "?mode=ro&immutable=1", uri=True)) as db:
+            db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 32 * 1024 * 1024)
+            db.execute("BEGIN")
+            checks = PreflightReport()
+            inspect_snapshot_connection(db, checks)
+            yield db, checks
+
+
 def check_assets(
     path: Path,
     snapshot_sha256: str,
@@ -300,35 +324,24 @@ def check_assets(
 ) -> AssetReport:
     report = AssetReport(hash_scope="all" if all_files else "sample")
     try:
-        if not hex_digest(snapshot_sha256) or (compare is not None and not hex_digest(compare)):
+        if compare is not None and not hex_digest(compare):
             raise AssetVerificationError("invalid_fingerprint")
-        with database_snapshot(path, configured_url) as (snapshot, _):
-            with snapshot.open("rb") as stream:
-                observed = hashlib.file_digest(stream, "sha256").hexdigest()
-            if observed != snapshot_sha256.lower():
-                raise AssetVerificationError("snapshot_mismatch")
-            report.snapshot_sha256 = observed
-            with closing(
-                sqlite3.connect(snapshot.as_uri() + "?mode=ro&immutable=1", uri=True)
-            ) as db:
-                db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 32 * 1024 * 1024)
-                db.execute("BEGIN")
-                checks = PreflightReport()
-                inspect_snapshot_connection(db, checks)
-                if checks.blockers:
-                    for code in checks.blockers:
-                        report.block(code)
-                else:
-                    _credentials(db, config_path, report)
-                    _files(
-                        db,
-                        _maps(root_args),
-                        report,
-                        all_files=all_files,
-                        compare=compare,
-                        covers_dir=covers_dir,
-                        legacy_covers_dir=legacy_covers_dir,
-                    )
+        with checked_snapshot(path, snapshot_sha256, configured_url) as (db, checks):
+            report.snapshot_sha256 = snapshot_sha256.lower()
+            if checks.blockers:
+                for code in checks.blockers:
+                    report.block(code)
+            else:
+                _credentials(db, config_path, report)
+                _files(
+                    db,
+                    _maps(root_args),
+                    report,
+                    all_files=all_files,
+                    compare=compare,
+                    covers_dir=covers_dir,
+                    legacy_covers_dir=legacy_covers_dir,
+                )
     except (BackupInputError, AssetVerificationError) as exc:
         report.block(str(exc))
     except (OSError, sqlite3.Error, ValueError, RuntimeError):
