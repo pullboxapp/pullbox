@@ -659,7 +659,14 @@ def test_related_series_review_is_read_only(
     expect(
         row.get_by_role("list", name="Outside issues").get_by_role("listitem").first
     ).to_be_visible()
-    expect(review.get_by_role("checkbox")).to_have_count(0)
+    choice = row.get_by_role("checkbox", name="Remove series record: Batman Beyond")
+    expect(choice).not_to_be_checked()
+    expect(dialog.get_by_role("button", name="Delete arc only")).to_be_enabled()
+    choice.check()
+    dialog.get_by_role("button", name="Review selected series").click()
+    expect(dialog.get_by_text("All comic files will stay on disk.")).to_be_visible()
+    expect(dialog.get_by_role("button", name="Delete arc and selected series")).to_be_visible()
+    choice.uncheck()
     expect(dialog.get_by_role("button", name="Delete arc only")).to_be_enabled()
     assert_no_axe_violations(page, name=f"arc-series-review-{theme}", include=["dialog[open]"])
     dialog.press("Escape")
@@ -712,6 +719,63 @@ def test_deleting_a_parent_series_preserves_a_reviewable_chapter(
         expect(row).to_contain_text("#50-X")
         expect(row).to_contain_text("Final chapter")
         expect(row.get_by_test_id(f"story-arc-membership-status-{mid}")).to_contain_text("Missing")
+    finally:
+        _run_async_blocking(cleanup(sid))
+
+
+def test_arc_delete_confirms_explicit_series_without_removing_comics(
+    authed_page: Page, seeded_server: str, arc_reader: int, tmp_path: Path
+) -> None:
+    import asyncio
+
+    async def setup() -> int:
+        async with get_session_factory().begin() as db:
+            parent = Series(title="Disposable records", sort_title="disposable records")
+            db.add(
+                IssueStoryArc(
+                    story_arc_id=arc_reader,
+                    issue=Issue(series=parent, issue_number=1),
+                    sequence_number=4,
+                    source_ordinal=4,
+                    resolution_state=StoryArcResolutionState.RESOLVED,
+                )
+            )
+            db.add(Issue(series=parent, issue_number=2))
+            await db.flush()
+            return parent.id
+
+    async def await_removal(sid: int) -> None:
+        for _ in range(100):
+            async with get_session_factory()() as db:
+                if await db.get(StoryArc, arc_reader) is None:
+                    assert await db.get(Series, sid) is None
+                    assert await db.get(Series, 2)
+                    return
+            await asyncio.sleep(0.05)
+        pytest.fail("The confirmed records were not removed")
+
+    async def cleanup(sid: int) -> None:
+        async with get_session_factory().begin() as db:
+            await db.execute(delete(Series).where(Series.id == sid))
+
+    sid = _run_async_blocking(setup())
+    canonical = tmp_path / "Batman Beyond 091.cbz"
+    original = canonical.read_bytes()
+    try:
+        page = authed_page
+        page.goto(f"{seeded_server}/story-arcs/{arc_reader}")
+        page.get_by_role("button", name="Delete Story Arc", exact=True).click()
+        dialog = page.get_by_role("dialog")
+        dialog.get_by_role("button", name="Review related series").click()
+        dialog.get_by_role("checkbox", name="Remove series record: Disposable records").check()
+        dialog.get_by_role("button", name="Review selected series").click()
+        expect(dialog.get_by_role("status", name="Selected series records")).to_contain_text(
+            "2 issue records, 1 outside this arc"
+        )
+        dialog.get_by_role("button", name="Delete arc and selected series").click()
+        expect(page).to_have_url(re.compile(r"/utilities\?tab=queue$"))
+        _run_async_blocking(await_removal(sid))
+        assert canonical.read_bytes() == original
     finally:
         _run_async_blocking(cleanup(sid))
 

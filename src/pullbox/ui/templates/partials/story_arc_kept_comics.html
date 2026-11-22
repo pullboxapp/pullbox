@@ -26,7 +26,7 @@
           <span class="block break-all font-mono text-xs" x-text="book.path"></span>
           <template x-if="deletePreview.token && book.ownership === 'managed' && book.root_enabled && book.root_writable && !book.import_linked">
             <label class="flex items-center gap-2"><input type="checkbox" :aria-label="'Remove library file ' + book.path"
-                    :checked="selectedMembers.includes(book.id)" :disabled="!!deletePhase || (selectionCount >= 1000 && !selectedMembers.includes(book.id))"
+                    :checked="selectedMembers.includes(book.id)" :disabled="!!deletePhase || !!selectedSeries.length || (selectionCount >= 1000 && !selectedMembers.includes(book.id))"
                     @change="selectMember(book.id, $event.target.checked)">Remove library file</label>
           </template>
           <div class="flex flex-wrap gap-2 text-xs text-pb-text-sec">

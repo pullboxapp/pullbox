@@ -11,7 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Review related series** in the Story Arc deletion preview shows which issues
   fall outside the arc and which other reading orders link to each series.
-  Reviewing a series does not select it for deletion.
+  No series is selected by default. Select individual series to delete their
+  records along with the arc while keeping every comic file on disk. The
+  confirmation names other reading orders that will lose a chapter link.
+  If the selection changes before the job finishes, no records are deleted.
 - Story Arc details now offer **Delete Story Arc** alongside Archive. Review the
   reading order that will be removed and the comics that will stay. Deleting the
   arc alone leaves your series, issues, other arcs, and all files untouched.

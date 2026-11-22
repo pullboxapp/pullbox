@@ -25,6 +25,7 @@ from pullbox.services.issue_file_service import resolve_configured_utility_trash
 from pullbox.services.story_arc_deletion import _delete_arc_record, _snapshot
 from pullbox.services.story_arc_member_removal import review_member_removal
 from pullbox.services.story_arc_placement_integration import StoryArcPlacementSyncService
+from pullbox.services.story_arc_series_cleanup import series_record_plan
 from pullbox.services.story_arc_service import StoryArcConflictError
 from pullbox.utilities.import_guards import ensure_no_active_import_file_mutation
 from pullbox.utilities.models import JobState, JobType, UtilityJob, UtilityJobItem
@@ -65,8 +66,21 @@ def _target(p: StoryArcPlacement) -> dict[str, Any]:
 
 
 async def _plan(
-    db: AsyncSession, arc_id: int, actor: int, ids: list[int], *, member_ids: list[int], lock: bool
+    db: AsyncSession,
+    arc_id: int,
+    actor: int,
+    ids: list[int],
+    *,
+    member_ids: list[int],
+    lock: bool,
+    series_ids: list[int] | None = None,
 ) -> dict[str, Any]:
+    if series_ids:
+        if ids or member_ids:
+            raise StoryArcConflictError(
+                "Review series records separately from physical file removal."
+            )
+        return await series_record_plan(db, arc_id, actor, series_ids, lock=lock)
     selected = frozenset(ids)
     originals = frozenset(member_ids)
     if (
@@ -180,8 +194,15 @@ async def preview_cleanup(
     ids: list[int],
     *,
     member_ids: list[int] | None = None,
+    series_ids: list[int] | None = None,
 ) -> dict[str, Any]:
-    plan = await _plan(db, arc_id, actor, ids, member_ids=member_ids or [], lock=False)
+    plan = await _plan(
+        db, arc_id, actor, ids, member_ids=member_ids or [], series_ids=series_ids, lock=False
+    )
+    if series_ids:
+        return {k: plan[k] for k in ("impact", "record_series", "shared_arcs")} | {
+            "token": _signer().dumps(_digest(plan))
+        }
     return {
         "paths": [p["file_path"] for p in plan["targets"]],
         "impact": plan["impact"],
@@ -204,15 +225,22 @@ async def enqueue_reviewed_cleanup(
     *,
     member_ids: list[int] | None = None,
     allow_shared: bool = False,
+    series_ids: list[int] | None = None,
 ) -> UtilityJob:
-    plan = await _plan(db, arc_id, actor, ids, member_ids=member_ids or [], lock=True)
+    plan = await _plan(
+        db, arc_id, actor, ids, member_ids=member_ids or [], series_ids=series_ids, lock=True
+    )
     if plan["shared_arcs"] and not allow_shared:
-        raise StoryArcConflictError("Confirm the shared comic impact before removing these files.")
+        raise StoryArcConflictError("Confirm the shared comic impact before continuing.")
     try:
         valid = _signer().loads(token, max_age=900) == _digest(plan)
     except BadSignature:
         valid = False
     if not valid:
+        if series_ids:
+            raise StoryArcConflictError(
+                "The selected series or reading order changed, or the review expired. Review again."
+            )
         raise StoryArcConflictError(
             "The selected files, arc or Trash settings changed. Review cleanup again."
         )

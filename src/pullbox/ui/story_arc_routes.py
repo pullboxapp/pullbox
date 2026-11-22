@@ -1257,6 +1257,9 @@ class _DeleteArcConfirmation(BaseModel):
 
 class _ArcFileSelection(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    series_ids: list[Annotated[int, Field(strict=True, gt=0, le=9223372036854775807)]] = Field(
+        default_factory=list, max_length=100
+    )
     ids: list[Annotated[int, Field(strict=True, gt=0, le=9223372036854775807)]] = Field(
         max_length=1000
     )
@@ -1276,7 +1279,12 @@ async def preview_selected_arc_files(
 ) -> Response:
     try:
         plan = await preview_cleanup(
-            session, story_arc_id, user.id, body.ids, member_ids=body.member_ids
+            session,
+            story_arc_id,
+            user.id,
+            body.ids,
+            member_ids=body.member_ids,
+            series_ids=body.series_ids,
         )
     except StoryArcNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
@@ -1303,6 +1311,7 @@ async def confirm_selected_arc_files(
             body.token,
             member_ids=body.member_ids,
             allow_shared=body.allow_shared,
+            series_ids=body.series_ids,
         )
         job_id = job.id
         await session.commit()

@@ -317,6 +317,7 @@ async def _delete_arc_record(
     review: ArcDeleteReview,
     *,
     job_id: str | None = None,
+    series_ids: list[int] | None = None,
 ) -> None:
     # Delete only the parent. FK cascades release the arc's own rows, never
     # canonical issues or files. The audit commits in the same transaction.
@@ -325,11 +326,18 @@ async def _delete_arc_record(
         AuditLog(
             event_type=AuditEventType.STORY_ARC_RECORD_DELETED,
             user_id=user_id,
-            detail="Deleted the Story Arc record after reviewed arc file cleanup."
+            detail="Deleted the Story Arc and explicitly selected series records; kept all files."
+            if series_ids
+            else "Deleted the Story Arc record after reviewed arc file cleanup."
             if job_id
             else "Deleted the Story Arc record only; no files removed.",
             metadata_json=json.dumps(
-                {"story_arc_id": arc_id, **asdict(review), **({"job_id": job_id} if job_id else {})}
+                {
+                    "story_arc_id": arc_id,
+                    **asdict(review),
+                    **({"job_id": job_id} if job_id else {}),
+                    **({"deleted_series_ids": series_ids} if series_ids else {}),
+                }
             ),
         )
     )

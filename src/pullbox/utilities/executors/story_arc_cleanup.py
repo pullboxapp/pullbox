@@ -8,6 +8,7 @@ from pullbox.core.exceptions import ValidationError
 from pullbox.services.story_arc_cleanup import finish_reviewed_cleanup, remove_reviewed_target
 from pullbox.services.story_arc_member_cleanup import recover_member_item, run_member_item
 from pullbox.services.story_arc_placement_integration import StoryArcPlacementIntegrationError
+from pullbox.services.story_arc_series_cleanup import check_series_item, finish_series_records
 from pullbox.services.story_arc_service import StoryArcServiceError
 from pullbox.utilities.base_executor import (
     ExecutionMode,
@@ -29,6 +30,11 @@ class StoryArcCleanupExecutor(JobExecutor):
     async def generate_items(
         self, job_config: dict[str, Any], job_context: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
+        if "record_series" in job_config:
+            return [
+                {"operation": "check_series_record", "index": i}
+                for i in range(len(job_config["record_series"]))
+            ]
         return [
             {
                 "operation": "finish_member_cleanup"
@@ -61,6 +67,14 @@ class StoryArcCleanupExecutor(JobExecutor):
         async with job_context["factory"]() as db:
             try:
                 index = item_data["index"]
+                if "record_series" in job_config:
+                    record = job_config["record_series"][index]
+                    await check_series_item(db, job_config["arc_id"], record)
+                    return ProcessedItem(
+                        item_id,
+                        ItemResult.COMPLETED,
+                        after_state={"series_checked": record["id"], "records_removed": False},
+                    )
                 target = job_config["targets"][index]
                 if job_config.get("receipt_only"):
                     result = await recover_member_item(db, job_config, item_id)
@@ -87,6 +101,19 @@ class StoryArcCleanupExecutor(JobExecutor):
     ) -> FinalizeResult:
         if job.state == JobState.CANCELLED:
             return FinalizeResult()
+        if "record_series" in job_config:
+            count = len(job_config["record_series"])
+            if (
+                job.state != JobState.COMPLETED
+                or summary.completed != count
+                or summary.failed
+                or summary.skipped
+            ):
+                raise ValueError("The selection was not completed. No series records were removed.")
+            await finish_series_records(session, job_config, job.id)
+            return FinalizeResult(
+                final_parts=[f"arc and {count} selected series removed; all files kept"]
+            )
         if summary.failed or summary.skipped or summary.completed != len(job_config["targets"]):
             raise ValueError(
                 "Not all selected files were removed. The arc was kept; review its remaining files."

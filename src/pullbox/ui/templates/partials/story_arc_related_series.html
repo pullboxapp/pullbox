@@ -4,11 +4,19 @@
   <button type="button" class="btn-secondary btn-sm" @click="toggleReview()"
           :aria-expanded="expanded.toString()" aria-controls="arc-related-series">Review related series</button>
   <div id="arc-related-series" x-show="expanded" class="space-y-2">
-    <p class="text-pb-text-sec">Deleting this arc keeps these series. Removing an entire series would also remove its issue records outside this reading order.</p>
+    <p class="text-pb-text-sec">Keep these series unless you select them. Removing a series deletes every issue record, including those outside this reading order, but keeps its files on disk.</p>
+    <p x-show="selectedMembers.length || selectedPaths.length">Clear your file selections to choose series records instead.</p>
+    <p x-show="selectedSeries.length >= 100">You can review up to 100 series at a time.</p>
     <ul class="space-y-3">
       <template x-for="series in records" :key="series.id">
         <li class="space-y-1">
-          <strong x-text="series.title"></strong> <span x-show="series.year" x-text="'(' + series.year + ')'"></span>
+          <label class="flex items-center gap-2">
+            <input type="checkbox" :aria-label="'Remove series record: ' + series.title"
+                   :checked="selectedSeries.includes(series.id)"
+                   :disabled="!!deletePhase || !deletePreview.token || !!selectedMembers.length || !!selectedPaths.length || (selectedSeries.length >= 100 && !selectedSeries.includes(series.id))"
+                   @change="selectSeries(series.id, $event.target.checked)">
+            <strong x-text="series.title"></strong> <span x-show="series.year" x-text="'(' + series.year + ')'"></span>
+          </label>
           <p><span x-text="series.members + (series.members === 1 ? ' confirmed issue' : ' confirmed issues') + ' in this arc'"></span>;
             <span x-text="series.outside + ' outside'"></span>.
             <span x-text="series.files + (series.files === 1 ? ' registered file' : ' registered files') + ' across the series.'"></span>
