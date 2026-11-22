@@ -87,17 +87,20 @@ class AuthService:
         return user.session_version
 
     @staticmethod
-    async def authenticate(session: AsyncSession, username: str, password: str) -> User:
-        """Authenticate a user by username and password.
-
-        Raises AuthenticationError if credentials are invalid.
-        """
+    async def check_credentials(session: AsyncSession, username: str, password: str) -> User | None:
+        """Check an active account without creating a session or recording a login."""
         result = await session.execute(
             select(User).where(User.username == username, User.is_active.is_(True))
         )
         user = result.scalar_one_or_none()
 
-        if user is None or not AuthService.verify_password(password, user.password_hash):
+        return user if user and AuthService.verify_password(password, user.password_hash) else None
+
+    @staticmethod
+    async def authenticate(session: AsyncSession, username: str, password: str) -> User:
+        """Authenticate a user and record a normal application login."""
+        user = await AuthService.check_credentials(session, username, password)
+        if user is None:
             logger.warning("authentication_failed", username=username)
             raise AuthenticationError("Invalid username or password.")
 

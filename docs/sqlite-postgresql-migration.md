@@ -157,6 +157,47 @@ does not resume, reopen or delete the old stage. Have the database owner
 confirm its identity before retiring it. Do not enable connections manually.
 Even a successful stage is **not ready for normal startup**.
 
+## Review the copied library
+
+To inspect the database as part of staging, add **`--review-library`** when
+creating a new stage. Use a private interactive terminal. For example:
+
+```sh
+python scripts/stage_postgres_transfer.py --backup /backups/pullbox.zip \
+  --create-offline-stage --review-library > stage-report.json
+```
+
+First enter the dedicated PostgreSQL **owner URL** at the hidden prompt. Once
+the rows have been copied, verified and committed, enter an existing **Pullbox
+username and password from the backup**. These prompts are separate; a database
+password does not sign you into Pullbox. The review checks an active account
+without creating a browser session, changing its last-login time, or enabling
+new database connections. No scheduler, provider requests or file recovery run.
+
+The private terminal shows series, issue numbers and recorded ownership status,
+Story Arc chapters in reading order, and the saved metadata search order,
+including per-domain priority overrides. For imports in
+Follow-up it shows the job and its series/file status counts. These counts
+include completed records in that job; they are **not** all unresolved files.
+Sections show at most 25 entries per page. Use **next**, **back**, or enter a page
+number. Enter **confirm** only if the records look right. Enter **quit** if they
+do not. The review never asks you to test a provider or write to a comic.
+
+Only the JSON report goes to standard output; the terminal can display private
+titles, so do not record or share its transcript. A completed review reports
+`maintenance_review.status: confirmed` with counts, not titles or credentials.
+Three failed login attempts, an interrupted review, invalid saved provider
+settings, or a database read error block confirmation. An empty section means
+there are no entries on that page. Ten minutes idle at a prompt can expire the
+read-only database transaction.
+
+The review uses the staging tool's last open connection; it cannot reconnect to
+an already closed stage. If you need to repeat it, keep the backup and use a
+**new, empty target**. Quitting or failing the review does not undo a successful
+row transfer. Do not unlock the old stage, change an account, or clear import
+history to pass. Check the key and comic mounts separately below. Even after a
+confirmed review, `cutover_ready` remains false.
+
 ## Check the key and comic files
 
 Use `migration-check-assets` from a Pullbox version that includes it. Supply

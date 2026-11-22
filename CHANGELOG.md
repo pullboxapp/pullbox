@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- [Sign in to review a staged PostgreSQL library](docs/sqlite-postgresql-migration.md#review-the-copied-library)
+  in a read-only terminal before switching anything. Inspect issue ownership,
+  reading orders, metadata sources and import follow-up without starting recovery or searches.
+
 - [Check a staged migration's key and comic mounts offline](docs/sqlite-postgresql-migration.md#check-the-key-and-comic-files).
   Compare a sample or the entire registered library without reopening PostgreSQL,
   exposing credentials, or changing files.

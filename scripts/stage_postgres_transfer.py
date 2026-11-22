@@ -10,6 +10,7 @@ import json
 import signal
 import sqlite3
 import sys
+import warnings
 from contextlib import AsyncExitStack, closing
 from pathlib import Path
 from uuid import uuid4
@@ -86,7 +87,7 @@ async def _unclaimed(conn, url, report):
     return True
 
 
-async def stage(path, raw, report):
+async def stage(path, raw, report, *, review=False):
     url = parse_target_url(raw)
     if url is None:
         raise RehearsalError("target_url")
@@ -173,12 +174,16 @@ async def stage(path, raw, report):
             f"COMMENT ON DATABASE {name} IS 'pullbox:offline-stage:rows-verified'"
         )
         await conn.commit()
-    report.update(
-        rows_verified=True,
-        snapshot_sha256=source_hash,
-        verified_tables=tables,
-        next_ids=sequences,
-    )
+        report.update(
+            rows_verified=True,
+            snapshot_sha256=source_hash,
+            verified_tables=tables,
+            next_ids=sequences,
+        )
+        if review:
+            from postgres_stage_review import review_library
+
+            await review_library(conn, source_hash, report)
 
 
 def main():
@@ -193,6 +198,11 @@ def main():
     parser.add_argument(
         "--url-stdin", action="store_true", help="Read target URL from protected stdin."
     )
+    parser.add_argument(
+        "--review-library",
+        action="store_true",
+        help="After copying, sign in to inspect the sealed library in a private terminal.",
+    )
     args = parser.parse_args()
     report = {
         "rows_verified": False,
@@ -201,16 +211,22 @@ def main():
         "blockers": {},
     }
     try:
+        if args.review_library and (
+            args.url_stdin or not sys.stdin.isatty() or not sys.stderr.isatty()
+        ):
+            raise RehearsalError("review_requires_terminal")
         if args.url_stdin and sys.stdin.isatty():
             raise RehearsalError("use_hidden_prompt")
         if not args.url_stdin and not sys.stdin.isatty():
             raise RehearsalError("protected_target_input_required")
-        raw = (
-            sys.stdin.readline(4098).rstrip("\r\n")
-            if args.url_stdin
-            else getpass.getpass("Dedicated EMPTY PostgreSQL target URL: ")
-        )
-        asyncio.run(stage(args.backup, raw, report))
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", getpass.GetPassWarning)
+            raw = (
+                sys.stdin.readline(4098).rstrip("\r\n")
+                if args.url_stdin
+                else getpass.getpass("Dedicated EMPTY PostgreSQL target URL: ")
+            )
+        asyncio.run(stage(args.backup, raw, report, review=args.review_library))
     except (RehearsalError, BackupInputError) as exc:
         report["blockers"] = {str(exc): "Staging stopped; do not activate the target."}
     except KeyboardInterrupt:
@@ -225,7 +241,7 @@ def main():
             )
         }
     print(json.dumps(report, sort_keys=True))
-    return 0 if report["rows_verified"] else 1
+    return 0 if report["rows_verified"] and not report["blockers"] else 1
 
 
 if __name__ == "__main__":
