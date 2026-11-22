@@ -50,11 +50,15 @@ def paired_manual_writer(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("paired_manual_writer")
 async def test_manual_import_reconciles_pair_and_preserves_source(
-    identity_probe_db: IdentityProbeDatabase, tmp_path: Path
+    identity_probe_db: IdentityProbeDatabase, tmp_path: Path, request: pytest.FixtureRequest
 ) -> None:
     _, factory, _ = identity_probe_db
     download_id, issue_id, source = await completed_download(factory, tmp_path, method="move")
     original = source.read_bytes()
+    # The paired writer copies regardless of the configured Move method.
+    original_mode = source.parent.stat().st_mode
+    request.addfinalizer(lambda: source.parent.chmod(original_mode))
+    source.parent.chmod(0o555)
     async with factory.begin() as session:
         await session.execute(delete(DownloadHistory).where(DownloadHistory.id == download_id))
     async with factory() as session:

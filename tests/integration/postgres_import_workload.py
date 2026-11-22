@@ -118,8 +118,32 @@ status, issue_page = request('/issues/10001')
 assert status == 200 and 'Harbor Lights' in issue_page, ('wanted issue', status)
 Page().feed(issue_page)
 assert csrf.get('X-CSRF-Token'), 'No form token on signed-in page'
-status, body = request('/api/v1/issues/10001/import-file',
-                       payload={'file_path':'/imports/Harbor Lights 002 (2024).cbz'})
+from pathlib import Path
+def set_transfer(method):
+    status, body = request('/api/v1/config', method='PUT',
+                           payload={'values':{'post_processing_method':method}})
+    assert status == 200, ('transfer settings', status, body[:500])
+source = {'file_path':'/imports/Harbor Lights 002 (2024).cbz'}
+import_url = '/api/v1/issues/10001/import-file'
+before = set(Path('/comics').rglob('*.cbz'))
+set_transfer('move')
+status, body = request(import_url, payload=source)
+assert status == 409 and 'read-only' in body and 'Copy' in body, ('read-only move', status, body)
+status, body = request(import_url + '/start', payload=source)
+assert status == 202, ('start', status)
+for _ in range(50):
+    status, body = request(import_url + '/progress')
+    assert status == 200, ('progress', status)
+    progress = json.loads(body)
+    if progress['state'] == 'failed':
+        break
+    time.sleep(.1)
+assert progress['state'] == 'failed' and 'Copy' in progress['error_message'], progress['state']
+assert set(Path('/comics').rglob('*.cbz')) == before
+status, body = request('/api/v1/issues/10001')
+assert status == 200 and json.loads(body)['status'] == 'wanted'
+set_transfer('copy')
+status, body = request(import_url, payload=source)
 assert status == 201, ('import', status, body[:500])
 artifact = json.loads(body)
 assert artifact['issue_id'] == 10001 and artifact['file_path'].startswith('/comics/')

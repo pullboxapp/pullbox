@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -54,6 +55,23 @@ class ManualIssueImportError(Exception):
         super().__init__(detail)
         self.status_code = status_code
         self.detail = detail
+
+
+def _check_move_source(source: Path) -> None:
+    if hasattr(os, "statvfs") and os.statvfs(source).f_flag & os.ST_RDONLY:
+        reason = "The source is on a read-only mount."
+    elif not os.access(source.parent, os.W_OK | os.X_OK):
+        reason = "Pullbox cannot remove files from the source folder."
+    else:
+        return
+    raise ManualIssueImportError(
+        status_code=409,
+        detail=(
+            f"{reason} Move needs permission to remove the original. "
+            "In Settings > Media Management, set File Transfer Method to Copy and retry. "
+            "No files were changed."
+        ),
+    )
 
 
 @dataclass(slots=True)
@@ -187,6 +205,9 @@ async def execute_manual_issue_import(
         raise ManualIssueImportError(
             status_code=409, detail="Import settings changed; preview metadata again."
         )
+    # Paired metadata imports always copy to the library, even under a Move policy.
+    if not paired and prepared.ingest_policy.post_processing_method == "move":
+        await asyncio.to_thread(_check_move_source, prepared.source_path)
     if staged_pack_member is not None:
         prepared = await prepare_manual_issue_import(
             session,

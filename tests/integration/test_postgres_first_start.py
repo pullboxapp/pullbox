@@ -29,11 +29,11 @@ from http.cookies import SimpleCookie
 from urllib.parse import urlencode
 cookies = SimpleCookie()
 csrf = {}
-def request(path, form=None, *, payload=None):
+def request(path, form=None, *, payload=None, method=None):
     conn = HTTPConnection('127.0.0.1', 8585, timeout=8)
     try:
         data = json.dumps(payload) if payload is not None else urlencode(form) if form else None
-        conn.request('POST' if data is not None else 'GET', path, data,
+        conn.request(method or ('POST' if data is not None else 'GET'), path, data,
                      {'Content-Type':'application/json' if payload is not None
                                      else 'application/x-www-form-urlencoded',
                       'Origin':'http://127.0.0.1:8585',

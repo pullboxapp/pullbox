@@ -184,6 +184,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Manual issue imports stop before moving or replacing a comic when the source
+  is on a read-only mount. The issue page explains how to retry with **Copy**.
+
 - Issue details can now open after migration when an older database stored the
   issue type as `issue` instead of `ISSUE`. Ownership, issue numbers and Story
   Arc links are preserved. System > About identifies PostgreSQL and its version,

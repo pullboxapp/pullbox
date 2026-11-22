@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
@@ -234,6 +235,35 @@ async def test_prepare_manual_issue_import_returns_validated_inputs(
     assert prepared.issue_id == 123
     assert prepared.source_path == (tmp_path / "manual.cbz").resolve()
     assert prepared.ingest_policy == _policy()
+
+
+@pytest.mark.asyncio
+async def test_move_requires_directory_permission_before_replacing_an_owned_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "replacement.cbz"
+    source.write_bytes(b"new copy")
+    owned = tmp_path / "library.cbz"
+    owned.write_bytes(b"owned copy")
+    original_access = os.access
+    monkeypatch.setattr(
+        os,
+        "access",
+        lambda path, mode: (
+            False if path == source.parent and mode & os.W_OK else original_access(path, mode)
+        ),
+    )
+    register = AsyncMock()
+    monkeypatch.setattr(issue_import_service, "register_library_file", register)
+    with pytest.raises(ManualIssueImportError, match="File Transfer Method to Copy") as error:
+        await execute_manual_issue_import(
+            _FakeSession(None),  # type: ignore[arg-type]
+            _prepared(source, library_file=SimpleNamespace(file_path=str(owned))),
+            use_paired_metadata=False,
+        )
+    assert error.value.status_code == 409
+    register.assert_not_awaited()
+    assert owned.read_bytes() == b"owned copy" and source.read_bytes() == b"new copy"
 
 
 @pytest.mark.asyncio
