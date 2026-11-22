@@ -948,6 +948,9 @@ not suppress failures in those checks.
 
 ## 6. Migration Standards
 
+For the operator-facing, read-only source check, see
+[Check a SQLite backup before a PostgreSQL migration](../sqlite-postgresql-migration.md).
+
 Story Arc reader bookmarks are unique per user and arc. A bookmark
 stores the stable membership and the issue the user actually read, not a page
 number or a sequence offset. Progress remains in `issue_reader_states`.

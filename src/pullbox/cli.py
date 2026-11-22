@@ -128,6 +128,18 @@ def build_parser() -> argparse.ArgumentParser:
         description="Pullbox management commands",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+    preflight = subparsers.add_parser(
+        "migration-preflight", help="Inspect a SQLite backup before a planned PostgreSQL migration"
+    )
+    preflight.add_argument(
+        "--backup",
+        type=Path,
+        required=True,
+        help="Pullbox backup ZIP or standalone SQLite backup; never a live database",
+    )
+    preflight.add_argument(
+        "--json", action="store_true", help="Print the full table inventory and blockers as JSON"
+    )
 
     # reset-password
     rp = subparsers.add_parser(
@@ -198,7 +210,35 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.command == "reset-password":
+    if args.command == "migration-preflight":
+        from dataclasses import asdict
+
+        from pullbox.services.database_migration_preflight import inspect_migration_backup
+
+        report = inspect_migration_backup(args.backup, configured_url=get_settings().db_url)
+        if args.json:
+            print(json.dumps(asdict(report), sort_keys=True))
+        else:
+            print(
+                "SQLite backup: "
+                + ("source checks passed" if report.source_checks_passed else "blocked")
+            )
+            print(
+                f"Schema: {report.source_revision or 'unknown'} "
+                f"(supported: {report.supported_revision})"
+            )
+            if report.tables:
+                print(
+                    f"{len(report.tables)} application tables; "
+                    f"{sum(report.tables.values()):,} rows; "
+                    f"{report.database_bytes:,} database bytes."
+                )
+            for reason in report.blockers.values():
+                print(f"- {reason}")
+            print(report.next_step)
+        if not report.source_checks_passed:
+            sys.exit(1)
+    elif args.command == "reset-password":
         candidate_secret = _read_password(password_stdin=args.password_stdin)
         asyncio.run(_reset_password(args.user, candidate_secret))
     elif args.command in {"recheck-import", "reconcile-import-paths"}:

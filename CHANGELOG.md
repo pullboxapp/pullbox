@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Check a SQLite backup before planning a PostgreSQL migration with
+  [migration-preflight](docs/sqlite-postgresql-migration.md). It reports table
+  counts, broken relationships, and unfinished work without changing either database.
+
 - **Review related series** in the Story Arc deletion preview shows which issues
   fall outside the arc and which other reading orders link to each series.
   No series is selected by default. Select individual series to delete their
