@@ -1,8 +1,8 @@
-# Check a SQLite backup before a PostgreSQL migration
+# Prepare a SQLite library for PostgreSQL
 
-Pullbox can inspect a backup and tell you whether its **SQLite source checks**
-pass. It does not copy rows to PostgreSQL, switch databases, or change your
-library. Do not change your database URL based on this report.
+Start with the read-only source and destination checks below. A disposable
+rehearsal or a retained **offline staging copy** is a separate, explicit action.
+None of these commands switches your running library.
 
 ## Check the source
 
@@ -108,3 +108,52 @@ and remove only its leftover trial container.
 **A successful rehearsal is not a migration.** It does not check the production
 encryption key, hash physical comics, stop writers, retain a PostgreSQL copy,
 or enable cutover. The report deliberately leaves `cutover_ready` false.
+
+## Keep an offline staging copy
+
+Use this when you need to retain the verified database rows instead of discarding
+them after the rehearsal. Use a backup and a **new, empty PostgreSQL 16 or 18
+database created only for this stage**. Never select a running Pullbox database.
+Allow enough database storage for the rows, indexes and PostgreSQL transaction log.
+This may temporarily take more space than the SQLite backup.
+
+From the same checkout and Python environment as the rehearsal:
+
+```sh
+python scripts/stage_postgres_transfer.py --backup /path/to/pullbox_backup.zip --create-offline-stage
+```
+
+At the hidden prompt enter the dedicated target URL described above. For
+unattended use, pass `--url-stdin` and redirect a protected one-line file; do
+not put the URL in the command line. Use a direct PostgreSQL connection, not
+a transaction pooler. The non-admin database owner must also have permission
+to connect to the `postgres` maintenance database on that same server. The
+tool uses that second connection to close **only the selected staging database**
+to new logins; it does not initialize or copy rows into `postgres`.
+
+Before schema initialization the tool rechecks that no other client or data
+has claimed the target. An occupied or already labelled database is not a
+fresh target. Once reserved, the target stays closed even if the tool fails
+or is killed. The process never edits Pullbox configuration or comic files.
+
+Exit code **0** and `rows_verified: true` mean that all application tables
+were copied and checked, and the staged copy was committed. Save the JSON
+report; `snapshot_sha256` identifies the uncompressed SQLite snapshot. An
+interruption can leave rows present **without** a successful verification:
+do not infer success by counting rows. From a separate connection to
+`postgres`, you can check the stage without opening it (example for psql):
+
+```sql
+\prompt 'Staging database name: ' stage_db
+SELECT datallowconn AS accepts_connections,
+       shobj_description(oid, 'pg_database') AS stage_status
+FROM pg_database WHERE datname = :'stage_db';
+```
+
+Both `pullbox:offline-stage:incomplete` and `pullbox:offline-stage:rows-verified`
+must show `accepts_connections = f`. On an incomplete stage, keep the source,
+correct the reported blocker and use a **fresh** empty target. The command
+does not resume, reopen or delete the old stage. Have the database owner
+confirm its identity before retiring it. Do not enable connections manually.
+Credential decryption, physical file verification and explicit cutover are
+separate steps; even a successful stage is **not ready for normal startup**.

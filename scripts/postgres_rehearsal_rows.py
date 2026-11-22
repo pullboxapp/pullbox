@@ -14,6 +14,12 @@ from pullbox.services.database_migration_preflight import SOURCE_REVISION
 
 _BATCH = 128
 _BUFFER_BYTES = 2 * 1024 * 1024
+STAGE_CLOSED_SQL = (
+    "SELECT NOT datallowconn AND pg_catalog.shobj_description(oid,'pg_database')="
+    "'pullbox:offline-stage:incomplete' AND NOT EXISTS(SELECT FROM pg_catalog.pg_stat_activity "
+    "WHERE datid=d.oid AND pid<>pg_catalog.pg_backend_pid()) "
+    "FROM pg_catalog.pg_database d WHERE datname=pg_catalog.current_database()"
+)
 
 
 class RehearsalError(Exception):
@@ -139,10 +145,12 @@ async def _verify_table(pg, name, snapshot):
     return present
 
 
-async def compare_rows(db, pg, counts):
-    """Caller owns the isolated target; never commit the trial or disable FK triggers."""
+async def compare_rows(db, pg, counts, *, retain=False):
+    """Caller owns the newly initialized isolated target; disposable trials always roll back."""
     import asyncpg
 
+    if retain and not await pg.fetchval(STAGE_CLOSED_SQL):
+        raise RehearsalError("target_not_closed")
     if await pg.fetchval("SELECT version_num FROM public.alembic_version") != SOURCE_REVISION:
         raise RehearsalError("target_revision")
     definitions = {}
@@ -217,7 +225,15 @@ async def compare_rows(db, pg, counts):
             await pg.fetchval("SELECT setval($1::regclass,$2,$3)", seq, max(1, high), high > 0)
             if await pg.fetchval("SELECT nextval($1::regclass)", seq) != high + 1:
                 raise RehearsalError("sequence_mismatch:" + table)
+            if retain:
+                # The probe consumed one value; leave that ID available to the future application.
+                await pg.fetchval("SELECT setval($1::regclass,$2,$3)", seq, max(1, high), high > 0)
             next_ids[table] = high + 1
-    finally:
+    except BaseException:
+        await tx.rollback()
+        raise
+    if retain:
+        await tx.commit()
+    else:
         await tx.rollback()
     return verified, next_ids

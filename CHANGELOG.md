@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- [Keep an offline PostgreSQL staging copy](docs/sqlite-postgresql-migration.md#keep-an-offline-staging-copy)
+  of a verified SQLite backup. The copy stays closed to application connections,
+  including after an interruption; your running library is not switched.
+
 - [Rehearse a SQLite library transfer](docs/sqlite-postgresql-migration.md#rehearse-a-copy)
   against a disposable PostgreSQL 16 or 18 database. The rehearsal verifies
   records and relationships without changing your files or switching databases.

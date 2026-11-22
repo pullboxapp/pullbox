@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import text
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import ArgumentError, SQLAlchemyError
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 from sqlalchemy.pool import NullPool
 
 _MESSAGES = {
@@ -41,7 +41,8 @@ class TargetPreflight:
         self.blockers[key] = _MESSAGES[key]
 
 
-def _target_url(raw: str) -> URL | None:
+def parse_target_url(raw: str) -> URL | None:
+    """Accept only an explicitly named PostgreSQL target with a protected connection."""
     try:
         url = make_url(raw)
         if (
@@ -111,9 +112,34 @@ _OCCUPIED = text("""
 """)
 
 
+async def inspect_target_connection(conn: AsyncConnection, url: URL) -> TargetPreflight:
+    """Check eligibility on the caller's connection with pg_catalog as its lookup path."""
+    report = TargetPreflight()
+    major = await conn.scalar(text("SELECT current_setting('server_version_num')::int / 10000"))
+    report.server_major = int(major)
+    if report.server_major not in {16, 18}:
+        report.block("target_version")
+        return report
+    row = (await conn.execute(_STATUS)).mappings().one()
+    if not row["dedicated"] or row["dbname"] != url.database:
+        report.block("target_identity")
+    if not row["writable"]:
+        report.block("target_read_only")
+    if not row["owns_target"]:
+        report.block("target_ownership")
+    if row["shared"]:
+        report.block("target_shared")
+    if row["busy"]:
+        report.block("target_busy")
+    if not report.blockers and await conn.scalar(_OCCUPIED):
+        report.block("target_not_empty")
+    report.target_checks_passed = not report.blockers
+    return report
+
+
 async def inspect_target(raw: str) -> TargetPreflight:
     report = TargetPreflight()
-    url = _target_url(raw)
+    url = parse_target_url(raw)
     if url is None:
         report.block("target_url")
         return report
@@ -137,27 +163,7 @@ async def inspect_target(raw: str) -> TargetPreflight:
                 await conn.execute(
                     text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
                 )
-                # Check the major before using any version-specific catalog fields.
-                major = await conn.scalar(
-                    text("SELECT current_setting('server_version_num')::int / 10000")
-                )
-                report.server_major = int(major)
-                if report.server_major not in {16, 18}:
-                    report.block("target_version")
-                    return report
-                row = (await conn.execute(_STATUS)).mappings().one()
-                if not row["dedicated"] or row["dbname"] != url.database:
-                    report.block("target_identity")
-                if not row["writable"]:
-                    report.block("target_read_only")
-                if not row["owns_target"]:
-                    report.block("target_ownership")
-                if row["shared"]:
-                    report.block("target_shared")
-                if row["busy"]:
-                    report.block("target_busy")
-                if not report.blockers and await conn.scalar(_OCCUPIED):
-                    report.block("target_not_empty")
+                report = await inspect_target_connection(conn, url)
         finally:
             await engine.dispose()
     except ModuleNotFoundError:
