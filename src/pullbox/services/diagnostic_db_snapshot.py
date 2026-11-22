@@ -43,6 +43,8 @@ def create_sanitized_db_copy(db_path: Path) -> bytes | None:
                 dst.execute("DELETE FROM issue_reader_states")
             if "story_arc_reader_bookmarks" in tables:
                 dst.execute("DELETE FROM story_arc_reader_bookmarks")
+            if "series_reader_bookmarks" in tables:
+                dst.execute("DELETE FROM series_reader_bookmarks")
             dst.execute("DELETE FROM users")
             dst.execute("DELETE FROM api_keys")
 

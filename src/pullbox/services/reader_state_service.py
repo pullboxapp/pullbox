@@ -7,14 +7,35 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import and_, case, or_, select
+from sqlalchemy import and_, case, func, literal, or_, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from pullbox.models.reader import IssueReaderState
+from pullbox.models.issue import Issue
+from pullbox.models.reader import IssueReaderState, SeriesReaderBookmark
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+
+
+async def save_series_bookmark(
+    session: AsyncSession, *, user_id: int, series_id: int, issue_id: int
+) -> bool:
+    """Update only the series the issue still belongs to, in the page-save transaction."""
+    values = select(literal(user_id), Issue.series_id, Issue.id).where(
+        Issue.id == issue_id, Issue.series_id == series_id
+    )
+    insert = postgresql_insert if session.get_bind().dialect.name == "postgresql" else sqlite_insert
+    stmt = insert(SeriesReaderBookmark).from_select(["user_id", "series_id", "issue_id"], values)
+    return (
+        await session.scalar(
+            stmt.on_conflict_do_update(
+                index_elements=[SeriesReaderBookmark.user_id, SeriesReaderBookmark.series_id],
+                set_={"issue_id": stmt.excluded.issue_id, "updated_at": func.now()},
+            ).returning(SeriesReaderBookmark.issue_id)
+        )
+        is not None
+    )
 
 
 def calculate_reader_position_percent(

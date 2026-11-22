@@ -53,6 +53,7 @@ class ReaderManifestResponse(BaseModel):
     """Thin manifest consumed by the embedded web reader."""
 
     issue_id: int
+    reading_series_id: int
     title: str
     issue_label: str
     format: FileFormat
@@ -86,6 +87,7 @@ class ReaderProgressUpdate(BaseModel):
     completion_candidate: bool = False
     reread_started: StrictBool = False
     story_arc: ReaderArcPosition | None = None
+    reading_series_id: int | None = Field(default=None, gt=0)
 
 
 class ReaderProgressResponse(BaseModel):
@@ -98,6 +100,7 @@ class ReaderProgressResponse(BaseModel):
     updated_at: datetime
     state: ReaderStateResponse
     arc_bookmark_saved: bool | None = None
+    series_bookmark_saved: bool | None = None
 
 
 class ReaderCompletionUpdate(BaseModel):

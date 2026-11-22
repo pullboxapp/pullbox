@@ -4,6 +4,12 @@
 {% set metadata_syncing = series.issue_catalog_state and series.issue_catalog_state.value == 'hydrating' %}
 
 <div data-testid="series-detail-actions" class="series-domain-actions-buttons">
+  {% if series_read_action and series_read_action.issue_id %}
+    <a data-testid="series-action-read" class="{{ primary_action_classes }}" hx-boost="false"
+       href="/issues/{{ series_read_action.issue_id }}?read=1&amp;reading_series_id={{ series.id }}">{{ 'Continue series' if series_read_action.resume else 'Read series' }}</a>
+  {% elif series_read_action and series_read_action.resume %}
+    <p class="text-xs text-pb-text-sec">Your bookmarked issue is unavailable. Choose another readable issue in this series.</p>
+  {% endif %}
   <div
     data-testid="series-action-monitor-control"
     class="series-domain-inline-toggle"

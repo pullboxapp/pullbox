@@ -476,6 +476,9 @@ async def test_shared_page_save_advances_only_an_exact_arc_bookmark(
         arc_id, entry_id = arc.id, member.id
     manifest_url = f"/api/v1/reader/issues/{issue_id}/manifest"
     manifest = (await authenticated_client.get(manifest_url)).json()
+    assert (
+        await authenticated_client.get(f"{manifest_url}?reading_series_id=999999")
+    ).status_code == 409
     payload = {
         "page_count": 3,
         "page_index": 0,
@@ -487,12 +490,26 @@ async def test_shared_page_save_advances_only_an_exact_arc_bookmark(
     )
     assert resp.status_code == 200
     assert resp.json().get("arc_bookmark_saved") is True
+    assert resp.json().get("series_bookmark_saved") is None
     payload.update(page_index=1, story_arc={"id": arc_id, "entry_id": entry_id + 999})
     stale = await authenticated_client.put(
         manifest["progress_url"], json=payload, headers=_csrf_headers(authenticated_client)
     )
     assert stale.status_code == 200 and stale.json()["arc_bookmark_saved"] is False
     assert (await authenticated_client.get(manifest_url)).json()["initial_page_index"] == 1
+    del payload["story_arc"]
+    payload["reading_series_id"] = manifest["reading_series_id"] + 999
+    moved = await authenticated_client.put(
+        manifest["progress_url"], json=payload, headers=_csrf_headers(authenticated_client)
+    )
+    assert moved.status_code == 200
+    assert moved.json()["series_bookmark_saved"] is False and moved.json()["page_index"] == 1
+    payload["reading_series_id"] = manifest["reading_series_id"]
+    direct = await authenticated_client.put(
+        manifest["progress_url"], json=payload, headers=_csrf_headers(authenticated_client)
+    )
+    assert direct.json().get("series_bookmark_saved") is True
+    assert direct.json().get("arc_bookmark_saved") is None
 
 
 @pytest.mark.asyncio

@@ -954,9 +954,13 @@ number or a sequence offset. Progress remains in `issue_reader_states`.
 Deleting either the issue or membership clears that reference; a dangling or
 reassigned bookmark must not reopen a different comic. Deleting the user or
 arc removes the bookmark. Page and manifest GETs never advance it.
-Diagnostic DB copies strip both tables' private reading data. The bookmark
-migration does not infer history from existing page progress and will not
-downgrade a database with saved bookmarks.
+Series bookmarks are unique per user and series and point to one issue. They
+advance only for series-order progress. Arc-order progress saves the arc
+bookmark instead; both use the same per-issue page state. Removing the issue
+retains an unavailable bookmark rather than selecting another issue. Removing
+the user or series removes its bookmarks. Diagnostic DB copies strip all three
+tables' private reading data. Neither bookmark migration infers order from
+existing progress or permits downgrading away stored bookmarks.
 
 ### 6.1 Alembic Rules
 

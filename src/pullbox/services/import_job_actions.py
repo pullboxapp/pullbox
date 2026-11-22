@@ -44,7 +44,7 @@ from pullbox.models.library import (
 )
 from pullbox.models.metadata_identity import StoryArcIdentityEvent
 from pullbox.models.pending_match import PendingMatch
-from pullbox.models.reader import IssueReaderState
+from pullbox.models.reader import IssueReaderState, SeriesReaderBookmark
 from pullbox.models.search_log import SearchLog
 from pullbox.models.series import Series
 from pullbox.models.story_arc import (
@@ -1839,6 +1839,9 @@ async def _created_series_rollback_block_reason(
         sa_select(LibraryFile.id).where(LibraryFile.issue_id.in_(issue_ids)).limit(1),
         sa_select(DownloadHistory.id).where(DownloadHistory.issue_id.in_(issue_ids)).limit(1),
         sa_select(IssueReaderState.id).where(IssueReaderState.issue_id.in_(issue_ids)).limit(1),
+        sa_select(SeriesReaderBookmark.id)
+        .where(SeriesReaderBookmark.series_id == series.id)
+        .limit(1),
         sa_select(PendingMatch.id).where(PendingMatch.issue_id.in_(issue_ids)).limit(1),
         sa_select(SearchLog.id).where(SearchLog.issue_id.in_(issue_ids)).limit(1),
         sa_select(DirectAcquisitionAttempt.id)

@@ -38,7 +38,9 @@ from pullbox.models.library import (
     MatchConfidence,
 )
 from pullbox.models.matching_suggestion import MatchingSuggestion
+from pullbox.models.reader import SeriesReaderBookmark
 from pullbox.models.series import Series
+from pullbox.models.user import User
 from pullbox.services.import_job_actions import (
     _series_issue_rollback_lock_statement,
     _series_rollback_lock_statement,
@@ -499,9 +501,11 @@ async def test_rollback_action_detaches_referenced_file_without_touching_source(
     assert issue.status == IssueStatus.WANTED
 
 
-async def test_rollback_action_deletes_created_series_without_files(
+@pytest.mark.parametrize("later_bookmark", [False, True])
+async def test_rollback_action_deletes_empty_created_series_only_without_a_later_bookmark(
     db_session: AsyncSession,
     tmp_path: Path,
+    later_bookmark: bool,
 ) -> None:
     service = _make_service()
     job = await _create_job_row(db_session)
@@ -542,10 +546,21 @@ async def test_rollback_action_deletes_created_series_without_files(
         ),
     )
     db_session.add(action)
+    if later_bookmark:
+        reader = User(username="reader", password_hash="unused")
+        db_session.add(reader)
+        await db_session.flush()
+        db_session.add(SeriesReaderBookmark(user_id=reader.id, series_id=series.id, issue_id=None))
     await db_session.flush()
 
     await service._rollback_action(db_session, _rollback_plan(action))
 
+    if later_bookmark:
+        service._series_service.delete.assert_not_awaited()
+        assert series_folder.exists()
+        assert action.status is ImportJobActionStatus.ROLLBACK_FAILED
+        assert "later files or activity" in (action.error_message or "")
+        return
     service._series_service.delete.assert_awaited_once_with(
         db_session,
         series.id,

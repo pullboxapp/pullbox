@@ -5,12 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import and_, case, func, or_, select, true
 
 from pullbox.core.page_sources import SUPPORTED_READER_FORMATS
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.library import FileFormat, LibraryFile
-from pullbox.models.reader import IssueReaderState
+from pullbox.models.reader import IssueReaderState, SeriesReaderBookmark
 from pullbox.models.series import Series
 from pullbox.models.story_arc import IssueStoryArc, StoryArcResolutionState
 from pullbox.services.reader_state_service import (
@@ -384,6 +384,35 @@ async def load_story_arc_reading_aggregates(
         )
         for story_arc_id, readable_count, completed_count, in_progress_count in result.all()
     }
+
+
+@dataclass(frozen=True, slots=True)
+class SeriesReadAction:
+    resume: bool
+    issue_id: int | None
+
+
+async def load_series_read_action(
+    session: AsyncSession, *, user_id: int, series_id: int
+) -> SeriesReadAction:
+    """Start in normal series order, but never substitute for a lost bookmark."""
+    saved = (
+        await session.execute(
+            select(SeriesReaderBookmark.issue_id).where(
+                SeriesReaderBookmark.user_id == user_id, SeriesReaderBookmark.series_id == series_id
+            )
+        )
+    ).one_or_none()
+    if saved is not None and saved.issue_id is None:
+        return SeriesReadAction(True, None)
+    target = await session.scalar(
+        _adjacent_statement(
+            series_id=series_id,
+            boundary=Issue.id == saved.issue_id if saved else true(),
+            descending=False,
+        )
+    )
+    return SeriesReadAction(saved is not None, target)
 
 
 async def load_adjacent_readable_issues(

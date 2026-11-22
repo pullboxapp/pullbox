@@ -1089,11 +1089,11 @@ async def _reset_seeded_reader_state() -> None:
     """Restore the mutable Batman reader row shared by seeded E2E tests."""
     from datetime import UTC, datetime
 
-    from sqlalchemy import select
+    from sqlalchemy import delete, select
 
     from pullbox.database import get_session_factory
     from pullbox.models.issue import Issue
-    from pullbox.models.reader import IssueReaderState
+    from pullbox.models.reader import IssueReaderState, SeriesReaderBookmark
     from pullbox.models.series import Series
     from pullbox.models.user import User
 
@@ -1113,6 +1113,14 @@ async def _reset_seeded_reader_state() -> None:
         if state is None:
             raise RuntimeError("Seeded Batman reader state is missing.")
 
+        await session.execute(
+            delete(SeriesReaderBookmark).where(
+                SeriesReaderBookmark.user_id == state.user_id,
+                SeriesReaderBookmark.series_id.in_(
+                    select(Issue.series_id).where(Issue.id == state.issue_id)
+                ),
+            )
+        )
         now = datetime.now(tz=UTC)
         state.last_page_index = 1
         state.content_revision = "e2e-reading-revision"

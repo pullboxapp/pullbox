@@ -18814,6 +18814,8 @@ function readerMixin(config) {
       };
       if (manifest.story_arc) {
         payload.story_arc = { id: manifest.story_arc.id, entry_id: manifest.story_arc.entry_id };
+      } else if (manifest.reading_series_id) {
+        payload.reading_series_id = manifest.reading_series_id;
       }
       var signature = JSON.stringify(payload);
       if (!self.readerProgressSaveFailed && signature === self.readerLastSavedSignature) {
@@ -18841,6 +18843,9 @@ function readerMixin(config) {
         self.readerProgressSaveFailed = false;
         if (canonical.arc_bookmark_saved === false && self.readerManifest === manifest) {
           self.readerIssueSwitchError = "Your page was saved, but this arc entry changed. Open the story arc to choose a chapter.";
+        }
+        if (canonical.series_bookmark_saved === false && self.readerManifest === manifest) {
+          self.readerIssueSwitchError = "Your page was saved, but this issue changed series. Reopen the series to choose an issue.";
         }
         if (canonical.state) manifest.state = canonical.state;
         if (
@@ -18923,7 +18928,8 @@ function readerMixin(config) {
         if (!this.readerOpen || generation !== this.readerIssueGeneration) return;
         var fresh = await this.fetchReaderManifest(url, generation);
         if (!fresh) return;
-        if (fresh.issue_id !== current.issue_id || fresh.revision !== current.revision ||
+        if (fresh.issue_id !== current.issue_id || fresh.reading_series_id !== current.reading_series_id ||
+            fresh.revision !== current.revision ||
             fresh.page_count !== current.page_count) {
           throw new Error("The comic changed. Reopen the reader before changing order.");
         }

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Series Details now offers **Read series** at the first readable issue and
+  **Continue series** at the issue you last read in series order. Reading
+  through a story arc does not move your series bookmark. If the bookmarked
+  issue is no longer available, you can choose another instead.
 - **Reading order** lets you switch between series order and any confirmed
   story arc without losing the page or zoom. Previous and next follow your
   choice; closing the reader returns to the issue in that context.

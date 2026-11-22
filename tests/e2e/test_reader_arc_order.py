@@ -8,7 +8,7 @@ from zipfile import ZipFile
 
 import pytest
 from playwright.sync_api import Page, Route, expect
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 
 from pullbox.database import get_session_factory
 from pullbox.models.issue import Issue, IssueStatus
@@ -188,6 +188,74 @@ def arc_reader(seeded_server: str, tmp_path: Path) -> Iterator[int]:
         yield arc_id
     finally:
         _run_async_blocking(cleanup())
+
+
+@pytest.mark.parametrize("theme", ["light", "dark", "tron"])
+def test_series_resume_is_independent_of_arc_position_and_list_filter(
+    authed_page: Page,
+    seeded_server: str,
+    seeded_reader_state_guard: None,
+    arc_reader: int,
+    theme: str,
+) -> None:
+    async def move_second_chapter(series_id: int) -> int:
+        async with get_session_factory().begin() as session:
+            issue = (
+                await session.scalars(
+                    select(Issue)
+                    .join(IssueStoryArc)
+                    .where(
+                        IssueStoryArc.story_arc_id == arc_reader, IssueStoryArc.sequence_number == 2
+                    )
+                )
+            ).one()
+            issue.series_id = series_id
+            return issue.id
+
+    second = _run_async_blocking(move_second_chapter(1))
+    page = authed_page
+    page.add_init_script(f"localStorage.setItem('pullbox-theme', '{theme}')")
+    if theme == "dark":
+        page.set_viewport_size({"width": 390, "height": 844})
+    issue_page = IssueDetailPage(page, seeded_server)
+    url = f"{seeded_server}/series/1?issue_status=wanted"
+    page.goto(url)
+    start = page.get_by_role("link", name="Read series", exact=True)
+    expect(start).to_have_attribute("href", re.compile(r"^/issues/1\?read=1"))
+    start.click()
+    expect(issue_page.reader_status).to_have_text("Page 2 of 3")
+    page.get_by_test_id("comic-reader-next-issue").click()
+    with page.expect_response(
+        lambda r: r.request.method == "PUT" and r.url.endswith(f"/{second}/progress")
+    ):
+        page.get_by_test_id("comic-reader-next").click()
+        expect(issue_page.reader_status).to_have_text("Page 2 of 3")
+    issue_page.close_reader()
+    page.goto(f"{seeded_server}/story-arcs/{arc_reader}")
+    with page.expect_response(
+        lambda r: r.request.method == "PUT" and r.url.endswith("/1/progress")
+    ):
+        page.get_by_role("link", name="Read story arc", exact=True).click()
+    page.goto(url)
+    resume = page.get_by_role("link", name="Continue series", exact=True)
+    expect(resume).to_have_attribute("href", re.compile(rf"^/issues/{second}\?read=1"))
+    resume.focus()
+    expect(resume).to_be_focused()
+    expect(page.locator("html")).to_have_attribute("data-theme", theme)
+    assert_no_axe_violations(
+        page, name=f"series-resume-{theme}", include=["[data-testid='series-action-read']"]
+    )
+    resume.press("Enter")
+    expect(issue_page.reader_status).to_have_text("Page 2 of 3")
+    expect(page.get_by_test_id("comic-reader-arc-position")).not_to_be_visible()
+    issue_page.close_reader()
+    page.goto(url)
+    expect(resume).to_be_visible()
+    _run_async_blocking(move_second_chapter(2))
+    resume.click()
+    expect(page.get_by_text("Your bookmarked issue is unavailable.", exact=False)).to_be_visible()
+    expect(resume).not_to_be_visible()
+    expect(issue_page.reader_dialog).not_to_be_visible()
 
 
 def test_read_in_arc_order_then_open_independently(

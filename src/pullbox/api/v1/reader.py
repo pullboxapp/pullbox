@@ -55,6 +55,7 @@ from pullbox.services.reader_state_service import (
     ReaderStateTransition,
     ReaderStateValidationError,
     load_reader_state,
+    save_series_bookmark,
     set_reader_completion,
     set_want_to_read,
     update_reader_progress,
@@ -244,6 +245,7 @@ async def reader_manifest(
     entry_id: Annotated[int | None, Query(ge=1)] = None,
     after_entry: Annotated[int | None, Query(ge=1)] = None,
     before_entry: Annotated[int | None, Query(ge=1)] = None,
+    reading_series_id: Annotated[int | None, Query(ge=1)] = None,
 ) -> JSONResponse:
     """Return a side-effect-free reader manifest after closing the DB session."""
     _require_reader_enabled()
@@ -252,6 +254,8 @@ async def reader_manifest(
     ):
         raise HTTPException(422, "Invalid story arc navigation.")
     source = await _resolved_source(request, issue_id)
+    if reading_series_id is not None and source.series_id != reading_series_id:
+        raise HTTPException(409, "This issue changed series. Reopen the series to choose an issue.")
     try:
         manifest = await _content_service(request).get_manifest(source)
     except ReaderWorkerBusyError as exc:
@@ -312,6 +316,7 @@ async def reader_manifest(
     initial_page_index = _manifest_initial_page(state, current_page_count=manifest.page_count)
     response = ReaderManifestResponse(
         issue_id=manifest.issue_id,
+        reading_series_id=source.series_id,
         title=manifest.title,
         issue_label=manifest.issue_label,
         format=manifest.format,
@@ -411,12 +416,20 @@ async def reader_progress(
                 reread_started=payload.reread_started,
             )
             bookmark_saved = None
+            series_saved = None
             if payload.story_arc is not None:
                 bookmark_saved = await save_arc_bookmark(
                     session,
                     user_id=user.id,
                     arc_id=payload.story_arc.id,
                     entry_id=payload.story_arc.entry_id,
+                    issue_id=issue_id,
+                )
+            else:
+                series_saved = await save_series_bookmark(
+                    session,
+                    user_id=user.id,
+                    series_id=payload.reading_series_id or source.series_id,
                     issue_id=issue_id,
                 )
             await session.commit()
@@ -441,6 +454,7 @@ async def reader_progress(
         completed_at=snapshot.completed_at,
         updated_at=snapshot.updated_at,
         arc_bookmark_saved=bookmark_saved,
+        series_bookmark_saved=series_saved,
         state=_state_response(snapshot),
     )
 

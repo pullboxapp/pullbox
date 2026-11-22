@@ -28,6 +28,21 @@ class StoryArcReaderBookmark(Base, IdentityMixin, TimestampMixin):
     issue_id: Mapped[int | None] = mapped_column(ForeignKey("issues.id", ondelete="SET NULL"))
 
 
+class SeriesReaderBookmark(Base, IdentityMixin, TimestampMixin):
+    """The user's last issue in series order, independent of any arc."""
+
+    __tablename__ = "series_reader_bookmarks"
+    __table_args__ = (
+        UniqueConstraint("user_id", "series_id", name="uq_series_reader_user_series"),
+        Index("ix_series_reader_bookmarks_series", "series_id"),
+        Index("ix_series_reader_bookmarks_issue", "issue_id"),
+    )
+
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    series_id: Mapped[int] = mapped_column(ForeignKey("series.id", ondelete="CASCADE"))
+    issue_id: Mapped[int | None] = mapped_column(ForeignKey("issues.id", ondelete="SET NULL"))
+
+
 class IssueReaderState(Base, IdentityMixin, TimestampMixin):
     """Private reader state, intentionally separate from acquisition status."""
 

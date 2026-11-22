@@ -37,6 +37,7 @@ from pullbox.services.airdcpp_route_tokens import (
 from pullbox.services.airdcpp_search_types import AirDcppSearchProgress
 from pullbox.services.reader_state_service import load_reader_state
 from pullbox.services.reading_query_service import (
+    load_series_read_action,
     load_series_reading_aggregates,
     load_visible_issue_states,
 )
@@ -293,6 +294,11 @@ async def series_detail(
         )
     ).scalar_one()
     delete_context = await SeriesService.build_delete_context(session, [series_id])
+    series_read_action = (
+        await load_series_read_action(session, user_id=user.id, series_id=series_id)
+        if get_settings().reader_enabled
+        else None
+    )
     request.state.series_detail_query_ms = round(
         (time.monotonic() - query_started) * 1000,
         2,
@@ -307,6 +313,7 @@ async def series_detail(
             user,
             series=series,
             file_count=file_count,
+            series_read_action=series_read_action,
             delete_file_count=delete_context.linked_file_count,
             delete_managed_file_count=delete_context.managed_file_count,
             delete_referenced_file_count=delete_context.referenced_file_count,
@@ -336,9 +343,12 @@ async def issue_detail(
     story_arc_page: Annotated[int, Query(ge=1)] = 1,
     story_arc_per_page: Annotated[int, Query(ge=1, le=100)] = 25,
     entry_id: Annotated[int | None, Query(ge=1)] = None,
+    reading_series_id: Annotated[int | None, Query(ge=1)] = None,
 ) -> Response:
     """Render the issue detail page, fetching metadata on-demand if missing."""
     issue = await _load_issue_detail_record(session, issue_id)
+    if reading_series_id is not None and (issue is None or issue.series_id != reading_series_id):
+        return RedirectResponse(url=f"/series/{reading_series_id}", status_code=303)
     if issue is None:
         return RedirectResponse(url="/series", status_code=302)
 
@@ -356,6 +366,8 @@ async def issue_detail(
                 IssueStoryArc.issue_id == issue.id,
             )
         )
+    elif reading_series_id is not None:
+        reader_manifest_url += f"?reading_series_id={reading_series_id}"
     issue_detail_back_url = (
         f"/story-arcs/{story_arc_origin.id}?"
         f"{urlencode({'page': story_arc_page, 'per_page': story_arc_per_page})}"
