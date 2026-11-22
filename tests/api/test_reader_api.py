@@ -94,6 +94,7 @@ async def _seed_adjacent_reader_issue(
     *,
     current_issue_id: int,
     source: Path,
+    number: int = 2,
 ) -> int:
     async with factory() as session:
         current = await session.get(Issue, current_issue_id)
@@ -107,7 +108,7 @@ async def _seed_adjacent_reader_issue(
         ).scalar_one()
         issue = Issue(
             series_id=current.series_id,
-            issue_number=2,
+            issue_number=number,
             title="Adjacent Issue",
             status=IssueStatus.OWNED,
         )
@@ -647,6 +648,62 @@ async def test_arc_manifest_follows_saved_cross_series_order_without_skipping_ga
     refreshed = (await authenticated_client.get(a_url)).json()
     assert refreshed["next_issue"]["issue_id"] == other
     assert refreshed["story_arc"]["next_available"] is None
+
+
+@pytest.mark.asyncio
+async def test_damaged_chapter_offers_only_a_current_directed_arc_neighbor(
+    authenticated_client: AsyncClient,
+    sec_db: async_sessionmaker[AsyncSession],
+    sec_app: object,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    files = [tmp_path / f"{n}.cbz" for n in range(3)]
+    for path in files:
+        _write_cbz(path)
+    a = await _seed_reader_issue(sec_db, files[0])
+    b = await _seed_adjacent_reader_issue(sec_db, current_issue_id=a, source=files[1])
+    c = await _seed_adjacent_reader_issue(sec_db, current_issue_id=a, source=files[2], number=3)
+    async with sec_db.begin() as session:
+        arc = StoryArc(name="Damaged chapter")
+        session.add(arc)
+        await session.flush()
+        entries = [
+            IssueStoryArc(
+                story_arc_id=arc.id,
+                issue_id=issue,
+                sequence_number=i,
+                source_ordinal=i,
+                resolution_state=StoryArcResolutionState.RESOLVED,
+            )
+            for i, issue in enumerate((a, b, c), 1)
+        ]
+        session.add_all(entries)
+    service = ReaderContentService(cache_dir=tmp_path / "cache")
+    sec_app.state.reader_content_service = service
+    url = f"/api/v1/reader/issues/{b}/manifest"
+    context = f"{url}?story_arc_id={arc.id}&entry_id={entries[1].id}"
+    forward = f"{context}&after_entry={entries[0].id}"
+    backwards = f"{context}&before_entry={entries[2].id}"
+    get = authenticated_client.get
+    files[1].unlink()
+    assert "arc_continuation" not in (await get(url)).json()["detail"]
+    assert "arc_continuation" not in (await get(context)).json()["detail"]
+    for origin, expected in [(forward, c), (backwards, a)]:
+        failure = await get(origin)
+        assert failure.status_code == 404
+        target = failure.json()["detail"]["arc_continuation"]
+        assert target["issue_id"] == expected
+        assert (await get(target["manifest_url"])).json()["issue_id"] == expected
+    assert (await get(f"{context}&after_entry={entries[2].id}")).status_code == 409
+    _write_cbz(files[1])
+    assert (await get(forward)).json()["issue_id"] == b
+    monkeypatch.setattr(service, "get_page", AsyncMock(side_effect=ReaderWorkerBusyError))
+    busy = await get(forward)
+    assert busy.status_code == 503
+    assert "arc_continuation" not in busy.json()["detail"]
+    async with sec_db() as session:
+        assert not await session.scalar(select(IssueReaderState.id))
 
 
 @pytest.mark.asyncio

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- If a story arc chapter is missing on disk, damaged, or blocked by the reader's
+  safety limits, you can keep your page and choose the next or previous available
+  chapter. Pullbox rechecks the file and reading order first so you don't pass
+  over a repaired chapter. The unavailable issue is not marked read.
 - When a story arc has an unmatched chapter or no supported file for it,
   the reader names the gap instead of silently skipping it. You can move
   to the next or previous available issue, or return to the arc. Going

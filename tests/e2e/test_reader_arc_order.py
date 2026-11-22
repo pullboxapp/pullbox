@@ -343,11 +343,133 @@ def test_damaged_next_chapter_keeps_current_page_and_offers_return(
     current = issue.reader_page.get_attribute("src")
     page.get_by_test_id("comic-reader-next-issue").click()
     expect(page.get_by_test_id("comic-reader-switch-error")).to_contain_text("Batman Beyond #91")
+    expect(page.get_by_test_id("comic-reader-switch-error")).to_contain_text(
+        "No later readable entry"
+    )
     expect(issue.reader_page).to_have_attribute("src", current)
     expect(issue.reader_status).to_have_text("Page 2 of 3")
     page.get_by_role("dialog").get_by_role("link", name="Back to story arc").click()
     expect(page).to_have_url(arc_url)
     assert damaged.read_bytes() == b"not a readable comic archive"
+
+
+@pytest.fixture
+def later_reader_chapter(arc_reader: int, tmp_path: Path) -> Iterator[int]:
+    path = tmp_path / "Batman Beyond 092.cbz"
+    path.write_bytes((tmp_path / "Batman Beyond 091.cbz").read_bytes())
+
+    async def seed() -> tuple[int, int, int]:
+        async with get_session_factory().begin() as session:
+            root = (
+                await session.scalars(
+                    select(LibraryRoot.id).where(LibraryRoot.path == str(tmp_path))
+                )
+            ).one()
+            issue = Issue(series_id=2, issue_number=92, status=IssueStatus.OWNED)
+            session.add(issue)
+            await session.flush()
+            book = LibraryFile(
+                issue_id=issue.id,
+                library_root_id=root,
+                file_name=path.name,
+                file_path=str(path),
+                file_size=path.stat().st_size,
+                file_modified_at=datetime.now(UTC),
+                file_format=FileFormat.CBZ,
+                match_confidence=MatchConfidence.MANUAL,
+            )
+            member = IssueStoryArc(
+                story_arc_id=arc_reader,
+                issue_id=issue.id,
+                sequence_number=4,
+                source_ordinal=4,
+                resolution_state=StoryArcResolutionState.RESOLVED,
+            )
+            session.add_all([book, member])
+            await session.flush()
+            return issue.id, book.id, member.id
+
+    issue_id, book_id, entry_id = _run_async_blocking(seed())
+
+    async def cleanup() -> None:
+        async with get_session_factory().begin() as session:
+            await session.execute(delete(IssueStoryArc).where(IssueStoryArc.id == entry_id))
+            await session.execute(delete(LibraryFile).where(LibraryFile.id == book_id))
+            await session.execute(delete(Issue).where(Issue.id == issue_id))
+
+    try:
+        yield issue_id
+    finally:
+        _run_async_blocking(cleanup())
+
+
+def test_reader_rechecks_damaged_chapter_before_an_explicit_jump(
+    authed_page: Page,
+    seeded_server: str,
+    seeded_reader_state_guard: None,
+    arc_reader: int,
+    later_reader_chapter: int,
+    tmp_path: Path,
+) -> None:
+    page = authed_page
+    damaged = tmp_path / "Batman Beyond 091.cbz"
+    original = damaged.read_bytes()
+    with ZipFile(damaged, "w") as cbz:
+        cbz.writestr("001.png", b"not an image")
+    page.goto(f"{seeded_server}/story-arcs/{arc_reader}")
+    page.get_by_role("link", name="Read story arc", exact=True).click()
+    issue = IssueDetailPage(page, seeded_server)
+    expect(issue.reader_status).to_have_text("Page 2 of 3")
+    current = issue.reader_page.get_attribute("src")
+    next_issue = page.get_by_test_id("comic-reader-next-issue")
+    next_issue.click()
+    jump = page.get_by_role("button", name="Continue to next available: Batman Beyond #92")
+    expect(jump).to_be_visible()
+    expect(issue.reader_page).to_have_attribute("src", current)
+
+    damaged.write_bytes(original)
+    jump.click()
+    expect(page.get_by_test_id("comic-reader-switch-error")).to_contain_text("can now be opened")
+    expect(jump).not_to_be_visible()
+    expect(issue.reader_page).to_have_attribute("src", current)
+
+    damaged.unlink()
+    next_issue.click()
+    expect(jump).to_be_visible()
+
+    async def set_finale_resolved(resolved: bool) -> None:
+        async with get_session_factory().begin() as session:
+            finale = (
+                await session.scalars(
+                    select(IssueStoryArc).where(
+                        IssueStoryArc.story_arc_id == arc_reader,
+                        IssueStoryArc.sequence_number == 4,
+                    )
+                )
+            ).one()
+            finale.issue_id = later_reader_chapter if resolved else None
+            finale.resolution_state = (
+                StoryArcResolutionState.RESOLVED if resolved else StoryArcResolutionState.MISSING
+            )
+
+    _run_async_blocking(set_finale_resolved(False))
+    jump.click()
+    expect(page.get_by_test_id("comic-reader-switch-error")).to_contain_text(
+        "reading order changed"
+    )
+    expect(jump).not_to_be_visible()
+    expect(issue.reader_page).to_have_attribute("src", current)
+    _run_async_blocking(set_finale_resolved(True))
+    next_issue.click()
+    jump.press("Enter")
+    context = page.get_by_test_id("comic-reader-arc-position")
+    expect(context).to_contain_text("4 of 4")
+    back = page.get_by_role("button", name="Return to previous available: Batman Beyond #91")
+    back.click()
+    page.get_by_role("button", name="Return to previous available: Batman #1").press("Enter")
+    expect(context).to_contain_text("1 of 4")
+    expect(issue.reader_status).to_have_text("Page 2 of 3")
+    assert not damaged.exists()
 
 
 def test_read_in_arc_order_then_open_independently(

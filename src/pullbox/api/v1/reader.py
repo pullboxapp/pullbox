@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Never
+from typing import TYPE_CHECKING, Annotated, Never
 
 import anyio
 from fastapi import APIRouter, HTTPException, Query, Request, Response
@@ -39,7 +39,12 @@ from pullbox.schemas.reader import (
     ReaderWantToReadUpdate,
 )
 from pullbox.services.reader_arc_bookmarks import save_arc_bookmark
-from pullbox.services.reader_arc_order import ArcNeighbor, list_reader_arcs, load_arc_reader_order
+from pullbox.services.reader_arc_order import (
+    ArcNeighbor,
+    ArcReaderOrder,
+    list_reader_arcs,
+    load_arc_reader_order,
+)
 from pullbox.services.reader_content_service import (
     ReaderContentService,
     ReaderWorkerBusyError,
@@ -65,6 +70,9 @@ from pullbox.services.reading_query_service import (
     load_adjacent_readable_issues,
     load_reader_issue_access,
 )
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter(prefix="/reader", tags=["reader"], include_in_schema=False)
 
@@ -117,12 +125,15 @@ def _require_reader_enabled() -> None:
         raise HTTPException(status_code=404, detail="Not found")
 
 
+async def _load_source(request: Request, issue_id: int) -> ResolvedReaderSource:
+    async with get_request_session_factory(request)() as session:
+        record = await load_reader_source_record(session, issue_id)
+    return await anyio.to_thread.run_sync(resolve_reader_source, record, abandon_on_cancel=True)
+
+
 async def _resolved_source(request: Request, issue_id: int) -> ResolvedReaderSource:
-    factory = get_request_session_factory(request)
     try:
-        async with factory() as session:
-            record = await load_reader_source_record(session, issue_id)
-        return await anyio.to_thread.run_sync(resolve_reader_source, record, abandon_on_cancel=True)
+        return await _load_source(request, issue_id)
     except PageSourceError as exc:
         _raise_http_error(exc)
 
@@ -236,6 +247,38 @@ async def import_reader_page(
     )
 
 
+async def _validated_arc(
+    session: AsyncSession,
+    arc_id: int,
+    issue_id: int,
+    entry_id: int | None,
+    after: int | None,
+    before: int | None,
+    across_gap_from_issue: int | None,
+) -> ArcReaderOrder:
+    arc = await load_arc_reader_order(session, arc_id, issue_id, entry_id)
+    if arc is None:
+        raise HTTPException(
+            409,
+            "This issue is no longer a confirmed entry in this story arc. "
+            "Reopen the story arc to see its current reading order.",
+        )
+    if boundary := after or before:
+        neighbor = arc.previous if after else arc.next
+        if across_gap_from_issue is not None:
+            # A chapter becoming readable between the two invalidates the old jump.
+            neighbor = arc.previous_available if after else arc.next_available
+        if (
+            neighbor is None
+            or neighbor.entry_id != boundary
+            or (across_gap_from_issue is not None and neighbor.issue_id != across_gap_from_issue)
+        ):
+            raise HTTPException(
+                409, "The arc reading order changed. Reopen the story arc to continue."
+            )
+    return arc
+
+
 @router.get("/issues/{issue_id}/manifest", response_model=ReaderManifestResponse)
 async def reader_manifest(
     request: Request,
@@ -258,16 +301,62 @@ async def reader_manifest(
         entry_id is None or not (after_entry or before_entry)
     ):
         raise HTTPException(422, "Invalid story arc gap navigation.")
-    source = await _resolved_source(request, issue_id)
-    if reading_series_id is not None and source.series_id != reading_series_id:
-        raise HTTPException(409, "This issue changed series. Reopen the series to choose an issue.")
+    factory = get_request_session_factory(request)
+    directed = bool(after_entry or before_entry)
+
+    async def raise_manifest_error(exc: PageSourceError) -> Never:
+        if (
+            not directed
+            or story_arc_id is None
+            or entry_id is None
+            or exc.code
+            not in {
+                PageSourceErrorCode.MISSING_FILE,
+                PageSourceErrorCode.UNSUPPORTED_FORMAT,
+                PageSourceErrorCode.FORMAT_MISMATCH,
+                PageSourceErrorCode.CORRUPT_SOURCE,
+                PageSourceErrorCode.EMPTY_SOURCE,
+                PageSourceErrorCode.RESOURCE_LIMIT,
+            }
+        ):
+            _raise_http_error(exc)
+        async with factory() as session:
+            arc = await _validated_arc(
+                session,
+                story_arc_id,
+                issue_id,
+                entry_id,
+                after_entry,
+                before_entry,
+                across_gap_from_issue,
+            )
+        neighbor = arc.next if after_entry else arc.previous
+        boundary = f"{'after' if after_entry else 'before'}_entry={arc.entry_id}"
+        if neighbor and neighbor.gap:
+            neighbor = arc.next_available if after_entry else arc.previous_available
+            boundary += f"&across_gap_from_issue={issue_id}"
+        target = _arc_adjacent_response(neighbor, story_arc_id, boundary)
+        raise HTTPException(
+            _ERROR_STATUS[exc.code],
+            {
+                "code": exc.code.value,
+                "message": str(exc),
+                "arc_continuation": target.model_dump(mode="json") if target else None,
+            },
+            headers={"Cache-Control": "private, no-store"},
+        ) from exc
+
     try:
+        source = await _load_source(request, issue_id)
+        if reading_series_id is not None and source.series_id != reading_series_id:
+            raise HTTPException(
+                409, "This issue changed series. Reopen the series to choose an issue."
+            )
         manifest = await _content_service(request).get_manifest(source)
     except ReaderWorkerBusyError as exc:
         _raise_reader_busy(exc)
     except PageSourceError as exc:
-        _raise_http_error(exc)
-    factory = get_request_session_factory(request)
+        await raise_manifest_error(exc)
     async with factory() as session:
         state = await load_reader_state(session, user_id=_user.id, issue_id=issue_id)
         reading_arcs = [
@@ -277,30 +366,15 @@ async def reader_manifest(
         arc_context = None
         detail_url = f"/issues/{issue_id}"
         if story_arc_id is not None:
-            arc = await load_arc_reader_order(session, story_arc_id, issue_id, entry_id)
-            if arc is None:
-                raise HTTPException(
-                    409,
-                    "This issue is no longer a confirmed entry in this story arc. "
-                    "Reopen the story arc to see its current reading order.",
-                )
-            if boundary := after_entry or before_entry:
-                neighbor = arc.previous if after_entry else arc.next
-                if across_gap_from_issue is not None:
-                    # Walk back from the proposed target. A newly readable chapter
-                    # between it and the original issue invalidates the old jump.
-                    neighbor = arc.previous_available if after_entry else arc.next_available
-                if (
-                    neighbor is None
-                    or neighbor.entry_id != boundary
-                    or (
-                        across_gap_from_issue is not None
-                        and neighbor.issue_id != across_gap_from_issue
-                    )
-                ):
-                    raise HTTPException(
-                        409, "The arc reading order changed. Reopen the story arc to continue."
-                    )
+            arc = await _validated_arc(
+                session,
+                story_arc_id,
+                issue_id,
+                entry_id,
+                after_entry,
+                before_entry,
+                across_gap_from_issue,
+            )
             arc_context = ReaderStoryArcResponse(
                 id=story_arc_id,
                 name=arc.name,
@@ -339,6 +413,16 @@ async def reader_manifest(
                 _adjacent_response(adjacent.next),
             )
     initial_page_index = _manifest_initial_page(state, current_page_count=manifest.page_count)
+    if directed:
+        # Validate and cache only the landing page, before replacing the displayed comic.
+        try:
+            await _content_service(request).get_page(
+                source, page_index=initial_page_index, revision=manifest.revision
+            )
+        except ReaderWorkerBusyError as exc:
+            _raise_reader_busy(exc)
+        except PageSourceError as exc:
+            await raise_manifest_error(exc)
     response = ReaderManifestResponse(
         issue_id=manifest.issue_id,
         reading_series_id=source.series_id,

@@ -107,6 +107,12 @@
                 x-text="(direction === 'next' ? 'Continue to next available: ' : 'Return to previous available: ') + readerGapTarget(direction).issue_label"></button>
             </template>
           </template>
+          <template x-if="readerArcRecovery">
+            <button type="button" class="comic-reader__button"
+              :disabled="readerIssueTransitioning || readerCompletionUpdating || readerLoading || readerPageLoading"
+              @click="switchReaderIssue(readerArcRecovery.direction, true, true)"
+              x-text="(readerArcRecovery.direction === 'next' ? 'Continue to next available: ' : 'Return to previous available: ') + readerArcRecovery.target.issue_label"></button>
+          </template>
           <a :href="readerArcReturnUrl()" @click="returnToReaderArc($event)" hx-boost="false" class="comic-reader__button">Back to story arc</a>
         </div>
       </template>

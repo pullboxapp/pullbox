@@ -18332,18 +18332,19 @@ function readerMixin(config) {
     );
   }
 
-  function responseMessage(response, fallback) {
+  function readerResponseError(response, fallback) {
     return response
       .json()
       .catch(function () {
         return {};
       })
       .then(function (data) {
-        if (typeof data.detail === "string") return data.detail;
-        if (data.detail && typeof data.detail.message === "string") {
-          return data.detail.message;
+        var detail = data && data.detail;
+        var error = new Error(typeof detail === "string" ? detail : (detail && detail.message) || fallback);
+        if (detail && Object.prototype.hasOwnProperty.call(detail, "arc_continuation")) {
+          error.arcContinuation = detail.arc_continuation;
         }
-        return fallback;
+        return error;
       });
   }
 
@@ -18361,6 +18362,7 @@ function readerMixin(config) {
     readerIssueTransitioning: false,
     readerIssueStatusMessage: "",
     readerIssueSwitchError: "",
+    readerArcRecovery: null,
     readerOrderChanged: false,
     readerOriginDetail: "",
     readerOriginLocation: "",
@@ -18519,6 +18521,7 @@ function readerMixin(config) {
       this.readerIssueTransitioning = false;
       this.readerIssueStatusMessage = "";
       this.readerIssueSwitchError = "";
+      this.readerArcRecovery = null;
       this.readerCompletionVisible = false;
       this.readerCompletionUpdating = false;
       this.readerPageIndex = 0;
@@ -18649,8 +18652,7 @@ function readerMixin(config) {
           signal: controller.signal,
         });
         if (!response.ok) {
-          var message = await responseMessage(response, "The comic could not be prepared.");
-          throw new Error(message);
+          throw await readerResponseError(response, "The comic could not be prepared.");
         }
         var manifest = await response.json();
         if (generation !== this.readerIssueGeneration || !this.readerOpen) return null;
@@ -18926,6 +18928,7 @@ function readerMixin(config) {
       this.readerIssueTransitioning = true;
       this.readerIssueSwitchError = "";
       this.readerIssueStatusMessage = "Changing reading order…";
+      this.readerArcRecovery = null;
       var generation = this.readerIssueGeneration;
       this.stageDisplayedReaderPage();
       try {
@@ -19088,7 +19091,7 @@ function readerMixin(config) {
       if (this.readerManifest) this.prefetchReaderNeighbors(this.readerPageIndex);
     },
 
-    switchReaderIssue: async function (direction, acrossGap) {
+    switchReaderIssue: async function (direction, acrossGap, recover) {
       if (
         this.readerIssueTransitioning ||
         this.readerCompletionUpdating ||
@@ -19097,7 +19100,9 @@ function readerMixin(config) {
       ) {
         return false;
       }
-      var adjacent = acrossGap ? this.readerGapTarget(direction) : this.readerAdjacentIssue(direction);
+      var offer = recover && this.readerArcRecovery;
+      if (recover && (!offer || offer.direction !== direction)) return false;
+      var adjacent = offer ? offer.target : (acrossGap ? this.readerGapTarget(direction) : this.readerAdjacentIssue(direction));
       if (!adjacent || !adjacent.manifest_url) return false;
 
       this.readerIssueTransitioning = true;
@@ -19123,7 +19128,29 @@ function readerMixin(config) {
       var previousIssue = this.captureReaderIssue();
       var generation = this.readerIssueGeneration + 1;
       this.readerIssueGeneration = generation;
+      this.readerArcRecovery = null;
+      var attempted = null;
       try {
+        if (offer) {
+          // Recheck the original route, not just the suggested destination. A repair
+          // or reorder must not turn an explicit jump into a silent skip.
+          var unavailable;
+          try {
+            var repaired = await this.fetchReaderManifest(offer.failed.manifest_url, generation);
+            if (!repaired) return false;
+          } catch (error) {
+            if (error.arcContinuation === undefined) throw error;
+            unavailable = error.arcContinuation;
+          }
+          if (!this.readerOpen || this.readerIssueGeneration !== generation) return false;
+          if (unavailable === undefined) {
+            throw new Error(offer.failed.issue_label + " can now be opened. Select that chapter again to read it.");
+          }
+          if (!unavailable || unavailable.manifest_url !== adjacent.manifest_url || unavailable.issue_id !== adjacent.issue_id) {
+            throw new Error("The arc reading order changed. Reopen the story arc to choose a chapter.");
+          }
+        }
+        attempted = adjacent;
         var manifest = await this.fetchReaderManifest(adjacent.manifest_url, generation);
         if (!manifest) return false;
         var loaded = await this.activateReaderManifest(manifest, true);
@@ -19142,8 +19169,15 @@ function readerMixin(config) {
             (error && error.name === "AbortError")) return false;
         this.readerIssueSwitchError =
           (error && error.message) || "The next comic could not be opened.";
-        if (previousIssue.manifest.story_arc && adjacent.issue_label) {
-          this.readerIssueSwitchError = adjacent.issue_label + ": " + this.readerIssueSwitchError;
+        if (previousIssue.manifest.story_arc && attempted) {
+          this.readerIssueSwitchError = attempted.issue_label + ": " + this.readerIssueSwitchError;
+          if (error.arcContinuation === null) {
+            this.readerIssueSwitchError += direction === "next" ? " No later readable entry." : " No earlier readable entry.";
+          } else if (error.arcContinuation && !offer) {
+            this.readerArcRecovery = { failed: attempted, target: error.arcContinuation, direction: direction };
+          } else if (error.arcContinuation) {
+            this.readerIssueSwitchError += " Return to the story arc to choose another chapter.";
+          }
         }
         this.readerIssueStatusMessage = this.readerIssueSwitchError;
         this.readerIssueTransitioning = false;
