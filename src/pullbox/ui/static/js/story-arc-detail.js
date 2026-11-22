@@ -34,7 +34,8 @@ function storyArcDetail() {
     deletePreview: null, deletePhase: '', deleteError: '', deleteUrl: '', deleteGeneration: 0,
     showPaths: false, pathItems: [], pathCursors: [0], pathNext: null, pathBusy: false, pathError: '', pathRetry: [0],
     selectedPaths: [], selectedMembers: [], selectedSeries: [], seriesFiles: [], allowShared: false, cleanupReview: null,
-    get selectionCount() { return this.selectedPaths.length + this.selectedMembers.length + this.selectedSeries.length; },
+    get fileCount() { return this.selectedPaths.length + this.selectedMembers.length + this.seriesFiles.length; },
+    get selectionCount() { return this.fileCount + this.selectedSeries.length; },
     reviewDelete(arcId) {
       if (this.$refs.deleteDialog.open) return;
       this.deleteUrl = '/story-arcs/' + Number(arcId) + '/delete';

@@ -787,6 +787,7 @@ def test_arc_delete_confirms_explicit_series_file_disposition(
             await db.execute(delete(Series).where(Series.id == sid))
 
     sid = _run_async_blocking(setup())
+    arc_copy = _run_async_blocking(_create_arc_copy(arc_reader, tmp_path))
     canonical = tmp_path / "Batman Beyond 091.cbz"
     original = canonical.read_bytes()
     try:
@@ -794,8 +795,15 @@ def test_arc_delete_confirms_explicit_series_file_disposition(
         page.goto(f"{seeded_server}/story-arcs/{arc_reader}")
         page.get_by_role("button", name="Delete Story Arc", exact=True).click()
         dialog = page.get_by_role("dialog")
+        dialog.get_by_role("button", name="Review arc files").click()
+        copy_box = dialog.get_by_role("checkbox", name=f"Remove {arc_copy}", exact=True)
+        expect(copy_box).not_to_be_checked()
+        if remove_file:
+            copy_box.check()
         dialog.get_by_role("button", name="Review related series").click()
-        dialog.get_by_role("checkbox", name="Remove series record: Disposable records").check()
+        series_box = dialog.get_by_role("checkbox", name="Remove series record: Disposable records")
+        expect(series_box).to_be_enabled(timeout=2500)
+        series_box.check()
         if remove_file:
             dialog.get_by_role("button", name="Choose series files").click()
             dialog.get_by_role("checkbox", name=f"Remove series file {outside_path}").check()
@@ -808,50 +816,60 @@ def test_arc_delete_confirms_explicit_series_file_disposition(
             if remove_file
             else "Delete arc and selected series"
         )
+        if remove_file:
+            expect(dialog.get_by_role("list", name="Arc copies and links to remove")).to_have_text(
+                str(arc_copy)
+            )
+            expect(dialog.get_by_role("list", name="Library originals to remove")).to_have_text(
+                str(outside_path)
+            )
+        else:
+            expect(dialog.get_by_role("status", name="Selected series records")).to_contain_text(
+                "All comic files will stay on disk"
+            )
         dialog.get_by_role("button", name=confirm).click()
         expect(page).to_have_url(re.compile(r"/utilities\?tab=queue$"))
         _run_async_blocking(await_removal(sid))
         assert canonical.read_bytes() == original
         assert outside_path.exists() != remove_file
+        assert arc_copy.exists() != remove_file
     finally:
         _run_async_blocking(cleanup(sid))
 
 
-def test_delete_arc_with_an_explicitly_selected_copy(
-    authed_page: Page,
-    seeded_server: str,
-    arc_reader: int,
-    tmp_path: Path,
-) -> None:
+async def _create_arc_copy(arc_reader: int, tmp_path: Path) -> Path:
     from pullbox.services.story_arc_placement_integration import (
         StoryArcPlacementPolicyInput,
         StoryArcPlacementSyncService,
     )
 
-    async def setup_copy() -> Path:
-        dest = tmp_path / "Arc copies"
-        dest.mkdir()
-        async with get_session_factory()() as db:
-            svc = StoryArcPlacementSyncService()
-            arc = await db.get(StoryArc, arc_reader)
-            root = await db.scalar(select(LibraryRoot).where(LibraryRoot.path == str(tmp_path)))
-            member = await db.scalar(
-                select(IssueStoryArc.id).where(
-                    IssueStoryArc.story_arc_id == arc_reader, IssueStoryArc.sequence_number == 2
-                )
+    dest = tmp_path / "Arc copies"
+    dest.mkdir()
+    async with get_session_factory()() as db:
+        svc = StoryArcPlacementSyncService()
+        arc = await db.get(StoryArc, arc_reader)
+        root = await db.scalar(select(LibraryRoot).where(LibraryRoot.path == str(tmp_path)))
+        member = await db.scalar(
+            select(IssueStoryArc.id).where(
+                IssueStoryArc.story_arc_id == arc_reader, IssueStoryArc.sequence_number == 2
             )
-            await svc.update_policy(
-                db,
-                arc_reader,
-                expected_revision=arc.revision,
-                proposal=StoryArcPlacementPolicyInput(
-                    mode="copy", target_library_root_id=root.id, destination_root=str(dest)
-                ),
-            )
-            result = await svc.sync_membership(db, arc_reader, member)
-            return Path(result.placement.placement_path)
+        )
+        await svc.update_policy(
+            db,
+            arc_reader,
+            expected_revision=arc.revision,
+            proposal=StoryArcPlacementPolicyInput(
+                mode="copy", target_library_root_id=root.id, destination_root=str(dest)
+            ),
+        )
+        result = await svc.sync_membership(db, arc_reader, member)
+        return Path(result.placement.placement_path)
 
-    copy = _run_async_blocking(setup_copy())
+
+def test_delete_arc_with_an_explicitly_selected_copy(
+    authed_page: Page, seeded_server: str, arc_reader: int, tmp_path: Path
+) -> None:
+    copy = _run_async_blocking(_create_arc_copy(arc_reader, tmp_path))
     canonical = tmp_path / "Batman Beyond 091.cbz"
     original = canonical.read_bytes()
     page = authed_page

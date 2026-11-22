@@ -29,10 +29,11 @@ from pullbox.services.story_arc_series_cleanup import (
     SeriesFileProgress,
     series_binding,
     series_record_plan,
+    verify_series_progress,
 )
 from pullbox.services.story_arc_service import StoryArcConflictError
 from pullbox.utilities.import_guards import ensure_no_active_import_file_mutation
-from pullbox.utilities.models import JobState, JobType, UtilityJob, UtilityJobItem
+from pullbox.utilities.models import ItemState, JobState, JobType, UtilityJob, UtilityJobItem
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -75,13 +76,19 @@ async def _series_files_plan(
     actor: int,
     series_ids: list[int],
     file_ids: list[int],
+    placement_ids: list[int],
     *,
     lock: bool,
 ) -> dict[str, Any]:
-    if len(file_ids) > 1000 or len(set(file_ids)) != len(file_ids):
-        raise StoryArcConflictError("Select up to 1,000 distinct files from the reviewed series.")
+    selected_placements = frozenset(placement_ids)
+    if (
+        len(file_ids) + len(placement_ids) > 1000
+        or len(set(file_ids)) != len(file_ids)
+        or len(selected_placements) != len(placement_ids)
+    ):
+        raise StoryArcConflictError("Select up to 1,000 distinct file paths.")
     plan = await series_record_plan(db, arc_id, actor, series_ids, lock=lock)
-    if not file_ids:
+    if not file_ids and not placement_ids:
         return plan
     rows = (
         await db.execute(
@@ -94,7 +101,7 @@ async def _series_files_plan(
     if len(rows) != len(file_ids):
         raise StoryArcConflictError("Choose only files registered to the selected series.")
     evidence_bytes = 0
-    targets = []
+    targets = await _placement_targets(db, arc_id, selected_placements)
     for fid, sid, status, skip in rows:
         peers = list(
             await db.scalars(
@@ -109,7 +116,13 @@ async def _series_files_plan(
             )
         )
         evidence = await review_member_removal(
-            db, arc_id, fid, shared_arcs=peers, parent_scope_id=sid, lock=lock
+            db,
+            arc_id,
+            fid,
+            shared_arcs=peers,
+            parent_scope_id=sid,
+            lock=lock,
+            selected_placements=selected_placements,
         )
         encoded = evidence.model_dump_json()
         evidence_bytes += len(encoded.encode())
@@ -135,6 +148,11 @@ async def _series_files_plan(
     return {
         **plan,
         "targets": targets,
+        **(
+            {"revision": await db.scalar(select(StoryArc.revision).where(StoryArc.id == arc_id))}
+            if placement_ids
+            else {}
+        ),
         "trash": str(trash) if trash else None,
         "series_file_binding": series_binding(stable),
     }
@@ -152,12 +170,12 @@ async def _plan(
     series_file_ids: list[int] | None = None,
 ) -> dict[str, Any]:
     if series_ids:
-        if ids or member_ids:
+        if member_ids:
             raise StoryArcConflictError(
                 "Review series records separately from physical file removal."
             )
         return await _series_files_plan(
-            db, arc_id, actor, series_ids, series_file_ids or [], lock=lock
+            db, arc_id, actor, series_ids, series_file_ids or [], ids, lock=lock
         )
     if series_file_ids:
         raise StoryArcConflictError("Select the parent series before selecting its files.")
@@ -176,29 +194,8 @@ async def _plan(
         raise StoryArcConflictError(review.blocker)
     arc = await db.get(StoryArc, arc_id)
     assert arc is not None
-    q = (
-        select(StoryArcPlacement)
-        .join(IssueStoryArc)
-        .where(
-            IssueStoryArc.story_arc_id == arc_id,
-            StoryArcPlacement.id.in_(selected),
-            StoryArcPlacement.ownership == "managed",
-            ~select(LibraryFile.id)
-            .where(LibraryFile.file_path == StoryArcPlacement.placement_path)
-            .exists(),
-        )
-        .order_by(StoryArcPlacement.id)
-    )
-    rows = (await db.scalars(q.execution_options(populate_existing=True))).all()
-    if len(rows) != len(selected) or any(
-        not p.source_fingerprint or not (p.last_result or {}).get("target_fingerprint")
-        for p in rows
-    ):
-        raise StoryArcConflictError(
-            "Select only proven managed arc files, not references or library files."
-        )
     trash = await resolve_configured_utility_trash_dir(db)
-    targets = [_target(p) for p in rows]
+    targets = await _placement_targets(db, arc_id, selected)
     peers: dict[int, str] = {}
     skipped: set[int] = set()
     effects: dict[int, dict[str, Any]] = {}
@@ -218,7 +215,12 @@ async def _plan(
             )
         ).all()
         file = await review_member_removal(
-            db, arc_id, fid, shared_arcs=[r.id for r in others], lock=lock
+            db,
+            arc_id,
+            fid,
+            shared_arcs=[r.id for r in others],
+            lock=lock,
+            selected_placements=selected,
         )
         peers.update({r.id: r.name for r in others})
         remaining = sum(c.id not in originals for c in file.remaining)
@@ -267,6 +269,35 @@ async def _plan(
     }
 
 
+async def _placement_targets(
+    db: AsyncSession, arc_id: int, selected: frozenset[int]
+) -> list[dict[str, Any]]:
+    if not selected:
+        return []
+    q = (
+        select(StoryArcPlacement)
+        .join(IssueStoryArc)
+        .where(
+            IssueStoryArc.story_arc_id == arc_id,
+            StoryArcPlacement.id.in_(selected),
+            StoryArcPlacement.ownership == "managed",
+            ~select(LibraryFile.id)
+            .where(LibraryFile.file_path == StoryArcPlacement.placement_path)
+            .exists(),
+        )
+        .order_by(StoryArcPlacement.id)
+    )
+    rows = (await db.scalars(q.execution_options(populate_existing=True))).all()
+    if len(rows) != len(selected) or any(
+        not p.source_fingerprint or not (p.last_result or {}).get("target_fingerprint")
+        for p in rows
+    ):
+        raise StoryArcConflictError(
+            "Select only proven managed arc files, not references or library files."
+        )
+    return [_target(p) for p in rows]
+
+
 async def preview_cleanup(
     db: AsyncSession,
     arc_id: int,
@@ -287,18 +318,26 @@ async def preview_cleanup(
         series_file_ids=series_file_ids,
         lock=False,
     )
+    targets = plan.get("targets", ())
+    paths = {
+        "paths": [t["file_path"] for t in targets],
+        "arc_paths": [t["file_path"] for t in targets if "original" not in t],
+        "library_paths": [t["file_path"] for t in targets if "original" in t],
+    }
     if series_ids:
         return {k: plan[k] for k in ("impact", "record_series", "shared_arcs")} | {
             "token": _signer().dumps(_digest(plan)),
-            "paths": [t["file_path"] for t in plan.get("targets", ())],
+            **paths,
             "removed_by_series": {
-                s["id"]: sum(t["original"]["series_id"] == s["id"] for t in plan.get("targets", ()))
+                s["id"]: sum(
+                    t["original"]["series_id"] == s["id"] for t in targets if "original" in t
+                )
                 for s in plan["record_series"]
             },
             "trash_enabled": bool(plan.get("trash")),
         }
     return {
-        "paths": [p["file_path"] for p in plan["targets"]],
+        **paths,
         "impact": plan["impact"],
         "shared_arcs": plan["shared_arcs"],
         "skipped_issues": plan["skipped_issues"],
@@ -394,6 +433,20 @@ async def remove_reviewed_target(
             return dict(receipt)
     if not member or placement is None or _target(placement) != target:
         raise StoryArcConflictError("The reviewed arc file changed. Its path was left alone.")
+    if "record_series" in plan:
+        item = await db.get(UtilityJobItem, item_id)
+        assert item is not None
+        index = item.item_index
+        prior = await db.scalars(
+            select(UtilityJobItem.item_index).where(
+                UtilityJobItem.job_id == job_id,
+                UtilityJobItem.item_index < index,
+                UtilityJobItem.state == ItemState.COMPLETED,
+            )
+        )
+        if plan["targets"][index] != target or set(prior) != set(range(index)):
+            raise StoryArcConflictError("An earlier file did not finish. This copy was kept.")
+        await verify_series_progress(db, plan, job_id, index)
     result = await StoryArcPlacementSyncService().remove_placement(
         db,
         arc.id,

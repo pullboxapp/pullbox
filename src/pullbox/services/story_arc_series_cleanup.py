@@ -22,7 +22,7 @@ from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.library import LibraryFile, LibraryFileStorageMode, MatchConfidence
 from pullbox.models.pending_match import PendingMatch, PendingMatchStatus
 from pullbox.models.series import Series
-from pullbox.models.story_arc import IssueStoryArc, StoryArc
+from pullbox.models.story_arc import IssueStoryArc, StoryArc, StoryArcPlacement
 from pullbox.models.story_arc_import import ImportedStoryArcEntry
 from pullbox.services.download_operation_reconciliation import retire_download_operations
 from pullbox.services.library_mutation_coordination import (
@@ -115,6 +115,8 @@ class SeriesFileProgress:
 
     files: dict[int, tuple[int, str, int]]
     removed: frozenset[int]
+    placements: frozenset[int]
+    pending_placements: frozenset[int]
     issue_states: dict[int, tuple[str, bool, str, bool]]
     operation: str | None
 
@@ -126,6 +128,8 @@ class SeriesFileProgress:
         states = {}
         files = {}
         for i, target in enumerate(targets):
+            if "original" not in target:
+                continue
             original = target["original"]
             iid, fid = original["issue_id"], original["file"]["id"]
             files[fid] = iid, target["file_path"], original["file"]["root_id"]
@@ -134,7 +138,14 @@ class SeriesFileProgress:
                 owns = any(c["id"] not in removed for c in original["remaining"])
                 status, skip = target["initial_issue"]
                 states[iid] = (status, skip, "owned" if owns else "skipped", skip if owns else True)
-        return cls(files, frozenset(removed), states, operation)
+        return cls(
+            files,
+            frozenset(removed),
+            frozenset(t["id"] for t in targets if "original" not in t),
+            frozenset(t["id"] for t in targets[completed:] if "original" not in t),
+            states,
+            operation,
+        )
 
 
 def series_binding(plan: dict[str, Any]) -> str:
@@ -158,17 +169,28 @@ async def series_record_plan(
     if lock:
         await lock_file_mutation_admission(db)
         await ensure_no_active_import_file_mutation(db)
-        await reserve_series_arc_work(db, ids)
+        await reserve_series_arc_work(db, ids, deleting_arc_id=arc_id)
     else:
-        await check_series_arc_work(db, ids)
+        await check_series_arc_work(db, ids, deleting_arc_id=arc_id)
     review, residual = await _snapshot(
         db,
         arc_id,
         actor,
         lock=lock,
         cleanup_job=job_id,
+        omit=progress.placements if progress else frozenset(),
         omit_files=frozenset(progress.files) if progress else frozenset(),
     )
+    if progress and progress.placements:
+        pending = await db.scalars(
+            select(StoryArcPlacement.id)
+            .join(IssueStoryArc)
+            .where(
+                IssueStoryArc.story_arc_id == arc_id, StoryArcPlacement.id.in_(progress.placements)
+            )
+        )
+        if set(pending) != progress.pending_placements:
+            raise StoryArcConflictError("The selected arc copies changed. Review remaining files.")
     if review.blocker:
         raise StoryArcConflictError(review.blocker)
     arc = await db.get(StoryArc, arc_id)
@@ -374,7 +396,8 @@ async def verify_series_progress(
 async def finish_series_records(db: AsyncSession, plan: dict[str, Any], job_id: str) -> None:
     ids = [s["id"] for s in plan["record_series"]]
     arc_id, actor = plan["arc_id"], plan["actor"]
-    removed = len(plan.get("targets", ()))
+    targets = plan.get("targets", ())
+    removed = len(targets)
     if removed:
         current = await verify_series_progress(db, plan, job_id, removed)
     else:
@@ -393,7 +416,8 @@ async def finish_series_records(db: AsyncSession, plan: dict[str, Any], job_id: 
         ArcDeleteReview(**current["impact"]),
         job_id=job_id,
         series_ids=ids,
-        removed_series_files=removed,
+        removed_series_files=sum("original" in t for t in targets),
+        removed_arc_files=sum("original" not in t for t in targets),
     )
     issues = select(Issue.id).where(Issue.series_id.in_(ids))
     for did in await db.scalars(

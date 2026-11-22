@@ -77,7 +77,12 @@ def _inspect(book: LibraryFile, root: LibraryRoot, *, removing: bool) -> _Copy:
             or (datetime.fromtimestamp(info.st_mtime, UTC) != book.file_modified_at)
         ):
             raise ValueError
-        if removing and (info.st_nlink != 1 or not os.access(path.parent, os.W_OK | os.X_OK)):
+        if removing and info.st_nlink != 1:
+            raise StoryArcConflictError(
+                "This original has another hardlink. Leave the original unchecked; "
+                "you can remove the arc link without removing the original."
+            )
+        if removing and not os.access(path.parent, os.W_OK | os.X_OK):
             raise ValueError
     except (OSError, RuntimeError, ValueError, OverflowError) as exc:
         raise StoryArcConflictError(
@@ -113,9 +118,28 @@ def _check_nested_roots(copy: _Copy, other_roots: Sequence[str]) -> None:
         raise StoryArcConflictError("Library root locations could not be verified.") from exc
 
 
-async def _guard_work(db: AsyncSession, issue_id: int, book: LibraryFile) -> None:
+async def _guard_work(
+    db: AsyncSession,
+    issue_id: int,
+    book: LibraryFile,
+    arc_id: int,
+    selected_placements: frozenset[int],
+) -> None:
     await ensure_no_active_import_file_mutation(db)
     target = book.file_path
+    uses_original = StoryArcPlacement.library_file_id == book.id
+    if selected_placements:
+        # This exception is preview-only. The worker checks again with NO
+        # exemptions after the preceding unlinks have actually completed.
+        uses_original &= ~(
+            StoryArcPlacement.id.in_(selected_placements)
+            & StoryArcPlacement.issue_story_arc_id.in_(
+                select(IssueStoryArc.id).where(IssueStoryArc.story_arc_id == arc_id)
+            )
+            & (StoryArcPlacement.ownership == "managed")
+            & StoryArcPlacement.creating_action_id.is_(None)
+            & StoryArcPlacement.source_import_job_id.is_(None)
+        )
     retained = (
         select(ImportedFile.id)
         .where(or_(ImportedFile.library_file_id == book.id, ImportedFile.file_path == target))
@@ -133,19 +157,22 @@ async def _guard_work(db: AsyncSession, issue_id: int, book: LibraryFile) -> Non
             ),
         )
         .exists(),
-        select(StoryArcPlacement.id)
-        .where(
-            or_(
-                StoryArcPlacement.library_file_id == book.id,
-                StoryArcPlacement.placement_path == target,
-            )
-        )
-        .exists(),
         select(StoryArcSyncWork.id).where(StoryArcSyncWork.library_file_id == book.id).exists(),
     )
-    if await db.scalar(select(or_(*retained))):
+    placement = (
+        select(StoryArcPlacement.id)
+        .where(or_(uses_original, StoryArcPlacement.placement_path == target))
+        .exists()
+    )
+    keep, in_arc = (await db.execute(select(or_(*retained), placement))).one()
+    if keep:
         raise StoryArcConflictError(
             "This file is linked to import history or arc file work. Keep its original in place."
+        )
+    if in_arc:
+        raise StoryArcConflictError(
+            "An arc still uses this library file. Keep the original, or open Review arc files "
+            "and select its managed copy or link too. Other arcs' files are protected."
         )
     active = (
         select(DownloadHistory.id)
@@ -190,6 +217,7 @@ async def review_member_removal(
     shared_arcs: Sequence[int],
     lock: bool = False,
     parent_scope_id: int | None = None,
+    selected_placements: frozenset[int] = frozenset(),
 ) -> MemberRemovalReview:
     """Resolve exact membership and verify every surviving copy before predicting ownership."""
     query = (
@@ -265,7 +293,7 @@ async def review_member_removal(
                 "Referenced files and disabled or read-only roots are protected."
             )
         if removing:
-            await _guard_work(db, issue_id, book)
+            await _guard_work(db, issue_id, book, arc_id, selected_placements)
         copy = await asyncio.to_thread(_inspect, book, root, removing=removing)
         if removing:
             other_roots = select(LibraryRoot.path).where(LibraryRoot.id != root.id)

@@ -26,7 +26,9 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
 
-async def check_series_arc_work(db: AsyncSession, series_ids: Sequence[int]) -> None:
+async def check_series_arc_work(
+    db: AsyncSession, series_ids: Sequence[int], *, deleting_arc_id: int | None = None
+) -> None:
     """Read-only preflight, including every target before a bulk request starts."""
     linked = (
         select(IssueStoryArc.id)
@@ -43,6 +45,10 @@ async def check_series_arc_work(db: AsyncSession, series_ids: Sequence[int]) -> 
     pending = or_(
         p.operation_token.is_not(None), p.last_result["trash_receipt"].as_string().is_not(None)
     )
+    managed = p.ownership == StoryArcPlacementOwnership.MANAGED
+    if deleting_arc_id is not None:
+        # This arc's own records disappear first. Unselected paths stay on disk.
+        managed = managed & (StoryArc.id != deleting_arc_id)
     placement = (
         select(
             StoryArc.name,
@@ -60,7 +66,7 @@ async def check_series_arc_work(db: AsyncSession, series_ids: Sequence[int]) -> 
         .join(StoryArc, StoryArc.id == IssueStoryArc.story_arc_id)
         .where(
             or_(p.issue_story_arc_id.in_(linked), p.library_file_id.in_(files)),
-            or_(imported, pending, p.ownership == StoryArcPlacementOwnership.MANAGED),
+            or_(imported, pending, managed),
         )
         .order_by(StoryArc.id, p.id)
         .limit(1)
@@ -111,7 +117,9 @@ async def check_series_arc_work(db: AsyncSession, series_ids: Sequence[int]) -> 
         )
 
 
-async def reserve_series_arc_work(db: AsyncSession, series_ids: Sequence[int]) -> None:
+async def reserve_series_arc_work(
+    db: AsyncSession, series_ids: Sequence[int], *, deleting_arc_id: int | None = None
+) -> None:
     """Recheck under locks before the caller removes reviewed records or files."""
     if db.get_bind().dialect.name == "sqlite":
         await db.execute(update(Series).where(false()).values(path=Series.path))
@@ -141,7 +149,7 @@ async def reserve_series_arc_work(db: AsyncSession, series_ids: Sequence[int]) -
         ):
             locked = ids.order_by(*ids.selected_columns).with_for_update().subquery()
             await db.scalar(select(func.count()).select_from(locked))
-    await check_series_arc_work(db, series_ids)
+    await check_series_arc_work(db, series_ids, deleting_arc_id=deleting_arc_id)
 
 
 async def detach_series_arc_entries(db: AsyncSession, series: Series) -> None:

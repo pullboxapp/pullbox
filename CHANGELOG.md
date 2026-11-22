@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   you select are removed. The confirmation shows which paths go to Trash or
   are permanently deleted. Cancellation keeps the arc and series records but
   does not restore files already removed.
+- In the same review you can independently select the arc's reading-order
+  copies or links. The confirmation lists these separately from library
+  originals. Removing just an arc copy or link leaves its original on disk.
 - Story Arc details now offer **Delete Story Arc** alongside Archive. Review the
   reading order that will be removed and the comics that will stay. Deleting the
   arc alone leaves your series, issues, other arcs, and all files untouched.

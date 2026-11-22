@@ -1,6 +1,7 @@
 """Story Arc deletion must preserve original comics and retry evidence on both databases."""
 
 import asyncio
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -82,6 +83,18 @@ async def test_failed_removal_receipt_survives_even_an_earlier_delete_confirmati
     + [
         ("copy", False, action)
         for action in ("cancel_queued", "cancel_after_file", "changed_target", "expanded_arc")
+    ]
+    + [
+        ("copy", False, "series_keep_both"),
+        ("hardlink", False, "series_remove_copy"),
+        ("copy", False, "series_both"),
+        ("symlink", False, "series_both"),
+        ("copy", False, "series_changed"),
+        ("copy", False, "series_cancel"),
+        ("copy", False, "series_peer"),
+        ("copy", False, "series_failed_copy"),
+        ("hardlink", False, "linked_original"),
+        ("copy", False, "member_both"),
     ],
 )
 async def test_removing_a_reviewed_arc_representation_preserves_canonical_entry(
@@ -113,7 +126,7 @@ async def test_removing_a_reviewed_arc_representation_preserves_canonical_entry(
             file_name=canonical.name,
             file_size=canonical.stat().st_size,
             file_format=FileFormat.CBZ,
-            file_modified_at=datetime.now(UTC),
+            file_modified_at=datetime.fromtimestamp(canonical.stat().st_mtime, UTC),
         )
         arc = StoryArc(name="Crossover")
         member = IssueStoryArc(
@@ -164,11 +177,47 @@ async def test_removing_a_reviewed_arc_representation_preserves_canonical_entry(
         db.add(reference)
         db.add(actor)
         await db.commit()
-        ids = [result.placement.id]
+        ids = [] if outcome == "series_keep_both" else [result.placement.id]
+        series_scope = outcome.startswith("series_")
+        remove_original = outcome in {
+            "member_both",
+            "series_both",
+            "series_changed",
+            "series_cancel",
+        }
+        selection = (
+            {"series_ids": [series.id], "series_file_ids": [fid] if remove_original else []}
+            if series_scope
+            else {"member_ids": [fid]}
+            if remove_original
+            else {}
+        )
         with pytest.raises(StoryArcConflictError, match="proven managed"):
             await preview_cleanup(db, arc_id, actor.id, [reference.id])
-        plan = await preview_cleanup(db, arc_id, actor.id, ids)
-        assert plan["paths"] == [str(path)] and plan["trash_enabled"] is trash_enabled
+        if outcome == "linked_original":
+            with pytest.raises(StoryArcConflictError, match="hardlink"):
+                await preview_cleanup(
+                    db, arc_id, actor.id, ids, series_ids=[series.id], series_file_ids=[fid]
+                )
+            assert path.samefile(canonical) and canonical.read_bytes() == b"only canonical comic"
+            return
+        if outcome == "series_both":
+            with pytest.raises(StoryArcConflictError, match="Review arc files"):
+                await preview_cleanup(
+                    db, arc_id, actor.id, [], series_ids=[series.id], series_file_ids=[fid]
+                )
+            assert path.exists() and canonical.exists()
+        if outcome in {"series_peer", "series_failed_copy"}:
+            selection["series_file_ids"] = [fid]
+            remove_original = True
+        plan = await preview_cleanup(db, arc_id, actor.id, ids, **selection)
+        assert plan["paths"] == ([str(path)] if ids else []) + (
+            [str(canonical)] if remove_original else []
+        )
+        assert plan["trash_enabled"] is trash_enabled
+        if series_scope or remove_original:
+            assert plan["arc_paths"] == ([str(path)] if ids else [])
+            assert plan["library_paths"] == ([str(canonical)] if remove_original else [])
         mgr = JobQueueManager(factory)
         mgr.register_executor("story_arc_cleanup", StoryArcCleanupExecutor)
         with pytest.raises(StoryArcConflictError, match="changed"):
@@ -180,9 +229,10 @@ async def test_removing_a_reviewed_arc_representation_preserves_canonical_entry(
                 actor.username,
                 ids,
                 (await preview_arc_deletion(db, arc_id, actor.id))["token"],
+                **selection,
             )
         job = await enqueue_reviewed_cleanup(
-            db, mgr, arc_id, actor.id, actor.username, ids, plan["token"]
+            db, mgr, arc_id, actor.id, actor.username, ids, plan["token"], **selection
         )
         await db.commit()
         assert path.exists() and (await preview_arc_deletion(db, arc_id, actor.id))["blocker"]
@@ -191,8 +241,10 @@ async def test_removing_a_reviewed_arc_representation_preserves_canonical_entry(
 
         async def after_one(*args, **kwargs):
             async with factory.begin() as changed:
-                if outcome == "cancel_after_file":
+                if outcome in {"cancel_after_file", "series_cancel"}:
                     await mgr.cancel_job(changed, jid)
+                elif outcome == "series_changed":
+                    changed.add(Issue(series_id=series.id, issue_number=2))
                 else:
                     changed.add(
                         IssueStoryArc(story_arc_id=arc_id, source_ordinal=9, sequence_number=9)
@@ -204,10 +256,60 @@ async def test_removing_a_reviewed_arc_representation_preserves_canonical_entry(
             await db.commit()
         elif outcome == "changed_target":
             path.write_bytes(b"different bytes, must keep")
-        elif outcome in {"cancel_after_file", "expanded_arc"}:
+        elif outcome == "series_failed_copy":
+            path.write_bytes(b"changed copy")
+        elif outcome == "series_peer":
+            db.add(
+                StoryArcPlacement(
+                    issue_story_arc=IssueStoryArc(
+                        story_arc=StoryArc(name="Other arc"),
+                        issue_id=issue.id,
+                        source_ordinal=1,
+                        sequence_number=1,
+                    ),
+                    library_file_id=fid,
+                    placement_path=str(tmp_path / "Other arc.cbz"),
+                    ownership="managed",
+                    mode="copy",
+                )
+            )
+            await db.commit()
+        elif outcome in {"cancel_after_file", "expanded_arc", "series_cancel", "series_changed"}:
             monkeypatch.setattr(StoryArcCleanupExecutor, "after_item_commit", after_one)
         await mgr.dispatch_next()
+        sid = series.id
         db.expire_all()
+        if series_scope or remove_original:
+            current_job = await db.get(UtilityJob, jid)
+            if outcome in {"series_peer", "series_failed_copy"}:
+                assert current_job.state == JobState.FAILED
+                assert path.exists() and canonical.read_bytes() == b"only canonical comic"
+                assert await db.get(Series, sid) and await db.get(StoryArc, arc_id)
+            elif outcome in {"series_cancel", "series_changed"}:
+                assert current_job.state == (
+                    JobState.CANCELLED if outcome == "series_cancel" else JobState.FAILED
+                )
+                assert await db.get(Series, sid) and await db.get(StoryArc, arc_id)
+                assert not path.exists() and canonical.read_bytes() == b"only canonical comic"
+            else:
+                assert current_job.state == JobState.COMPLETED, current_job.error_message
+                assert not await db.get(StoryArc, arc_id)
+                assert bool(await db.get(Series, sid)) != series_scope
+                assert path.exists() == (not ids) and not path.is_symlink()
+                assert canonical.exists() != remove_original
+                if series_scope and ids:
+                    audit = await db.scalar(
+                        select(AuditLog.metadata_json).where(
+                            AuditLog.event_type == AuditEventType.STORY_ARC_RECORD_DELETED
+                        )
+                    )
+                    counts = json.loads(audit)
+                    assert counts["removed_arc_files"] == 1
+                    assert counts.get("removed_series_files", 0) == int(remove_original)
+                if not remove_original:
+                    assert canonical.read_bytes() == b"only canonical comic"
+            assert other.read_bytes() == b"unselected"
+            return
         assert (
             canonical.read_bytes() == b"only canonical comic"
             and other.read_bytes() == b"unselected"

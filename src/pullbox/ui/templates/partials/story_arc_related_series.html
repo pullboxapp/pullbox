@@ -5,7 +5,7 @@
           :aria-expanded="expanded.toString()" aria-controls="arc-related-series">Review related series</button>
   <div id="arc-related-series" x-show="expanded" class="space-y-2">
     <p class="text-pb-text-sec">Removing a selected series deletes every issue record, including issues outside this reading order. Files stay on disk unless you separately select their paths.</p>
-    <p x-show="selectedMembers.length || selectedPaths.length">Clear your file selections to choose series records instead.</p>
+    <p x-show="selectedMembers.length">Clear your library comic selections to choose series records instead. You can select individual originals under each series.</p>
     <p x-show="selectedSeries.length >= 100">You can review up to 100 series at a time.</p>
     <ul class="space-y-3">
       <template x-for="series in records" :key="series.id">
@@ -13,7 +13,7 @@
           <label class="flex items-center gap-2">
             <input type="checkbox" :aria-label="'Remove series record: ' + series.title"
                    :checked="selectedSeries.includes(series.id)"
-                   :disabled="!!deletePhase || !deletePreview.token || !!selectedMembers.length || !!selectedPaths.length || (selectedSeries.length >= 100 && !selectedSeries.includes(series.id))"
+                   :disabled="!!deletePhase || !deletePreview.token || !!selectedMembers.length || (selectedSeries.length >= 100 && !selectedSeries.includes(series.id))"
                    @change="selectSeries(series.id, $event.target.checked)">
             <strong x-text="series.title"></strong> <span x-show="series.year" x-text="'(' + series.year + ')'"></span>
           </label>
@@ -31,7 +31,7 @@
                     <template x-if="book.ownership === 'managed' && book.root_enabled && book.root_writable && !book.import_linked">
                       <label class="flex items-center gap-2"><input type="checkbox" :aria-label="'Remove series file ' + book.path"
                              :checked="seriesFiles.some(x => x.file === book.id)"
-                             :disabled="!!deletePhase || (seriesFiles.length >= 1000 && !seriesFiles.some(x => x.file === book.id))"
+                             :disabled="!!deletePhase || (fileCount >= 1000 && !seriesFiles.some(x => x.file === book.id))"
                              @change="selectSeriesFile(series.id, book.id, $event.target.checked)">
                         <span x-text="'Remove file for #' + book.issue"></span></label>
                     </template>
