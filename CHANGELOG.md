@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Story Arc details now offer **Delete Story Arc** alongside Archive. Review the
   reading order that will be removed and the comics that will stay. Deleting the
   arc alone leaves your series, issues, other arcs, and all files untouched.
+- To clean up arc copies or links at the same time, choose **Review arc files**,
+  select individual paths, and review whether they will go to Trash or be
+  permanently removed. Follow progress in the Utilities queue. Cancelling keeps
+  the reading list and stops further removals; it does not undo completed ones.
 - The deletion preview lists the exact recorded paths for arc copies, links and
   references. Managed placement removal now protects paths that have become
   library files, destinations no longer approved for writes, and import-owned

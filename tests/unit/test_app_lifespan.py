@@ -360,6 +360,7 @@ async def test_lifespan_starts_background_services_and_shuts_down_cleanly(
             "mass_rename",
             "rollback",
             "series_rescan",
+            "story_arc_cleanup",
         }
         assert app_module.get_update_check_service() is _FakeUpdateCheckService.instances[-1]
 

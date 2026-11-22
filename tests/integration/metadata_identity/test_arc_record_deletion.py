@@ -1,4 +1,4 @@
-"""Record-only Story Arc deletion must preserve import evidence on both databases."""
+"""Story Arc deletion must preserve original comics and retry evidence on both databases."""
 
 import asyncio
 from datetime import UTC, datetime
@@ -16,11 +16,13 @@ from pullbox.models.series import Series
 from pullbox.models.story_arc import (
     IssueStoryArc,
     StoryArc,
+    StoryArcPlacement,
     StoryArcResolutionState,
     StoryArcSourceKind,
 )
 from pullbox.models.story_arc_import import ImportedStoryArc
 from pullbox.models.user import User
+from pullbox.services.story_arc_cleanup import enqueue_reviewed_cleanup, preview_cleanup
 from pullbox.services.story_arc_deletion import (
     delete_reviewed_arc,
     preview_arc_deletion,
@@ -31,13 +33,64 @@ from pullbox.services.story_arc_placement_integration import (
     StoryArcPlacementSyncService,
 )
 from pullbox.services.story_arc_service import StoryArcConflictError, StoryArcNotFoundError
+from pullbox.utilities.executors.story_arc_cleanup import StoryArcCleanupExecutor
+from pullbox.utilities.job_queue import JobQueueManager
+from pullbox.utilities.models import JobState, UtilityJob
 from tests.fixtures.metadata_identity_persistence import IdentityProbeDatabase
 
 
-@pytest.mark.parametrize("mode", ["copy", "hardlink", "symlink"])
-@pytest.mark.parametrize("trash_enabled", [False, True])
+async def test_failed_removal_receipt_survives_even_an_earlier_delete_confirmation(
+    identity_probe_db: IdentityProbeDatabase,
+) -> None:
+    _, factory, _ = identity_probe_db
+    async with factory.begin() as db:
+        actor = User(username="operator", password_hash="unused")
+        member = IssueStoryArc(
+            story_arc=StoryArc(name="Interrupted"), sequence_number=1, source_ordinal=1
+        )
+        entry = StoryArcPlacement(
+            issue_story_arc=member, placement_path="/arcs/001.cbz", ownership="managed", mode="copy"
+        )
+        db.add_all([actor, entry])
+        await db.flush()
+        arc_id, user_id, pid = member.story_arc_id, actor.id, entry.id
+        token = (await preview_arc_deletion(db, arc_id, user_id))["token"]
+        assert isinstance(token, str)
+    async with factory.begin() as db:
+        placement = await db.get(StoryArcPlacement, pid)
+        placement.last_result = {
+            "operation": "remove",
+            "status": "failed",
+            "trash_receipt": "receipt",
+            "trash_root": "/trash",
+        }
+    async with factory.begin() as db:
+        blocked = await preview_arc_deletion(db, arc_id, user_id)
+        assert blocked["token"] is None and "removal" in str(blocked["blocker"]).lower()
+        with pytest.raises(StoryArcConflictError, match="removal"):
+            await delete_reviewed_arc(db, arc_id, user_id, token)
+        assert (await db.get(StoryArcPlacement, pid)).last_result["trash_receipt"] == "receipt"
+
+
+@pytest.mark.parametrize(
+    ("mode", "trash_enabled", "outcome"),
+    [
+        (mode, trash, "success")
+        for mode in ("copy", "hardlink", "symlink")
+        for trash in (False, True)
+    ]
+    + [
+        ("copy", False, action)
+        for action in ("cancel_queued", "cancel_after_file", "changed_target", "expanded_arc")
+    ],
+)
 async def test_removing_a_reviewed_arc_representation_preserves_canonical_entry(
-    identity_probe_db: IdentityProbeDatabase, tmp_path: Path, mode: str, trash_enabled: bool
+    identity_probe_db: IdentityProbeDatabase,
+    tmp_path: Path,
+    mode: str,
+    trash_enabled: bool,
+    outcome: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, factory, _ = identity_probe_db
     canonical = tmp_path / "Comic.cbz"
@@ -100,24 +153,87 @@ async def test_removing_a_reviewed_arc_representation_preserves_canonical_entry(
                 mode=mode,
                 ownership="managed",
                 registered=False,
+                selectable=True,
+                interrupted=False,
             )
         ]
-        removed = await svc.remove_placement(
-            db, arc_id, result.placement.id, confirm_managed_artifact_removal=True
+        actor = User(username="reviewer", password_hash="unused")
+        other = tmp_path / "Externally managed.cbz"
+        other.write_bytes(b"unselected")
+        reference = StoryArcPlacement(issue_story_arc_id=mid, placement_path=str(other))
+        db.add(reference)
+        db.add(actor)
+        await db.commit()
+        ids = [result.placement.id]
+        with pytest.raises(StoryArcConflictError, match="proven managed"):
+            await preview_cleanup(db, arc_id, actor.id, [reference.id])
+        plan = await preview_cleanup(db, arc_id, actor.id, ids)
+        assert plan["paths"] == [str(path)] and plan["trash_enabled"] is trash_enabled
+        mgr = JobQueueManager(factory)
+        mgr.register_executor("story_arc_cleanup", StoryArcCleanupExecutor)
+        with pytest.raises(StoryArcConflictError, match="changed"):
+            await enqueue_reviewed_cleanup(
+                db,
+                mgr,
+                arc_id,
+                actor.id,
+                actor.username,
+                ids,
+                (await preview_arc_deletion(db, arc_id, actor.id))["token"],
+            )
+        job = await enqueue_reviewed_cleanup(
+            db, mgr, arc_id, actor.id, actor.username, ids, plan["token"]
         )
-        assert removed.artifact_removed and removed.canonical_preserved
-        if trash_enabled:
-            assert removed.trash_path is not None and removed.trash_path.is_relative_to(trash)
-            if mode == "symlink":
-                assert removed.trash_path.is_symlink()
+        await db.commit()
+        assert path.exists() and (await preview_arc_deletion(db, arc_id, actor.id))["blocker"]
+        jid = job.id
+        await db.commit()
+
+        async def after_one(*args, **kwargs):
+            async with factory.begin() as changed:
+                if outcome == "cancel_after_file":
+                    await mgr.cancel_job(changed, jid)
+                else:
+                    changed.add(
+                        IssueStoryArc(story_arc_id=arc_id, source_ordinal=9, sequence_number=9)
+                    )
+            return []
+
+        if outcome == "cancel_queued":
+            await mgr.cancel_job(db, jid)
+            await db.commit()
+        elif outcome == "changed_target":
+            path.write_bytes(b"different bytes, must keep")
+        elif outcome in {"cancel_after_file", "expanded_arc"}:
+            monkeypatch.setattr(StoryArcCleanupExecutor, "after_item_commit", after_one)
+        await mgr.dispatch_next()
+        db.expire_all()
+        assert (
+            canonical.read_bytes() == b"only canonical comic"
+            and other.read_bytes() == b"unselected"
+        )
+        if outcome != "success":
+            expected = JobState.CANCELLED if outcome.startswith("cancel") else JobState.FAILED
+            assert (await db.get(UtilityJob, jid)).state == expected
+            assert await db.get(StoryArc, arc_id)
+            if outcome == "cancel_queued":
+                assert path.read_bytes() == canonical.read_bytes()
+            elif outcome == "changed_target":
+                assert path.read_bytes() == b"different bytes, must keep"
             else:
-                assert removed.trash_path.read_bytes() == canonical.read_bytes()
-                assert not removed.trash_path.samefile(canonical)
-        else:
-            assert removed.trash_path is None
+                assert not path.exists()
+            return
+        assert (await db.get(UtilityJob, jid)).state == JobState.COMPLETED
+        assert await db.get(StoryArc, arc_id) is None
+        if trash_enabled:
+            [backup] = [p for p in trash.rglob("*") if not p.is_dir()]
+            if mode == "symlink":
+                assert backup.is_symlink()
+            else:
+                assert backup.read_bytes() == canonical.read_bytes()
+                assert not backup.samefile(canonical)
         assert not path.exists() and not path.is_symlink()
         assert await db.get(LibraryFile, fid)
-        assert (await review_arc_placement_paths(db, arc_id, 0))["items"] == []
     assert (
         canonical.read_bytes() == b"only canonical comic"
         and canonical.stat().st_ino == canonical_inode

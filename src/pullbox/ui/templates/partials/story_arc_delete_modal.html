@@ -11,7 +11,7 @@
         <div class="space-y-3">
           <p>Permanently remove this arc and
             <span x-text="deletePreview.entries + (deletePreview.entries === 1 ? ' reading-order entry' : ' reading-order entries')"></span>.
-            No files will be moved or deleted.</p>
+            <span x-show="!selectedPaths.length">No files will be moved or deleted.</span></p>
           <p class="text-pb-text-sec">Kept in your library:
             <span x-text="deletePreview.issues + (deletePreview.issues === 1 ? ' issue' : ' issues')"></span>,
             <span x-text="deletePreview.series + ' series'"></span>,
@@ -23,16 +23,21 @@
           <section x-show="deletePreview.placements" class="space-y-2">
             <p>Managed copies or links: <span x-text="deletePreview.managed_placements"></span>.
               References: <span x-text="deletePreview.referenced_placements"></span>.
-              Existing files stay in place without further arc synchronization.</p>
+              Unselected files stay in place without further arc synchronization.</p>
             <button type="button" class="btn-secondary btn-sm" @click="togglePaths()"
                     :aria-expanded="showPaths.toString()" aria-controls="arc-delete-paths">Review arc files</button>
             <div id="arc-delete-paths" x-show="showPaths" class="space-y-2">
               <p class="text-xs text-pb-text-sec">Recorded paths, not a scan of your disk.</p>
               <ul class="space-y-2">
                 <template x-for="item in pathItems" :key="item.id">
-                  <li><span class="block break-all font-mono text-xs" x-text="item.path"></span>
+                  <li><label class="flex items-start gap-2">
+                    <template x-if="item.selectable && deletePreview.cleanup_allowed">
+                      <input type="checkbox" :checked="selectedPaths.includes(item.id)" :disabled="!!deletePhase || (selectedPaths.length >= 1000 && !selectedPaths.includes(item.id))"
+                             @change="selectPath(item.id, $event.target.checked)" :aria-label="'Remove ' + item.path">
+                    </template>
+                    <span class="block break-all font-mono text-xs" x-text="item.path"></span></label>
                     <span class="text-xs text-pb-text-sec"
-                          x-text="item.registered ? 'Registered library file' : item.ownership === 'referenced' ? 'Referenced file' : 'Managed ' + item.mode"></span></li>
+                          x-text="item.interrupted ? 'Interrupted removal' : item.registered ? 'Registered library file' : item.ownership === 'referenced' ? 'Referenced file' : 'Managed ' + item.mode"></span></li>
                 </template>
               </ul>
               <p role="status" x-show="pathBusy">Loading arc files...</p>
@@ -45,6 +50,15 @@
               </nav>
             </div>
           </section>
+          <p x-show="selectedPaths.length" x-text="selectedPaths.length + ' selected for removal. Original library comics will stay in place.'"></p>
+          <p x-show="selectedPaths.length >= 1000">You can select up to 1,000 arc files. Unselected files stay on disk.</p>
+          <template x-if="cleanupReview">
+            <section class="space-y-2" aria-label="Selected removal paths" role="status">
+              <p x-text="cleanupReview.trash_enabled ? 'Selected arc files will go to Trash.' : 'Trash is off. Selected arc files will be permanently removed.'"></p>
+              <ul class="space-y-1"><template x-for="path in cleanupReview.paths" :key="path"><li class="break-all font-mono text-xs" x-text="path"></li></template></ul>
+              <p>The arc is deleted only after cleanup succeeds. Cancelling stops further work; it does not undo completed removals.</p>
+            </section>
+          </template>
           <p x-show="deletePreview.blocker" class="text-pb-warning" role="status" x-text="deletePreview.blocker"></p>
         </div>
       </template>
@@ -53,8 +67,8 @@
     </div>
     <footer class="modal-footer">
       <button x-ref="deleteCancel" type="button" class="btn-secondary" :disabled="deletePhase === 'deleting'" @click="closeDelete()">Cancel</button>
-      <button type="button" class="btn-danger" :disabled="!!deletePhase || !!deleteError || !deletePreview?.token" @click="confirmDelete()"
-              x-text="deletePhase === 'deleting' ? 'Deleting...' : 'Delete arc only'">Delete arc only</button>
+      <button type="button" class="btn-danger" :disabled="!!deletePhase || !!deleteError || (selectedPaths.length ? !deletePreview?.cleanup_allowed : !deletePreview?.token)" @click="confirmDelete()"
+              x-text="deletePhase === 'deleting' ? 'Submitting...' : deletePhase === 'reviewing' ? 'Reviewing...' : cleanupReview ? 'Delete arc and selected files' : selectedPaths.length ? 'Review selected files' : 'Delete arc only'">Delete arc only</button>
     </footer>
   </div>
 </dialog>

@@ -770,12 +770,14 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     from pullbox.utilities.executors.mass_rename import MassRenameExecutor
     from pullbox.utilities.executors.rollback_executor import RollbackExecutor
     from pullbox.utilities.executors.series_rescan import SeriesRescanExecutor
+    from pullbox.utilities.executors.story_arc_cleanup import StoryArcCleanupExecutor
     from pullbox.utilities.job_queue import JobQueueManager
     from pullbox.utilities.router import set_queue_manager
 
     queue_mgr = JobQueueManager(session_factory=get_session_factory())
     queue_mgr.register_executor("file_convert", FileConverterExecutor)
     queue_mgr.register_executor("file_metadata", FileMetadataExecutor)
+    queue_mgr.register_executor("story_arc_cleanup", StoryArcCleanupExecutor)
     queue_mgr.register_executor("mass_convert_pipeline", MassConvertPipelineExecutor)
     queue_mgr.register_executor("mass_rename", MassRenameExecutor)
     queue_mgr.register_executor("integrity_check", IntegrityCheckerExecutor)
@@ -785,7 +787,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     queue_mgr.register_executor("export_library", ExportLibraryExecutor)
     queue_mgr.register_executor("rollback", RollbackExecutor)
     set_queue_manager(queue_mgr)
-    logger.debug("utility_queue_manager_initialized", executor_count=8)
+    logger.debug("utility_queue_manager_initialized")
 
     utility_queue_task = asyncio.create_task(queue_mgr.recover_and_dispatch())
     _startup_background_tasks.add(utility_queue_task)

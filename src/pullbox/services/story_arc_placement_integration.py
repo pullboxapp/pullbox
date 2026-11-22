@@ -648,6 +648,8 @@ class StoryArcPlacementSyncService:
         *,
         confirm_managed_artifact_removal: bool = False,
         expected_trash_enabled: bool | None = None,
+        expected_trash_root: str | None = None,
+        cleanup_item_id: str | None = None,
         abandoned_published_operation_token: str | None = None,
         rollback_action_id: int | None = None,
     ) -> StoryArcPlacementRemovalView:
@@ -830,9 +832,10 @@ class StoryArcPlacementSyncService:
         trash_intent: dict[str, str] = {}
         if rollback_action_id is None:
             trash_root = await resolve_configured_utility_trash_dir(session)
-            if expected_trash_enabled is not None and expected_trash_enabled != (
-                trash_root is not None
-            ):
+            if (
+                expected_trash_enabled is not None
+                and expected_trash_enabled != (trash_root is not None)
+            ) or (expected_trash_root is not None and expected_trash_root != str(trash_root)):
                 raise StoryArcPlacementIntegrationError(
                     "trash_policy_changed",
                     "Trash settings changed. Review this removal again before confirming.",
@@ -971,6 +974,7 @@ class StoryArcPlacementSyncService:
             membership_id=membership_id,
             operation_token=operation_token,
             removal=removed,
+            cleanup_item_id=cleanup_item_id,
         )
         if caller_cancelled:
             raise asyncio.CancelledError
@@ -2903,6 +2907,7 @@ async def _delete_removed_placement_checkpoint(
     membership_id: int,
     operation_token: str,
     removal: StoryArcPlacementRemovalResult,
+    cleanup_item_id: str | None = None,
 ) -> None:
     """Atomically forget ownership only after the managed artifact is absent."""
     result = await session.execute(
@@ -2927,6 +2932,7 @@ async def _delete_removed_placement_checkpoint(
             last_materialization_result={
                 "schema_version": 1,
                 "status": "placement_removed",
+                **({"cleanup_item_id": cleanup_item_id} if cleanup_item_id else {}),
                 "placement_id": placement_id,
                 "artifact_removed": removal.removed,
                 **(

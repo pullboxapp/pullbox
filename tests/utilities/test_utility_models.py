@@ -428,8 +428,8 @@ class TestEnums:
         assert JobType.ROLLBACK == "rollback"
         assert JobType.SERIES_RESCAN == "series_rescan"
         assert JobType.FILE_METADATA == "file_metadata"
-        assert len(JobType) == 10
-        assert JobType.SERIES_RESCAN == "series_rescan"
+        assert JobType.STORY_ARC_CLEANUP == "story_arc_cleanup"
+        assert len(JobType) == 11
 
     def test_job_state_values(self) -> None:
         assert JobState.QUEUED == "QUEUED"

@@ -32,6 +32,7 @@ def utility_job_mutates_library(job_type: str, config: dict[str, Any]) -> bool:
         JobType.MASS_RENAME.value,
         JobType.ROLLBACK.value,
         JobType.FILE_METADATA.value,
+        JobType.STORY_ARC_CLEANUP.value,
     }:
         return True
 

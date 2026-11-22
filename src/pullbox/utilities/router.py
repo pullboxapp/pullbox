@@ -193,6 +193,8 @@ async def create_job(
 ) -> JobResponse:
     """Submit a new utility job to the queue."""
     valid_types = {t.value for t in JobType}
+    if body.job_type == JobType.STORY_ARC_CLEANUP:
+        raise ValidationError("Review and confirm selected files on the Story Arc page.")
     if body.job_type not in valid_types:
         raise ValidationError(
             f"Invalid job_type: {body.job_type}. Valid types: {', '.join(sorted(valid_types))}"

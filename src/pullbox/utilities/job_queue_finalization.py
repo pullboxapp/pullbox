@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING, Any
 from pullbox.utilities.job_queue_completion import build_completion_decision, merge_finalize_result
 from pullbox.utilities.job_queue_runtime_logs import persist_runtime_log_entries
 from pullbox.utilities.job_queue_runtime_state import apply_job_counter_snapshot
-from pullbox.utilities.job_queue_state import job_duration_seconds
-from pullbox.utilities.models import JobState, UtilityJob
+from pullbox.utilities.job_queue_state import job_duration_seconds, lock_cleanup_control
+from pullbox.utilities.models import JobState, JobType, UtilityJob
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -61,6 +61,8 @@ async def finalize_dispatch_job(
     job = await session.get(UtilityJob, job_id)
     if job is None:
         return DispatchFinalizationResult(status="missing")
+    if job_type == JobType.STORY_ARC_CLEANUP:
+        await lock_cleanup_control(session, job)
 
     utility_log_level = await get_utility_log_level(session)
     summary.metadata["utility_log_level"] = utility_log_level

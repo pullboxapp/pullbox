@@ -194,6 +194,12 @@ async def test_create_job_validation_and_success(
             _user(),
             db_session,
         )
+    with pytest.raises(ValidationError, match="Review and confirm"):
+        await utilities_router.create_job(
+            JobCreateRequest(job_type=JobType.STORY_ARC_CLEANUP, display_name="Unreviewed cleanup"),
+            _user(),
+            db_session,
+        )
 
     manager = _Manager(executor=_Executor(["missing target"]))
     utilities_router.set_queue_manager(manager)  # type: ignore[arg-type]

@@ -5,7 +5,17 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from pullbox.utilities.models import JobState
+from sqlalchemy import false, update
+
+from pullbox.utilities.models import JobState, UtilityJob
+
+
+async def lock_cleanup_control(session: Any, job: UtilityJob) -> None:
+    """Serialize a pause/cancel against the irreversible last step of arc cleanup."""
+    if session.get_bind().dialect.name == "sqlite":
+        await session.execute(update(UtilityJob).where(false()).values(state=UtilityJob.state))
+    await session.refresh(job, with_for_update=True)
+
 
 VALID_TRANSITIONS: dict[JobState, set[JobState]] = {
     JobState.QUEUED: {JobState.RUNNING, JobState.CANCELLING, JobState.FAILED},

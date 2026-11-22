@@ -54,6 +54,7 @@ from pullbox.utilities.job_queue_state import (
 )
 from pullbox.utilities.job_queue_state import (
     VALID_TRANSITIONS,
+    lock_cleanup_control,
     transition_job_state,
 )
 from pullbox.utilities.job_queue_worker_runtime import build_worker_runtime
@@ -140,6 +141,8 @@ class JobQueueManager:
         """Create a queued rollback child job for ``job``."""
         if job.job_type == JobType.SERIES_RESCAN:
             raise ValueError("Rescans do not support rollback; source files were not changed.")
+        if job.job_type == JobType.STORY_ARC_CLEANUP:
+            raise ValueError("Story Arc deletion does not support utility rollback.")
         if job.job_type == JobType.FILE_METADATA:
             raise ValueError(
                 "Metadata writes do not support utility rollback. "
@@ -537,6 +540,8 @@ class JobQueueManager:
         job = await session.get(UtilityJob, job_id)
         if job is None:
             raise ValueError(f"Job not found: {job_id}")
+        if job.job_type == JobType.STORY_ARC_CLEANUP:
+            await lock_cleanup_control(session, job)
         self.transition(job, JobState.PAUSING)
         await session.flush()
         await project_utility_operation_progress(session, job)
@@ -585,6 +590,8 @@ class JobQueueManager:
         if job is None:
             raise ValueError(f"Job not found: {job_id}")
 
+        if job.job_type == JobType.STORY_ARC_CLEANUP:
+            await lock_cleanup_control(session, job)
         current = JobState(job.state)
         if current in {JobState.CANCELLING, JobState.CANCELLED}:
             # Retrying the same request must neither restart work nor duplicate rollback.

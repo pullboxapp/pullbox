@@ -3,6 +3,7 @@ function storyArcDetail() {
     coverModalOpen: false, coverModalUrl: '', reordering: false, reorderError: '',
     deletePreview: null, deletePhase: '', deleteError: '', deleteUrl: '', deleteGeneration: 0,
     showPaths: false, pathItems: [], pathCursors: [0], pathNext: null, pathBusy: false, pathError: '', pathRetry: [0],
+    selectedPaths: [], cleanupReview: null,
     reviewDelete(arcId) {
       if (this.$refs.deleteDialog.open) return;
       this.deleteUrl = '/story-arcs/' + Number(arcId) + '/delete';
@@ -22,6 +23,8 @@ function storyArcDetail() {
       this.deleteError = '';
       this.deletePhase = 'loading';
       this.showPaths = false;
+      this.selectedPaths = [];
+      this.cleanupReview = null;
       this.pathBusy = false;
       this.pathItems = [];
       this.pathCursors = [0];
@@ -62,7 +65,39 @@ function storyArcDetail() {
         if (generation === this.deleteGeneration) this.pathBusy = false;
       }
     },
+    selectPath(id, selected) {
+      this.cleanupReview = null;
+      this.selectedPaths = selected ? [...this.selectedPaths, id] : this.selectedPaths.filter(x => x !== id);
+    },
+    async confirmCleanup() {
+      if (this.deletePhase || this.deleteError || !this.selectedPaths.length) return;
+      const confirm = !!this.cleanupReview;
+      const generation = this.deleteGeneration;
+      this.deletePhase = confirm ? 'deleting' : 'reviewing';
+      try {
+        const response = await fetch(this.deleteUrl + (confirm ? '/cleanup' : '/cleanup/preview'), {
+          method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': readCsrfTokenFromBody()},
+          body: JSON.stringify({ids: this.selectedPaths, ...(confirm ? {token: this.cleanupReview.token} : {})}),
+        });
+        const result = await response.json();
+        if (generation !== this.deleteGeneration) return;
+        if (!response.ok) throw new Error(typeof result.detail === 'string' ? result.detail : 'Review the selected files again.');
+        if (confirm && result.job_id) window.location.assign('/utilities?tab=queue');
+        else if (!confirm && result.token) {
+          for (const key of ['name', 'entries', 'issues', 'series', 'files', 'shared_issues', 'placements', 'managed_placements', 'referenced_placements']) {
+            if (this.deletePreview[key] !== result.impact[key]) throw new Error('The arc changed. Refresh the preview before selecting files again.');
+          }
+          this.cleanupReview = result;
+        }
+        else throw new Error('Pullbox could not confirm the request. Refresh the preview.');
+      } catch (error) {
+        if (generation === this.deleteGeneration) this.deleteError = error.message;
+      } finally {
+        if (generation === this.deleteGeneration) this.deletePhase = '';
+      }
+    },
     async confirmDelete() {
+      if (this.selectedPaths.length) return this.confirmCleanup();
       if (this.deletePhase || !this.deletePreview?.token || this.deleteError) return;
       this.deletePhase = 'deleting';
       try {

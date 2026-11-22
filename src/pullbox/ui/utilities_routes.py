@@ -415,7 +415,13 @@ async def load_utility_history_context(
         _utility_job_payload(
             job,
             can_rollback=(
-                job.job_type not in {JobType.ROLLBACK, JobType.SERIES_RESCAN, JobType.FILE_METADATA}
+                job.job_type
+                not in {
+                    JobType.ROLLBACK,
+                    JobType.SERIES_RESCAN,
+                    JobType.FILE_METADATA,
+                    JobType.STORY_ARC_CLEANUP,
+                }
                 and job.state in (JobState.COMPLETED, JobState.CANCELLED)
                 and job.id not in blocked_rollback_parent_ids
             ),

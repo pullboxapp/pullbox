@@ -25,9 +25,16 @@ from pullbox.models.story_arc import (
 from pullbox.models.story_arc_import import ImportedStoryArc
 from pullbox.models.story_arc_sync import StoryArcSyncWork, StoryArcSyncWorkState
 from pullbox.services.story_arc_service import StoryArcConflictError, StoryArcNotFoundError
+from pullbox.utilities.models import JobState, UtilityJob
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+
+
+_RECEIPT_BLOCKER = (
+    "An arc file removal has an unfinished Trash receipt. Review arc files and "
+    "select the interrupted removal before deleting this arc."
+)
 
 
 @dataclass(frozen=True)
@@ -49,7 +56,13 @@ def _signer() -> URLSafeTimedSerializer:
 
 
 async def _snapshot(
-    db: AsyncSession, arc_id: int, user_id: int, *, lock: bool
+    db: AsyncSession,
+    arc_id: int,
+    user_id: int,
+    *,
+    lock: bool,
+    omit: frozenset[int] = frozenset(),
+    cleanup_job: str | None = None,
 ) -> tuple[ArcDeleteReview, str]:
     sqlite = db.get_bind().dialect.name == "sqlite"
     if lock and sqlite:
@@ -80,6 +93,7 @@ async def _snapshot(
             StoryArcPlacement.creating_action_id,
             StoryArcPlacement.operation_token,
             StoryArcPlacement.source_import_job_id,
+            StoryArcPlacement.last_result["trash_receipt"].as_string().label("receipt"),
         )
         .where(StoryArcPlacement.issue_story_arc_id.in_(member_ids))
         .order_by(StoryArcPlacement.id)
@@ -113,8 +127,28 @@ async def _snapshot(
         .limit(1)
     )
     marker = (arc.diagnostics or {}).get("catalog_initial_placements")
+    pending = (arc.diagnostics or {}).get("reviewed_cleanup")
     blocker = None
     if (
+        pending
+        and pending != cleanup_job
+        and await db.scalar(
+            select(UtilityJob.id).where(
+                UtilityJob.id == pending,
+                UtilityJob.state.in_(
+                    [
+                        JobState.QUEUED,
+                        JobState.RUNNING,
+                        JobState.CANCELLING,
+                        JobState.PAUSING,
+                        JobState.PAUSED,
+                    ]
+                ),
+            )
+        )
+    ):
+        blocker = "Arc cleanup is queued or running. Check its progress in Utilities."
+    elif (
         arc.source_import_job_id is not None
         or import_binding is not None
         or any(p.creating_action_id or p.source_import_job_id for p in placements)
@@ -138,8 +172,11 @@ async def _snapshot(
         or (isinstance(marker, dict) and marker.get("state") == "pending")
     ):
         blocker = "Arc file work is unfinished. Finish or recover it, then review deletion again."
+    elif any(p.receipt for p in placements if p.id not in omit):
+        blocker = _RECEIPT_BLOCKER
     elif sqlite and not await db.scalar(text("PRAGMA foreign_keys")):
         blocker = "SQLite foreign key enforcement is off. Restore it before deleting an arc."
+    placements = [p for p in placements if p.id not in omit]
     managed_count = sum(p.ownership == StoryArcPlacementOwnership.MANAGED for p in placements)
     review = ArcDeleteReview(
         arc.name,
@@ -186,7 +223,11 @@ async def _retained_library_counts(db: AsyncSession, arc_id: int) -> tuple[int, 
 
 async def preview_arc_deletion(db: AsyncSession, arc_id: int, user_id: int) -> dict[str, object]:
     review, binding = await _snapshot(db, arc_id, user_id, lock=False)
-    return {**asdict(review), "token": None if review.blocker else _signer().dumps(binding)}
+    return {
+        **asdict(review),
+        "cleanup_allowed": review.blocker in (None, _RECEIPT_BLOCKER),
+        "token": None if review.blocker else _signer().dumps(binding),
+    }
 
 
 async def review_arc_placement_paths(
@@ -204,6 +245,10 @@ async def review_arc_placement_paths(
                 StoryArcPlacement.mode,
                 StoryArcPlacement.ownership,
                 LibraryFile.id.is_not(None).label("registered"),
+                StoryArcPlacement.source_fingerprint,
+                StoryArcPlacement.last_result,
+                StoryArcPlacement.source_import_job_id,
+                StoryArcPlacement.creating_action_id,
             )
             .join(IssueStoryArc, IssueStoryArc.id == StoryArcPlacement.issue_story_arc_id)
             .outerjoin(LibraryFile, LibraryFile.file_path == StoryArcPlacement.placement_path)
@@ -219,6 +264,15 @@ async def review_arc_placement_paths(
             "mode": row.mode.value,
             "ownership": row.ownership.value,
             "registered": row.registered,
+            "selectable": bool(
+                row.ownership == StoryArcPlacementOwnership.MANAGED
+                and not row.registered
+                and not row.source_import_job_id
+                and not row.creating_action_id
+                and row.source_fingerprint
+                and (row.last_result or {}).get("target_fingerprint")
+            ),
+            "interrupted": bool((row.last_result or {}).get("trash_receipt")),
         }
         for row in rows[:page_size]
     ]
@@ -237,6 +291,17 @@ async def delete_reviewed_arc(db: AsyncSession, arc_id: int, user_id: int, token
         ) from exc
     if expected != binding:
         raise StoryArcConflictError("This arc changed after the preview. Review deletion again.")
+    await _delete_arc_record(db, arc_id, user_id, review)
+
+
+async def _delete_arc_record(
+    db: AsyncSession,
+    arc_id: int,
+    user_id: int,
+    review: ArcDeleteReview,
+    *,
+    job_id: str | None = None,
+) -> None:
     # Delete only the parent. FK cascades release the arc's own rows, never
     # canonical issues or files. The audit commits in the same transaction.
     await db.execute(delete(StoryArc).where(StoryArc.id == arc_id))
@@ -244,8 +309,12 @@ async def delete_reviewed_arc(db: AsyncSession, arc_id: int, user_id: int, token
         AuditLog(
             event_type=AuditEventType.STORY_ARC_RECORD_DELETED,
             user_id=user_id,
-            detail="Deleted the Story Arc record only; no files removed.",
-            metadata_json=json.dumps({"story_arc_id": arc_id, **asdict(review)}),
+            detail="Deleted the Story Arc record after reviewed arc file cleanup."
+            if job_id
+            else "Deleted the Story Arc record only; no files removed.",
+            metadata_json=json.dumps(
+                {"story_arc_id": arc_id, **asdict(review), **({"job_id": job_id} if job_id else {})}
+            ),
         )
     )
     await db.flush()

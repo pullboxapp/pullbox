@@ -36,6 +36,7 @@ from pullbox.models.story_arc import (
 )
 from pullbox.services.issue_file_service import resolve_configured_utility_trash_dir
 from pullbox.services.reader_arc_bookmarks import load_arc_read_action
+from pullbox.services.story_arc_cleanup import enqueue_reviewed_cleanup, preview_cleanup
 from pullbox.services.story_arc_deletion import (
     delete_reviewed_arc,
     preview_arc_deletion,
@@ -1248,6 +1249,51 @@ async def story_arc_archive(
 class _DeleteArcConfirmation(BaseModel):
     model_config = ConfigDict(extra="forbid")
     token: str = Field(min_length=1, max_length=512)
+
+
+class _ArcFileSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ids: list[Annotated[int, Field(strict=True, gt=0, le=9223372036854775807)]] = Field(
+        min_length=1, max_length=1000
+    )
+
+
+class _ConfirmArcFiles(_ArcFileSelection):
+    token: str = Field(min_length=1, max_length=512)
+
+
+@router.post("/story-arcs/{story_arc_id}/delete/cleanup/preview", include_in_schema=False)
+async def preview_selected_arc_files(
+    story_arc_id: int, body: _ArcFileSelection, user: InteractiveOperatorUser, session: DbSession
+) -> Response:
+    try:
+        plan = await preview_cleanup(session, story_arc_id, user.id, body.ids)
+    except StoryArcNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except StoryArcConflictError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return JSONResponse(plan, headers={"Cache-Control": "no-store"})
+
+
+@router.post("/story-arcs/{story_arc_id}/delete/cleanup", include_in_schema=False)
+async def confirm_selected_arc_files(
+    story_arc_id: int, body: _ConfirmArcFiles, user: InteractiveOperatorUser, session: DbSession
+) -> Response:
+    from pullbox.utilities.router import _get_manager, _schedule_dispatch
+
+    manager = _get_manager()
+    try:
+        job = await enqueue_reviewed_cleanup(
+            session, manager, story_arc_id, user.id, user.username, body.ids, body.token
+        )
+        job_id = job.id
+        await session.commit()
+    except StoryArcNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except (StoryArcConflictError, ValidationError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    _schedule_dispatch(manager)
+    return JSONResponse({"job_id": job_id}, status_code=202, headers={"Cache-Control": "no-store"})
 
 
 @router.get("/story-arcs/{story_arc_id}/delete/preview", include_in_schema=False)

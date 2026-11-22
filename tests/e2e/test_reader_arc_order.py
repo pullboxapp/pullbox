@@ -526,6 +526,74 @@ def test_review_arc_file_paths_before_deleting_or_cancelling(
     expect(opener).to_be_focused()
 
 
+def test_delete_arc_with_an_explicitly_selected_copy(
+    authed_page: Page,
+    seeded_server: str,
+    arc_reader: int,
+    tmp_path: Path,
+) -> None:
+    from pullbox.services.story_arc_placement_integration import (
+        StoryArcPlacementPolicyInput,
+        StoryArcPlacementSyncService,
+    )
+
+    async def setup_copy() -> Path:
+        dest = tmp_path / "Arc copies"
+        dest.mkdir()
+        async with get_session_factory()() as db:
+            svc = StoryArcPlacementSyncService()
+            arc = await db.get(StoryArc, arc_reader)
+            root = await db.scalar(select(LibraryRoot).where(LibraryRoot.path == str(tmp_path)))
+            member = await db.scalar(
+                select(IssueStoryArc.id).where(
+                    IssueStoryArc.story_arc_id == arc_reader, IssueStoryArc.sequence_number == 2
+                )
+            )
+            await svc.update_policy(
+                db,
+                arc_reader,
+                expected_revision=arc.revision,
+                proposal=StoryArcPlacementPolicyInput(
+                    mode="copy", target_library_root_id=root.id, destination_root=str(dest)
+                ),
+            )
+            result = await svc.sync_membership(db, arc_reader, member)
+            return Path(result.placement.placement_path)
+
+    copy = _run_async_blocking(setup_copy())
+    canonical = tmp_path / "Batman Beyond 091.cbz"
+    original = canonical.read_bytes()
+    page = authed_page
+    page.goto(f"{seeded_server}/story-arcs/{arc_reader}")
+    opener = page.get_by_role("button", name="Delete Story Arc", exact=True)
+    opener.click()
+    dialog = page.get_by_role("dialog")
+    dialog.get_by_role("button", name="Review arc files").click()
+    box = dialog.get_by_role("checkbox", name=f"Remove {copy}", exact=True)
+    expect(box).not_to_be_checked()
+    box.check()
+    dialog.get_by_role("button", name="Review selected files").click()
+    confirm = dialog.get_by_role("button", name="Delete arc and selected files")
+    expect(confirm).to_be_visible()
+    expect(dialog.get_by_role("status").filter(has_text="Selected arc files")).to_contain_text(
+        str(copy)
+    )
+    assert copy.read_bytes() == original
+    box.uncheck()
+    expect(confirm).to_have_count(0)
+    box.check()
+    dialog.get_by_role("button", name="Review selected files").click()
+    confirm.click()
+    expect(page).to_have_url(re.compile(r"/utilities\?tab=queue$"))
+    import time
+
+    for _ in range(100):
+        if not copy.exists():
+            break
+        time.sleep(0.05)
+    assert not copy.exists() and canonical.read_bytes() == original
+
+
 @pytest.mark.parametrize("change", ["arc", "membership"])
 def test_lost_arc_context_keeps_page_and_explicitly_recovers_series_order(
     authed_page: Page,
