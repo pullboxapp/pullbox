@@ -1,5 +1,6 @@
 """An attested stage and the still-stopped source must describe the same capture."""
 
+import asyncio
 import hashlib
 import json
 import os
@@ -16,7 +17,7 @@ from sqlalchemy.engine import make_url
 
 from tests.integration import test_postgres_stage_review as review
 from tests.integration import test_postgres_transfer_stage as stages
-from tests.integration.test_postgres_first_start import docker
+from tests.integration.test_postgres_first_start import _NAVIGATE, docker
 from tests.integration.test_sqlite_source_snapshot import inspect
 
 backup = stages.backup
@@ -61,8 +62,11 @@ def cluster(request):
         yield instance
 
 
+@pytest.mark.parametrize(
+    "start", [None, "activate", "restart"], ids=["check", "activate", "restart"]
+)
 async def test_recheck_original_source_and_reviewed_target(
-    cluster, populated, tmp_path, monkeypatch
+    cluster, populated, tmp_path, monkeypatch, start
 ):
     image = os.environ.get("PULLBOX_TEST_SQLITE_SNAPSHOT_IMAGE")
     if not image:
@@ -217,6 +221,195 @@ async def test_recheck_original_source_and_reviewed_target(
         )
         assert approval.stat().st_mode & 0o777 == 0o600
         assert key not in approval.read_text() and token.read_text() not in approval.read_text()
+
+        if start:
+            app = name + "-first-start"
+            inside = make_url(url).set(port=5432).render_as_string(hide_password=False)
+            shared = xml and start == "activate"
+            copied = comics if shared else tmp_path / "new-library"
+            if not shared:
+                shutil.copytree(comics, copied)
+            packages = docker(
+                "run",
+                "--rm",
+                "--network=none",
+                "--pull=never",
+                "--entrypoint=python",
+                image,
+                "-c",
+                "import os;print(os.getenv('PYTHONPATH',''))",
+                check=True,
+            ).stdout.strip()
+            process = await asyncio.create_subprocess_exec(
+                "docker",
+                "run",
+                "--name",
+                app,
+                "-i",
+                "--pull=never",
+                "--network",
+                f"container:{postgres}",
+                "--user",
+                f"{os.getuid()}:{os.getgid()}",
+                "--cap-drop=ALL",
+                "--tmpfs",
+                f"/data:uid={os.getuid()},gid={os.getgid()},mode=0700",
+                "--mount",
+                f"type=bind,src={stages.ROOT / 'src'},dst=/candidate/src,readonly",
+                "--mount",
+                f"type=bind,src={stages.ROOT / 'alembic'},dst=/app/alembic,readonly",
+                "--mount",
+                f"type=bind,src={copied},dst=/comics",
+                "--mount",
+                f"type=bind,src={token},dst=/run/token,readonly",
+                "--mount",
+                f"type=bind,src={approval},dst=/run/approval,readonly",
+                "--mount",
+                f"type=bind,src={recovered},dst=/run/backup.db,readonly",
+                "-e",
+                f"PYTHONPATH=/candidate/src:{packages}",
+                "-e",
+                "PULLBOX_SECRET_KEY",
+                "-e",
+                "PULLBOX_DB_URL",
+                "--entrypoint=python",
+                image,
+                "-Bm",
+                "pullbox.cli",
+                "migration-start",
+                "--token-file",
+                "/run/token",
+                "--approval-file",
+                "/run/approval",
+                "--restored-backup",
+                "/run/backup.db",
+                "--snapshot-sha256",
+                captured_source.snapshot,
+                env={**os.environ, "PULLBOX_DB_URL": inside, "PULLBOX_SECRET_KEY": key},
+                stdin=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+            )
+            try:
+                line = (await asyncio.wait_for(process.stdout.readline(), 70)).decode()
+                assert "First-start challenge: " in line, line
+                initial = docker("logs", app, check=True)
+                assert "[ready] Scheduler: active" not in initial.stdout + initial.stderr
+                assert stages.state(sql, db) == original_stage
+                challenge = line.split()[-1]
+                args = (name, captured_source, scratch, url, token, challenge)
+                assert not (await host.authorize_start(*args, lambda _: False))[1]
+                if start == "restart":
+                    # A restart after issuing approval invalidates the live grant.
+                    docker("start", "--attach", name, check=True)
+                    errors, response = await host.authorize_start(*args, lambda _: True)
+                    assert "checkpoint_changed" in errors and response is None
+                    docker("stop", "-t", "1", app, check=True)
+                    await asyncio.wait_for(process.wait(), 20)
+                    assert stages.state(sql, db) == original_stage
+                    return
+                if shared:
+                    errors, response = await host.authorize_start(*args, lambda _: True)
+                    assert "other_writable_container" in errors and not response
+                    peer = name + "-unrelated-writer"
+                    try:
+                        docker(
+                            "run",
+                            "-d",
+                            "--name",
+                            peer,
+                            "--network=none",
+                            "--pull=never",
+                            "--mount",
+                            f"type=bind,src={comics},dst=/unrelated",
+                            "--entrypoint=python",
+                            image,
+                            "-c",
+                            "import time;time.sleep(90)",
+                            check=True,
+                        )
+                        errors, response = await host.authorize_start(
+                            *args, lambda _: True, candidate=app
+                        )
+                        assert "other_writable_container" in errors and not response
+                        errors, response = await host.authorize_start(
+                            *args, lambda _: True, candidate=peer
+                        )
+                        assert "candidate_not_waiting" in errors and not response
+                    finally:
+                        docker("rm", "-fv", peer)
+                    errors, response = await host.authorize_start(
+                        *args, lambda _: True, candidate=app
+                    )
+                else:
+                    errors, response = await host.authorize_start(*args, lambda _: True)
+                assert response and not errors, errors
+                result = await asyncio.to_thread(
+                    docker,
+                    "exec",
+                    "-i",
+                    app,
+                    "python",
+                    "-",
+                    str(server[0]),
+                    input=_NAVIGATE.replace("Private title", "first confidential title"),
+                )
+                if result.returncode:
+                    logs = docker("logs", app)
+                    safe = (
+                        (logs.stderr + logs.stdout)
+                        .replace(server[1], "[redacted]")
+                        .replace(key, "[redacted]")
+                    )
+                    pytest.fail(result.stderr + safe[-3000:])
+                assert stages.state(sql, db) == "true:"
+                started = docker("logs", app, check=True)
+                assert "[ready] Scheduler: active" in started.stdout + started.stderr
+                assert sql(db, "SELECT status FROM issues WHERE id=83") == "OWNED"
+                assert sql(db, "SELECT status FROM import_files WHERE id=2") == "FAILED"
+                if not shared:
+                    assert inspect(name, "--compare-checkpoint", checkpoint)["checkpoint_matched"]
+                assert hashlib.sha256(snapshot.read_bytes()).hexdigest() == captured_source.snapshot
+                # A native backup of the now-live original stage must be usable without its
+                # first-start secrets and must retain writes made after SQLite was frozen.
+                docker("stop", "-t", "12", app, check=True)
+                sql(db, "UPDATE story_arcs SET name='post-cutover change' WHERE id=55")
+                restored, restore_url, _ = stages.target(server)
+                commands = ["docker", "exec", "-i", postgres]
+                with (tmp_path / "after-start.dump").open("w+b") as dump:
+                    subprocess.run(
+                        [*commands, "pg_dump", "-Fc", "-U", "probe_owner", "-d", db],
+                        stdout=dump,
+                        check=True,
+                        timeout=60,
+                    )
+                    dump.seek(0)
+                    subprocess.run(
+                        [
+                            *commands,
+                            "pg_restore",
+                            "--single-transaction",
+                            "--exit-on-error",
+                            "--no-owner",
+                            "--no-acl",
+                            "-U",
+                            "probe_owner",
+                            "-d",
+                            restored,
+                        ],
+                        stdin=dump,
+                        check=True,
+                        timeout=60,
+                    )
+                stages.targets._migrate(restore_url, "upgrade", "head")
+                assert (
+                    sql(restored, "SELECT name FROM story_arcs WHERE id=55")
+                    == "post-cutover change"
+                )
+            finally:
+                docker("rm", "-fv", app)
+                await asyncio.wait_for(process.wait(), 20)
+            return
 
         def deployment(secret, media, *, readonly=True):
             inside = make_url(url).set(port=5432).render_as_string(hide_password=False)

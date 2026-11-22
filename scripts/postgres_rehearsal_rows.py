@@ -2,147 +2,21 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
-import math
-import re
-from dataclasses import dataclass
-from datetime import UTC, date, datetime
-
 from pullbox.models import Base
 from pullbox.services.database_migration_preflight import SOURCE_REVISION
+from pullbox.services.migration_row_comparison import (
+    RehearsalError,
+    _q,
+    _verify_table,
+    table_snapshot,
+)
 
-_BATCH = 128
-_BUFFER_BYTES = 2 * 1024 * 1024
 STAGE_CLOSED_SQL = (
     "SELECT NOT datallowconn AND pg_catalog.shobj_description(oid,'pg_database')="
     "'pullbox:offline-stage:incomplete' AND NOT EXISTS(SELECT FROM pg_catalog.pg_stat_activity "
     "WHERE datid=d.oid AND pid<>pg_catalog.pg_backend_pid()) "
     "FROM pg_catalog.pg_database d WHERE datname=pg_catalog.current_database()"
 )
-
-
-class RehearsalError(Exception):
-    """Only static diagnostics and known schema identifiers may cross this boundary."""
-
-
-def _q(name):
-    return '"' + name.replace('"', '""') + '"'
-
-
-def _value(value, kind):
-    if value is None:
-        return None
-    if kind == "boolean" and type(value) is int and value in (0, 1):
-        return bool(value)
-    if kind in {"integer", "smallint", "bigint"} and type(value) is int:
-        return value
-    if kind == "double precision" and type(value) in (int, float):
-        converted = float(value)
-        if math.isfinite(converted) and converted == value:
-            return converted
-    if type(value) is str:
-        if kind in {"character varying", "text", "USER-DEFINED", "json"}:
-            # asyncpg's JSON codec expects text. Preserve JSON null separately from SQL NULL.
-            return value
-        if kind == "date":
-            return date.fromisoformat(value)
-        if kind in {"timestamp with time zone", "timestamp without time zone"}:
-            if not re.fullmatch(
-                r"\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d(?:\.\d{1,6}0*)?(?:Z|[+-]\d\d:\d\d)?", value
-            ):
-                raise ValueError("unrepresentable timestamp")
-            stamp = datetime.fromisoformat(value)
-            if kind == "timestamp with time zone":
-                return stamp.replace(tzinfo=UTC) if stamp.tzinfo is None else stamp.astimezone(UTC)
-            if stamp.tzinfo is None:
-                return stamp
-    raise ValueError("unrepresentable value")
-
-
-def _hash_row(digest, row):
-    encoded = json.dumps(
-        list(row),
-        ensure_ascii=False,
-        default=_encode_temporal,
-        allow_nan=False,
-        separators=(",", ":"),
-    ).encode()
-    digest.update(len(encoded).to_bytes(8, "big"))
-    digest.update(encoded)
-    return len(encoded)
-
-
-def _encode_temporal(value):
-    if isinstance(value, datetime) and value.tzinfo is not None:
-        value = value.astimezone(UTC)
-    if isinstance(value, date):
-        return value.isoformat()
-    raise TypeError("unsupported comparison type")
-
-
-async def _copy_table(db, pg, name, columns, expected_count):
-    sqlite_cols = db.execute(
-        "SELECT name,pk FROM pragma_table_info(?) ORDER BY cid", (name,)
-    ).fetchall()
-    cols = [col for col, _ in sqlite_cols]
-    pk = [col for col, pos in sorted(sqlite_cols, key=lambda item: item[1]) if pos]
-    if not pk or set(cols) != set(columns):
-        raise RehearsalError("column_layout:" + name)
-    qualified = "public." + _q(name)
-    keys = ",".join(map(_q, cols))
-    sqlite_order = ",".join(_q(c) + " COLLATE BINARY" for c in pk)
-    pg_order = ",".join(
-        _q(c) + (' COLLATE "C"' if columns[c] in {"character varying", "text"} else "") for c in pk
-    )
-    source = db.execute(f"SELECT {keys} FROM {_q(name)} ORDER BY {sqlite_order}")
-    left = hashlib.sha256()
-    count, buffered, largest = 0, 0, 1
-    rows = []
-    for record in source:
-        row = []
-        for col, value in zip(cols, record, strict=True):
-            try:
-                row.append(_value(value, columns[col]))
-            except (TypeError, ValueError, OverflowError):
-                raise RehearsalError(f"unrepresentable_value:{name}.{col}") from None
-        size = _hash_row(left, row)
-        largest = max(largest, size)
-        buffered += size
-        count += 1
-        rows.append(tuple(row))
-        if len(rows) >= _BATCH or buffered >= _BUFFER_BYTES:
-            await pg.copy_records_to_table(name, schema_name="public", columns=cols, records=rows)
-            rows.clear()
-            buffered = 0
-    if rows:
-        await pg.copy_records_to_table(name, schema_name="public", columns=cols, records=rows)
-    if count != expected_count:
-        raise RehearsalError("source_count:" + name)
-    return TableSnapshot(
-        count,
-        left.digest(),
-        f"SELECT {keys} FROM {qualified} ORDER BY {pg_order}",
-        max(1, min(_BATCH, _BUFFER_BYTES // largest)),
-    )
-
-
-@dataclass(frozen=True)
-class TableSnapshot:
-    count: int
-    digest: bytes
-    target_query: str
-    prefetch: int = _BATCH
-
-
-async def _verify_table(pg, name, snapshot):
-    present, right = 0, hashlib.sha256()
-    async for row in pg.cursor(snapshot.target_query, prefetch=snapshot.prefetch):
-        _hash_row(right, row)
-        present += 1
-    if present != snapshot.count or snapshot.digest != right.digest():
-        raise RehearsalError("row_mismatch:" + name)
-    return present
 
 
 async def compare_rows(db, pg, counts, *, retain=False):
@@ -179,8 +53,8 @@ async def compare_rows(db, pg, counts, *, retain=False):
         await pg.execute("SET CONSTRAINTS ALL DEFERRED")
         for table in sorted(counts):
             try:
-                snapshots[table] = await _copy_table(
-                    db, pg, table, definitions[table], counts[table]
+                snapshots[table] = await table_snapshot(
+                    db, pg, table, definitions[table], counts[table], copy=True
                 )
             except asyncpg.PostgresError as exc:
                 field = exc.column_name

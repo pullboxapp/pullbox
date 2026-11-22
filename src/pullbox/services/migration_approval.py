@@ -96,7 +96,7 @@ def _read(path: Path, binding: str, key: bytes, secret: str) -> tuple[str, bool,
 
 async def verify_deployment(
     settings: PullboxSettings, backup: Path, approval: Path, token_file: Path, digest: str
-) -> None:
+) -> tuple[str, int]:
     if not os.statvfs(backup).f_flag & os.ST_RDONLY:
         raise BindingError("Mount the restored SQLite backup read-only before checking approval.")
     binding = await check_binding(settings.db_url, token_file, digest)
@@ -128,3 +128,4 @@ async def verify_deployment(
         or time.time() >= expires
     ):
         raise BindingError("The approval expired or the target changed during verification.")
+    return binding, expires

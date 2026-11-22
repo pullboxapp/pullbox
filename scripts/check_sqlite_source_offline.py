@@ -24,6 +24,8 @@ MESSAGES = {
     "other_writable_container": "Another running or restartable container shares writable "
     "storage with the source. Stop its writes and automatic restart before retrying.",
     "checkpoint_changed": "The offline evidence changed. Do not reuse the previous snapshot.",
+    "candidate_not_waiting": "The named first-start container is not the sole waiting Pullbox "
+    "process, or it can write source storage other than the original comics mount.",
 }
 
 
@@ -139,7 +141,61 @@ def inspect_rows(run, ids):
     return rows
 
 
-def inspect_source(name, compare):
+def _waiting_container(
+    run, candidate, challenge, rows, source, config, data_mount, database, desktop
+):
+    """Only during live admission: prove the candidate is the single waiting CLI, not an app."""
+    failure = OfflineCheckError("candidate_not_waiting")
+    cid = run("container", "inspect", "--format", "{{.Id}}", candidate)
+    if cid == source or cid not in rows or not re.fullmatch("[0-9a-f]{32}", challenge):
+        raise failure
+    status, _, _, restart, mounts, managed, _ = rows[cid]
+    if status != "running" or restart not in ("no", "") or managed:
+        raise failure
+    command, args, pid, privileged = json.loads(
+        run(
+            "container",
+            "inspect",
+            "--format",
+            "[{{json .Path}},{{json .Args}},{{json .State.Pid}},{{json .HostConfig.Privileged}}]",
+            cid,
+        )
+    )
+    if (
+        command not in ("python", "/usr/local/bin/python")
+        or privileged
+        or args[:3]
+        not in (["-m", "pullbox.cli", "migration-start"], ["-Bm", "pullbox.cli", "migration-start"])
+        or len(args) != 11
+        or set(args[3::2])
+        != {"--token-file", "--snapshot-sha256", "--approval-file", "--restored-backup"}
+        or run("top", cid, "-eo", "pid").split() != ["PID", str(pid)]
+        or f"First-start challenge: {challenge}" not in run("logs", "--tail", "5", cid).splitlines()
+    ):
+        raise failure
+    orig_mounts = rows[source][4]
+    library = absolute(config.get("PULLBOX_LIBRARY_ROOT", "/comics"))
+    media = [
+        m for m in orig_mounts if absolute(m["Destination"]) == library and m["Type"] == "bind"
+    ]
+    if len(media) != 1:
+        raise failure
+    allowed = storage(media[0], desktop)
+    protected = {storage(m, desktop) for m in orig_mounts if m["RW"]} - {None}
+    db_path = storage(data_mount, desktop) / database.relative_to(
+        absolute(data_mount["Destination"])
+    )
+    for m in mounts:
+        if not m["RW"] or not (path := storage(m, desktop)):
+            continue
+        if any(path.is_relative_to(p) or p.is_relative_to(path) for p in protected) and (
+            path != allowed or absolute(m["Destination"]) != library or db_path.is_relative_to(path)
+        ):
+            raise failure
+    return cid
+
+
+def inspect_source(name, compare, *, candidate=None, challenge=None):
     endpoint = os.environ.get("DOCKER_HOST") or docker(
         "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"
     )
@@ -180,6 +236,13 @@ def inspect_source(name, compare):
         for line in run("container", "inspect", "--format", SOURCE_CONFIG, source).splitlines()
     )
     database, data_mount = check_source_paths(config, mounts)
+    waiting = (
+        _waiting_container(
+            run, candidate, challenge, rows, source, config, data_mount, database, desktop
+        )
+        if candidate and challenge and compare
+        else None
+    )
     protected = {storage(m, desktop) for m in mounts if m["RW"]} - {None}
     related = {source: rows[source][:4]}
     writers = []
@@ -194,7 +257,7 @@ def inspect_source(name, compare):
                 volume_names.add(m["Name"])
             if path and any(path.is_relative_to(p) or p.is_relative_to(path) for p in protected):
                 overlaps = True
-        if cid != source and overlaps:
+        if cid not in {source, waiting} and overlaps:
             related[cid] = [status, started, finished, restart]
             if status not in {"exited", "created"} or restart not in ("no", "") or managed:
                 blockers.add("other_writable_container")

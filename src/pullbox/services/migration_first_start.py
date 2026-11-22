@@ -60,7 +60,9 @@ def read_token(path: Path) -> bytes:
     raise BindingError("Mount a private, readable token file containing 64 lowercase hex digits.")
 
 
-async def _identity(conn: AsyncConnection, database: str, *, enrolling: bool) -> tuple[str, str]:
+async def _identity(
+    conn: AsyncConnection, database: str, *, enrolling: bool, waiting: str | None = None
+) -> tuple[str, str]:
     # The server start time deliberately invalidates a pending handoff on restart,
     # without requiring privileged access to PostgreSQL's cluster control functions.
     row = (
@@ -73,10 +75,14 @@ async def _identity(conn: AsyncConnection, database: str, *, enrolling: bool) ->
           AND current_setting('server_version_num')::int / 10000 IN (16,18)
           AND d.datdba=current_user::regrole
           AND current_database() = CASE WHEN :enrolling THEN d.datname ELSE 'postgres' END
-          AND NOT EXISTS (SELECT FROM pg_stat_activity
-                          WHERE datid=d.oid AND pid<>pg_backend_pid())
+          AND NOT EXISTS (SELECT FROM pg_prepared_xacts WHERE database=d.datname)
+          AND NOT EXISTS (SELECT FROM pg_replication_slots WHERE datoid=d.oid)
+          AND ARRAY(SELECT CASE WHEN usename=current_user THEN application_name ELSE '' END
+                    FROM pg_stat_activity WHERE datid=d.oid AND pid<>pg_backend_pid())
+              = CASE WHEN CAST(:waiting AS text) IS NULL THEN ARRAY[]::text[]
+                     ELSE ARRAY[CAST(:waiting AS text)] END
     """),
-            {"db": database, "enrolling": enrolling},
+            {"db": database, "enrolling": enrolling, "waiting": waiting},
         )
     ).one_or_none()
     if not row:
@@ -124,12 +130,19 @@ async def bind_reviewed_stage(
 
 
 async def check_binding(
-    raw: str, token_file: Path, digest: str, *, source: str | None = None
+    raw: str,
+    token_file: Path,
+    digest: str,
+    *,
+    source: str | None = None,
+    waiting: str | None = None,
 ) -> str:
     """Use the deployment's configured owner via postgres; never connect to the stage."""
     url = parse_target_url(raw)
     if url is None or not url.database or not _HEX.fullmatch(digest):
         raise BindingError("Check the configured PostgreSQL target and staged snapshot SHA-256.")
+    if waiting is not None and (source is None or not re.fullmatch("[0-9a-f]{32}", waiting)):
+        raise BindingError("Use the current first-start challenge from the intended container.")
     key = read_token(token_file)
     try:
         engine = create_async_engine(
@@ -148,7 +161,12 @@ async def check_binding(
         )
         try:
             async with asyncio.timeout(12), engine.connect() as conn:
-                identity, current = await _identity(conn, url.database, enrolling=False)
+                identity, current = await _identity(
+                    conn,
+                    url.database,
+                    enrolling=False,
+                    waiting="pullbox_admit_" + waiting if waiting else None,
+                )
                 if source is not None and current.startswith(PREFIX):
                     raise BindingError(
                         "This stage has no source binding. Keep it closed; review a new stage "

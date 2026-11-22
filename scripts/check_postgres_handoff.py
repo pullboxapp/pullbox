@@ -30,14 +30,17 @@ from pullbox.services.migration_first_start import BindingError, check_binding, 
 from pullbox.services.migration_restore_config import check_restore, restored_key
 
 
-async def verify(name, capture, scratch, raw, token):
+async def verify(name, capture, scratch, raw, token, *, waiting=None, candidate=None):
     """Keep both sides fenced. A prior successful invocation is not a write authorization."""
 
     async def target():
-        await check_binding(raw, token, capture.snapshot, source=capture.fingerprint)
+        await check_binding(
+            raw, token, capture.snapshot, source=capture.fingerprint, waiting=waiting
+        )
 
     def offline():
-        reasons, _, _, context = inspect_source(name, capture.checkpoint)
+        options = {"candidate": candidate, "challenge": waiting} if candidate else {}
+        reasons, _, _, context = inspect_source(name, capture.checkpoint, **options)
         return {k: MESSAGES[k] for k in reasons}, context
 
     try:
@@ -228,12 +231,61 @@ def _confirm(digest):
     return input().strip() == phrase
 
 
+async def authorize_start(
+    name, capture, scratch, raw, token, challenge, confirm, *, candidate=None
+):
+    from pullbox.services.migration_cutover import send_grant
+
+    binding = await check_binding(
+        raw, token, capture.snapshot, source=capture.fingerprint, waiting=challenge
+    )
+    if not confirm(capture.snapshot):
+        return {"cancelled": "No first start authorized."}, None
+    blockers = await verify(
+        name, capture, scratch, raw, token, waiting=challenge, candidate=candidate
+    )
+    if blockers:
+        return blockers, None
+    if binding != await check_binding(
+        raw, token, capture.snapshot, source=capture.fingerprint, waiting=challenge
+    ):
+        raise BindingError("The waiting target changed.")
+    options = {"candidate": candidate, "challenge": challenge} if candidate else {}
+    reasons, _, _, _ = inspect_source(name, capture.checkpoint, **options)
+    if reasons:
+        return {reason: MESSAGES[reason] for reason in reasons}, None
+    # Deliver only to the live listener, never issue a portable activation credential.
+    await send_grant(raw, binding, challenge, token)
+    return {}, True
+
+
+def _confirm_start(digest):
+    phrase = "start " + digest[:12]
+    print(
+        "This sends confirmation directly to the waiting container. PostgreSQL can accept writes. "
+        "Keep the old SQLite deployment stopped; it will not be a current rollback target. "
+        f"Type '{phrase}' to authorize this first start, or Enter to cancel:",
+        file=sys.stderr,
+        flush=True,
+    )
+    return input().strip() == phrase
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--container", required=True, help="The original stopped SQLite container")
     parser.add_argument("--capture-report", type=Path, required=True)
     parser.add_argument("--scratch-dir", type=Path, required=True)
     parser.add_argument("--token-file", type=Path, required=True)
+    parser.add_argument(
+        "--waiting-container",
+        help="Exact waiting first-start container sharing only the comics bind",
+    )
+    parser.add_argument(
+        "--authorize-start",
+        metavar="CHALLENGE",
+        help="Recheck the source and authorize the waiting container",
+    )
     parser.add_argument(
         "--write-approval", type=Path, help="Issue an approval after interactive confirmation"
     )
@@ -255,6 +307,19 @@ def main():
         "--url-stdin", action="store_true", help="Read the target URL from protected stdin"
     )
     args = parser.parse_args()
+    if args.waiting_container and (
+        not args.authorize_start
+        or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", args.waiting_container)
+    ):
+        parser.error("--waiting-container requires --authorize-start and a valid Docker name.")
+    if args.authorize_start is not None and (
+        args.write_approval
+        or args.url_stdin
+        or not sys.stdin.isatty()
+        or not sys.stderr.isatty()
+        or not re.fullmatch("[0-9a-f]{32}", args.authorize_start)
+    ):
+        parser.error("First-start authorization requires a private terminal and a live challenge.")
     if args.all_files and not args.write_approval:
         parser.error("--all-files requires --write-approval")
     if args.write_approval and (
@@ -292,7 +357,23 @@ def main():
                     else getpass.getpass("Reviewed PostgreSQL target URL: ")
                 )
             common = (args.container, capture, args.scratch_dir, raw, args.token_file)
-            if args.write_approval:
+            if args.authorize_start:
+                blockers, response = asyncio.run(
+                    authorize_start(
+                        *common,
+                        args.authorize_start,
+                        _confirm_start,
+                        candidate=args.waiting_container,
+                    )
+                )
+                if response:
+                    print(
+                        "Confirmation sent to the waiting instance. Check its startup status. "
+                        "Keep SQLite stopped.",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+            elif args.write_approval:
                 blockers = asyncio.run(
                     approve(
                         *common,
@@ -324,6 +405,7 @@ def main():
                 "source_and_target_verified": not blockers,
                 "cutover_ready": False,
                 "approval_issued": bool(args.write_approval) and not blockers,
+                "first_start_confirmation_sent": bool(args.authorize_start) and not blockers,
                 "blockers": blockers,
             },
             sort_keys=True,

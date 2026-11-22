@@ -553,6 +553,83 @@ file browser sees. Keep the source stopped and automatic restarts disabled.
    and repeat the host check. The container cannot tell whether someone restarted
    SQLite after the approval was issued. Leave the stage closed.
 
+### Start the reviewed PostgreSQL library
+
+This is the **write boundary**, not another preview. Use two private terminals,
+the reviewed database itself (not a clone), and a separate Compose project or
+service for the target. Do not replace or restart the stopped SQLite container.
+Keep external writers and auto-redeployment disabled throughout. Pullbox does
+not edit Compose or start a container on your behalf.
+
+1. Prepare the target service with its normal protected PostgreSQL URL, key,
+   separate persistent appdata, and the media and covers you verified. Do not
+   mount the original SQLite appdata writable. Retain the three read-only
+   mounts from the approval check. Disable the target restart policy for the
+   first start. Ensure no other instance uses this database.
+2. In terminal one, start the intended service with this one-time entrypoint.
+   Substitute your target service name; check the service ports are free.
+
+   ```sh
+   docker compose run --name pullbox-pg-first --service-ports --no-deps \
+     --entrypoint python pullbox -m pullbox.cli migration-start \
+     --token-file /run/secrets/pullbox-first-start \
+     --approval-file /run/secrets/pullbox-approval.json \
+     --restored-backup /run/migration/pullbox-offline.db \
+     --snapshot-sha256 "$STAGED_SNAPSHOT_SHA256"
+   ```
+
+   Wait for **First-start challenge**. The container checks its own key and
+   mounts, then compares every application table in the original PostgreSQL
+   database with the restored SQLite snapshot. It checks generated ID sequences
+   without consuming any IDs. Only its inspection connection remains; normal
+   startup and workers are still blocked. No database content is repaired
+   automatically. Stopping this container while it waits cancels that attempt.
+3. In terminal two on the source Docker host, use the displayed challenge.
+
+   ```sh
+   python scripts/check_postgres_handoff.py --container pullbox \
+     --capture-report /private-backups/capture.json --scratch-dir /private-backups \
+     --token-file first-start.token --authorize-start "$CHALLENGE"
+   ```
+
+   If the new container uses the **same writable comics bind** as the source,
+   add `--waiting-container pullbox-pg-first`. This allows only the named,
+   non-restarting first-start process displaying that challenge. Its comics
+   mount must use the same container path; it cannot also share writable source
+   appdata or downloads. Leave unrelated mounts out of the first start, or use
+   independently restored paths. All other writable peers still block.
+
+   Confirm the snapshot at the prompt. The host rechecks the stopped container,
+   WAL-aware snapshot and target, then sends confirmation directly to the waiting
+   session. There is no response code to copy or save. A cancelled host prompt
+   sends nothing. A source restart requires a new capture and stage; an expired
+   approval requires a new approval. Do not re-use a challenge from another run.
+4. In terminal one, look for **Cutover committed** followed by normal startup.
+   Sign in with a migrated account, check the PostgreSQL version under
+   **System > About**, and open a known owned issue, its Story Arc and import
+   follow-up. For subsequent starts use the normal image entrypoint and the
+   same PostgreSQL configuration and files. Stop the first instance before
+   starting the regular service. The token, approval and restored SQLite mount
+   can now be removed. Keep the backups themselves.
+
+**If startup is interrupted:** do not start SQLite based on a lost terminal or
+a failed health check. Check the database status from the maintenance database
+as shown above. A still-bound label means cutover did not commit; an interruption
+during inspection can leave connections enabled but normal startup still fenced.
+Do not remove markers or open it manually; use a fresh target if it is not closed.
+After successful cutover the database accepts connections, the bound label is
+gone and `pullbox_stage.completed_first_start` exists **inside that database**.
+If these signals disagree, keep both apps stopped and investigate. Once cutover
+commits, treat PostgreSQL as authoritative even if app startup then fails.
+Repair it or restore a current coordinated PostgreSQL backup; do not switch the
+URL back to the old SQLite snapshot.
+
+If you cancelled **before** commit, confirm the bound stage is closed and the
+temporary first-start container has exited. You can then remove **only that
+exited container** (`docker rm pullbox-pg-first`, without `-v`) to reuse its
+name. Do not remove the stopped SQLite container. Rerun the approval check if
+it expired; restart the target command to get a fresh challenge.
+
 ## Check the key and comic files
 
 Use `migration-check-assets` from a Pullbox version that includes it. Supply

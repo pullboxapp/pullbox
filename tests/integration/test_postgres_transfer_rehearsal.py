@@ -169,7 +169,7 @@ def test_unrepresentable_value_blocks_without_silently_converting(backup):
 
 
 async def test_same_count_different_content_fails_verification():
-    from scripts.postgres_rehearsal_rows import (
+    from pullbox.services.migration_row_comparison import (
         RehearsalError,
         TableSnapshot,
         _hash_row,

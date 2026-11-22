@@ -48,6 +48,21 @@ def test_declines_implicit_unsafe_or_non_target_urls(url):
     assert not report["target_checks_passed"] and not report["cutover_ready"]
 
 
+async def test_native_connection_error_is_reported_without_driver_details(monkeypatch):
+    from pullbox.services import migration_target_preflight as target
+
+    class UnwrappedDriverError(Exception):
+        pass
+
+    def refused(*args, **kwargs):
+        raise UnwrappedDriverError("sensitive driver diagnostics")
+
+    monkeypatch.setattr(target, "create_async_engine", refused)
+    report = await target.inspect_target("postgresql+asyncpg://owner@127.0.0.1:5432/library")
+    assert set(report.blockers) == {"connection"}
+    assert "sensitive" not in str(report) and not report.target_checks_passed
+
+
 def test_unreachable_target_is_bounded_and_redacted():
     code, report = check("postgresql+asyncpg://private:DO_NOT_DISCLOSE@127.0.0.1:1/private_db")
     assert code == 1 and "connection" in report["blockers"]

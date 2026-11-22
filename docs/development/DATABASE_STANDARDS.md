@@ -959,6 +959,14 @@ a stopped test source, signs in for read-only review, and boots an isolated clon
 on PostgreSQL 16 and 18. The app has no published port or live library mount. This qualifies
 application startup and navigation, not activation of a live staging database.
 
+For [operator-controlled cutover](../sqlite-postgresql-migration.md#start-the-reviewed-postgresql-library),
+use a local **runtime** image (normal Pullbox command, not the development reload
+server) and the same opt-in variables. Run
+`pytest tests/integration/test_postgres_cutover.py tests/integration/test_postgres_source_handoff.py`.
+These tests activate the original disposable database, refuse changed source or
+target evidence, and exercise authenticated navigation and native restore after
+admitting writes. The real development and production services are not test targets.
+
 Story Arc reader bookmarks are unique per user and arc. A bookmark
 stores the stable membership and the issue the user actually read, not a page
 number or a sequence offset. Progress remains in `issue_reader_states`.

@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import getpass
 import json
+import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -161,6 +162,13 @@ def build_parser() -> argparse.ArgumentParser:
     binding.add_argument(
         "--restored-backup", type=Path, help="Read-only mount of the restored SQLite backup"
     )
+    activate = subparsers.add_parser(
+        "migration-start", help="Verify the approved stage and launch this Pullbox instance"
+    )
+    activate.add_argument("--token-file", type=Path, required=True)
+    activate.add_argument("--snapshot-sha256", required=True)
+    activate.add_argument("--approval-file", type=Path, required=True)
+    activate.add_argument("--restored-backup", type=Path, required=True)
     restore = subparsers.add_parser(
         "migration-check-restore", help="Check independently restored deployment settings and key"
     )
@@ -284,6 +292,55 @@ def main() -> None:
             print(target.next_step)
         if not target.target_checks_passed:
             sys.exit(1)
+    elif args.command == "migration-start":
+        from pullbox.services.migration_approval import verify_deployment
+        from pullbox.services.migration_cutover import admit_verified_stage
+        from pullbox.services.migration_first_start import BindingError
+
+        async def first_start() -> None:
+            settings = get_settings()
+            print(
+                "Checking the restored backup, key and media. Workers are off.",
+                file=sys.stderr,
+                flush=True,
+            )
+            binding, expires = await verify_deployment(
+                settings,
+                args.restored_backup,
+                args.approval_file,
+                args.token_file,
+                args.snapshot_sha256,
+            )
+            print(
+                "Comparing staged rows, relationships and generated IDs. Large libraries can "
+                "take time; no comic files are written.",
+                file=sys.stderr,
+                flush=True,
+            )
+
+            await admit_verified_stage(
+                settings.db_url,
+                args.restored_backup,
+                args.token_file,
+                args.snapshot_sha256,
+                binding,
+                expires,
+            )
+
+        try:
+            asyncio.run(first_start())
+        except BindingError as exc:
+            print(str(exc), file=sys.stderr)
+            sys.exit(1)
+        except (KeyboardInterrupt, Exception):
+            print(
+                "First start interrupted or unavailable. Check the target status before retrying. "
+                "Keep the SQLite installation stopped.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print("Cutover committed. Starting Pullbox on PostgreSQL. Keep SQLite stopped.", flush=True)
+        os.execv(sys.executable, [sys.executable, "-m", "pullbox.docker_entrypoint"])
     elif args.command == "migration-check-first-start":
         from pullbox.services.migration_approval import verify_deployment
         from pullbox.services.migration_first_start import BindingError, check_binding

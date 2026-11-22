@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- [Start a verified SQLite migration on PostgreSQL](docs/sqlite-postgresql-migration.md#start-the-reviewed-postgresql-library).
+  The intended container checks the restored library and generated IDs, waits for
+  confirmation from the still-offline source host, then starts with the migrated accounts and files.
+
 - [Verify a migration approval inside the proposed Pullbox container](docs/sqlite-postgresql-migration.md#approve-and-check-the-intended-deployment).
   Check the restored backup, application key, comic mounts and covers before opening PostgreSQL.
 

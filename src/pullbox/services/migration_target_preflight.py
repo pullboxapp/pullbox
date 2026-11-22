@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 
 from sqlalchemy import text
 from sqlalchemy.engine import URL, make_url
-from sqlalchemy.exc import ArgumentError, SQLAlchemyError
+from sqlalchemy.exc import ArgumentError
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -168,7 +168,9 @@ async def inspect_target(raw: str) -> TargetPreflight:
             await engine.dispose()
     except ModuleNotFoundError:
         report.block("driver")
-    except (SQLAlchemyError, OSError, ValueError):
+    except Exception:
+        # Authentication during driver startup can escape SQLAlchemy's wrappers.
+        # Keep native diagnostics and connection parameters out of the user report.
         report.block("connection")
     report.target_checks_passed = not report.blockers
     return report
