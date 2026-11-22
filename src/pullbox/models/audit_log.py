@@ -29,6 +29,7 @@ class AuditEventType(StrEnum):
     IMPORT_SAFETY_SOURCE_TRASH = "import_safety_source_trash"
     IMPORT_MISPLACED_SOURCE_CLEANUP = "import_misplaced_source_cleanup"
     IMPORT_RECOVERY_BULK_ACTION = "import_recovery_bulk_action"
+    STORY_ARC_RECORD_DELETED = "story_arc_record_deleted"
 
 
 class AuditLog(Base, IdentityMixin):

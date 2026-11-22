@@ -139,6 +139,7 @@ class StoryArc(Base, IdentityMixin, TimestampMixin):
             "id",
         ),
         Index("ix_story_arcs_source_job_id", "source_import_job_id", "id"),
+        {"sqlite_autoincrement": True},
     )
 
     comicvine_id: Mapped[int | None] = mapped_column(unique=True, index=True)

@@ -493,23 +493,35 @@ def test_lost_arc_context_keeps_page_and_explicitly_recovers_series_order(
 
     async def remove() -> None:
         async with get_session_factory().begin() as session:
-            if change == "arc":
-                await session.execute(delete(StoryArc).where(StoryArc.id == arc_reader))
-            else:
-                await session.execute(
-                    delete(IssueStoryArc).where(
-                        IssueStoryArc.story_arc_id == arc_reader, IssueStoryArc.issue_id == 1
-                    )
+            await session.execute(
+                delete(IssueStoryArc).where(
+                    IssueStoryArc.story_arc_id == arc_reader, IssueStoryArc.issue_id == 1
                 )
+            )
 
-    _run_async_blocking(remove())
     if change == "arc":
+        detail = page.context.new_page()
+        detail.goto(f"{seeded_server}/story-arcs/{arc_reader}")
+        opener = detail.get_by_role("button", name="Delete Story Arc", exact=True)
+        opener.click()
+        dialog = detail.get_by_role("dialog", name="Delete Reader crossover?")
+        expect(dialog).to_contain_text("3 reading-order entries")
+        expect(dialog.get_by_role("button", name="Cancel")).to_be_focused()
+        dialog.press("Escape")
+        expect(opener).to_be_focused()
+        opener.click()
+        dialog.get_by_role("button", name="Delete arc only", exact=True).click()
+        expect(
+            detail.get_by_role("status").filter(has_text="No comic files were removed")
+        ).to_be_visible()
+        detail.close()
         with page.expect_response(
             lambda r: r.url.endswith("/1/progress") and r.request.method == "PUT"
         ) as saved:
             page.get_by_test_id("comic-reader-previous").click()
         assert saved.value.json()["arc_bookmark_saved"] is False
     else:
+        _run_async_blocking(remove())
         page.get_by_test_id("comic-reader-next-issue").click()
     expected = "Page 1 of 3" if change == "arc" else "Page 2 of 3"
     current = issue.reader_page.get_attribute("src")

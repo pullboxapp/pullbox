@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import event, select
+from sqlalchemy import event, select, text
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -27,6 +27,7 @@ from pullbox.models.story_arc import (
     StoryArc,
     StoryArcLifecycle,
     StoryArcPlacement,
+    StoryArcPlacementMode,
     StoryArcPlacementOwnership,
     StoryArcPlacementState,
     StoryArcResolutionState,
@@ -766,6 +767,135 @@ async def _seed_placement_arc(
             "canonical": str(canonical),
             "destination": str(destination),
         }
+
+
+@pytest.mark.parametrize("archived", [True, False])
+async def test_delete_only_review_preserves_shared_issue_and_both_files(
+    authenticated_client: AsyncClient,
+    sec_db: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    archived: bool,
+) -> None:
+    async with sec_db.begin() as session:
+        await session.execute(text("PRAGMA foreign_keys=ON"))
+    ids = await _seed_placement_arc(sec_db, tmp_path)
+    canonical = Path(str(ids["canonical"]))
+    copy = Path(str(ids["destination"])) / "001.cbz"
+    copy.write_bytes(canonical.read_bytes())
+    async with sec_db.begin() as session:
+        arc = await session.get(StoryArc, ids["arc"])
+        if archived:
+            arc.lifecycle = StoryArcLifecycle.ARCHIVED
+        file = (await session.scalars(select(LibraryFile))).one()
+        issue_id, file_id = file.issue_id, file.id
+        other = StoryArc(name="Another reading order")
+        session.add(other)
+        await session.flush()
+        session.add(
+            IssueStoryArc(
+                story_arc_id=other.id,
+                issue_id=issue_id,
+                sequence_number=1,
+                source_ordinal=1,
+                resolution_state=StoryArcResolutionState.RESOLVED,
+            )
+        )
+        other_id = other.id
+        session.add(
+            StoryArcPlacement(
+                issue_story_arc_id=ids["membership"],
+                library_file_id=file_id,
+                library_root_id=ids["root"],
+                placement_path=str(copy),
+                mode=StoryArcPlacementMode.COPY,
+                ownership=StoryArcPlacementOwnership.MANAGED,
+                state=StoryArcPlacementState.CURRENT,
+            )
+        )
+    url = f"/story-arcs/{ids['arc']}/delete"
+    preview_response = await authenticated_client.get(url + "/preview")
+    assert preview_response.status_code == 200
+    preview = preview_response.json()
+    assert (
+        preview["entries"],
+        preview["issues"],
+        preview["series"],
+        preview["files"],
+        preview["shared_issues"],
+        preview["placements"],
+    ) == (1, 1, 1, 1, 1, 1)
+    assert preview["token"] and not preview["blocker"]
+    headers = _csrf_header_for(authenticated_client)
+    assert (
+        await authenticated_client.post(url, json={"token": preview["token"]})
+    ).status_code == 403
+    assert (
+        await authenticated_client.post(
+            url, headers=headers, json={"token": preview["token"], "delete_files": True}
+        )
+    ).status_code == 422
+    async with sec_db.begin() as session:
+        arc = await session.get(StoryArc, ids["arc"])
+        arc.revision += 1
+    stale = await authenticated_client.post(url, headers=headers, json={"token": preview["token"]})
+    assert stale.status_code == 409
+    token = (await authenticated_client.get(url + "/preview")).json()["token"]
+    result = await authenticated_client.post(url, headers=headers, json={"token": token})
+    assert result.status_code == 200 and result.json()["deleted"] is True
+    assert (
+        await authenticated_client.post(url, headers=headers, json={"token": token})
+    ).status_code == 404
+    async with sec_db() as session:
+        assert await session.get(StoryArc, ids["arc"]) is None
+        assert await session.get(StoryArc, other_id)
+        member = (await session.scalars(select(IssueStoryArc))).one()
+        assert member.story_arc_id == other_id and member.issue_id == issue_id
+        assert await session.get(LibraryFile, file_id)
+        assert (await session.get(Issue, issue_id)).status == IssueStatus.OWNED
+    assert copy.read_bytes() == canonical.read_bytes() == b"canonical story arc issue"
+
+
+async def test_delete_only_waits_for_arc_work_even_after_review(
+    authenticated_client: AsyncClient,
+    sec_db: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    async with sec_db.begin() as session:
+        await session.execute(text("PRAGMA foreign_keys=ON"))
+    ids = await _seed_placement_arc(sec_db, tmp_path)
+    url = f"/story-arcs/{ids['arc']}/delete"
+    review = await authenticated_client.get(url + "/preview")
+    assert review.status_code == 200
+    await _seed_sync_work_summary(sec_db, ids)
+    response = await authenticated_client.post(
+        url, json={"token": review.json()["token"]}, headers=_csrf_header_for(authenticated_client)
+    )
+    assert response.status_code == 409
+    blocked = (await authenticated_client.get(url + "/preview")).json()
+    assert blocked["blocker"] and not blocked["token"]
+    async with sec_db() as session:
+        assert await session.get(StoryArc, ids["arc"])
+        assert len((await session.scalars(select(StoryArcSyncWork))).all()) == 5
+
+
+async def test_delete_refuses_to_leave_orphans_when_sqlite_cascades_are_off(
+    authenticated_client: AsyncClient, sec_db: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    ids = await _seed_placement_arc(sec_db, tmp_path)
+    url = f"/story-arcs/{ids['arc']}/delete"
+    async with sec_db.begin() as session:
+        await session.execute(text("PRAGMA foreign_keys=ON"))
+    token = (await authenticated_client.get(url + "/preview")).json()["token"]
+    async with sec_db.begin() as session:
+        await session.execute(text("PRAGMA foreign_keys=OFF"))
+    result = await authenticated_client.post(
+        url, json={"token": token}, headers=_csrf_header_for(authenticated_client)
+    )
+    assert result.status_code == 409
+    assert "foreign key" in result.json()["detail"]
+    async with sec_db() as session:
+        assert await session.get(StoryArc, ids["arc"])
+        assert await session.get(IssueStoryArc, ids["membership"])
 
 
 async def _seed_sync_work_summary(

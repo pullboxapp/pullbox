@@ -327,6 +327,51 @@ def _insert_story_arc_sync_work(
     return int(conn.execute(text("SELECT last_insert_rowid()")).scalar_one())
 
 
+def test_deleting_story_arc_does_not_reuse_a_reader_or_worker_target(alembic_cfg):
+    from sqlalchemy.orm import Session
+
+    from pullbox.models.story_arc import IssueStoryArc, StoryArc
+
+    cfg, url = alembic_cfg
+    command.upgrade(cfg, "k8e9f0123456")
+    engine = create_engine(url)
+    try:
+        with Session(engine) as db, db.begin():
+            kept = StoryArc(name="Retained arc")
+            removed = StoryArc(name="Removed arc")
+            db.add_all([kept, removed])
+            db.flush()
+            kept_id, old_id = kept.id, removed.id
+            db.add(IssueStoryArc(story_arc_id=kept_id, sequence_number=1, source_ordinal=1))
+
+        def schema():
+            inspector = inspect(engine)
+            return [
+                sorted(getattr(inspector, name)("story_arcs"), key=lambda item: item["name"])
+                for name in (
+                    "get_indexes",
+                    "get_foreign_keys",
+                    "get_check_constraints",
+                    "get_unique_constraints",
+                )
+            ]
+
+        original = schema()
+        command.upgrade(cfg, "head")
+        assert schema() == original
+        with Session(engine) as db, db.begin():
+            assert db.scalar(select(IssueStoryArc.story_arc_id)) == kept_id
+            db.execute(text("DELETE FROM story_arcs WHERE id=:id"), {"id": old_id})
+        with Session(engine) as db, db.begin():
+            new = StoryArc(name="Replacement")
+            db.add(new)
+            db.flush()
+            assert new.id > old_id
+            assert db.execute(text("PRAGMA foreign_key_check")).first() is None
+    finally:
+        engine.dispose()
+
+
 class TestMigrationChain:
     """Verify the full Alembic migration chain applies cleanly."""
 
@@ -1907,7 +1952,8 @@ class TestMigrationChain:
     def test_root_removal_protects_dependencies_without_losing_other_fk_actions(self, alembic_cfg):
         cfg, sync_url = alembic_cfg
         script = ScriptDirectory.from_config(cfg)
-        assert script.get_heads() == ["k8e9f0123456"]
+        assert script.get_heads() == ["l9f012345678"]
+        assert script.get_revision("l9f012345678").down_revision == "k8e9f0123456"
         assert script.get_revision("k8e9f0123456").down_revision == "j7d8e9f01234"
         assert script.get_revision("j7d8e9f01234").down_revision == "i6c7d8e9f012"
         assert script.get_revision("i6c7d8e9f012").down_revision == "h5b6c7d8e901"

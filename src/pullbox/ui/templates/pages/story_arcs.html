@@ -26,6 +26,9 @@
 {% set attention_pct = ((attention_total / registry.membership_count) * 100)|round(0)|int if registry.membership_count > 0 else 0 %}
 
 <div class="series-page-shell" data-story-arc-active-view="{{ active_view }}" data-testid="story-arcs-page">
+  {% if arc_deleted %}
+    <p class="text-sm text-pb-success" role="status">Story Arc deleted. No comic files were removed.</p>
+  {% endif %}
   {% set header_left_html %}
     <div class="series-registry-title-block">
       <h2 data-testid="story-arcs-registry-title" class="series-registry-title">

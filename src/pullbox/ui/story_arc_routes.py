@@ -9,8 +9,9 @@ from typing import Annotated, Literal
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Form, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from starlette.responses import Response
@@ -18,6 +19,7 @@ from starlette.responses import Response
 from pullbox.api.deps import (  # noqa: TC001 - FastAPI resolves route annotations at runtime.
     AuthenticatedUser,
     DbSession,
+    InteractiveOperatorUser,
 )
 from pullbox.config import get_settings
 from pullbox.core.exceptions import NotFoundError, ValidationError
@@ -33,6 +35,7 @@ from pullbox.models.story_arc import (
     StoryArcSourceKind,
 )
 from pullbox.services.reader_arc_bookmarks import load_arc_read_action
+from pullbox.services.story_arc_deletion import delete_reviewed_arc, preview_arc_deletion
 from pullbox.services.story_arc_editing_policy import (
     StoryArcManualEditingDisabledError,
     require_manual_arc_edit,
@@ -514,6 +517,7 @@ async def story_arc_list(
         request,
         user,
         story_arc_page=result,
+        arc_deleted=request.query_params.get("notice") == "arc-deleted",
         query=q or "",
         lifecycle_filter=lifecycle_value.value if lifecycle_value is not None else "",
         monitored_filter=(str(monitored_value).lower() if monitored_value is not None else ""),
@@ -1207,3 +1211,36 @@ async def story_arc_archive(
         await session.rollback()
         return _redirect(request, _detail_url(story_arc_id, error=_error_code(exc)))
     return _redirect(request, _detail_url(story_arc_id, notice="archived"))
+
+
+class _DeleteArcConfirmation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    token: str = Field(min_length=1, max_length=512)
+
+
+@router.get("/story-arcs/{story_arc_id}/delete/preview", include_in_schema=False)
+async def story_arc_delete_preview(
+    story_arc_id: int, user: InteractiveOperatorUser, session: DbSession
+) -> Response:
+    try:
+        preview = await preview_arc_deletion(session, story_arc_id, user.id)
+    except StoryArcNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return JSONResponse(preview, headers={"Cache-Control": "no-store"})
+
+
+@router.post("/story-arcs/{story_arc_id}/delete", include_in_schema=False)
+async def story_arc_delete(
+    story_arc_id: int,
+    confirmation: _DeleteArcConfirmation,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+) -> Response:
+    try:
+        await delete_reviewed_arc(session, story_arc_id, user.id, confirmation.token)
+        await session.commit()
+    except StoryArcNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except StoryArcConflictError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return JSONResponse({"deleted": True})

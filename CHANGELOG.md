@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Story Arc details now offer **Delete Story Arc** alongside Archive. Review the
+  reading order that will be removed and the comics that will stay. Deleting the
+  arc alone leaves your series, issues, other arcs, and all files untouched.
 - If a story arc or its membership changes while you read, you can stay on
   the same page and explicitly continue in series order. An old arc link
   can still open the issue in series order if its file is available.
