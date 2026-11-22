@@ -72,3 +72,39 @@ SQLite library or qualify the full application for cutover.
 target, stop live writers, initialize a schema, transfer rows, or verify a copy.
 Keep backups of your configuration and encryption secret, covers, and comic
 files separately; the Pullbox ZIP contains the database and its manifest only.
+
+## Rehearse a copy
+
+From a checkout of this version of Pullbox, on a trusted local Docker host with
+Python and Pullbox's `postgres` dependencies installed, run:
+
+```sh
+docker pull postgres:16-bookworm
+python scripts/rehearse_postgres_transfer.py --backup /path/to/pullbox_backup.zip --postgres-major 16
+```
+
+For PostgreSQL 18, use `postgres:18-bookworm` and `--postgres-major 18`.
+The command only uses an already-local image. Do **not** mount the Docker
+socket into a running Pullbox container. Use a verified backup, never a live
+SQLite file. The external GCD catalog and comic files are not inputs.
+
+The rehearsal checks the backup before starting a temporary database. It has
+no destination URL option and does not change your running installation. It
+copies all application columns, compares row counts and ordered content
+digests, validates foreign keys, and tests generated IDs, including retired
+Story Arc IDs. Its temporary transaction is rolled back and the container is
+removed. The JSON report identifies tables and blockers, not comic titles,
+credentials, or individual row contents.
+
+Exit code **0** means the database rows passed that trial; **1** means the
+rehearsal was blocked. An outstanding file operation must be resolved in Pullbox,
+not cleared from a backup. For an incompatible value, keep the backup intact
+and report the table/column blocker. The trial uses up to 4 GiB of container
+memory, with a 3 GiB temporary database and a 32 MiB SQLite record limit. A
+larger library can exceed those limits without being corrupt. If the host
+process is forcibly killed, inspect `docker ps -a --filter label=pullbox.offline-transfer=disposable`
+and remove only its leftover trial container.
+
+**A successful rehearsal is not a migration.** It does not check the production
+encryption key, hash physical comics, stop writers, retain a PostgreSQL copy,
+or enable cutover. The report deliberately leaves `cutover_ready` false.

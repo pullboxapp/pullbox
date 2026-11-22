@@ -19,7 +19,9 @@ from pullbox.services.migration_backup_input import BackupInputError, database_s
 if TYPE_CHECKING:
     from pathlib import Path
 
-SOURCE_REVISION = "n1b23456789a"
+SOURCE_REVISION = "o2c3456789ab"
+# The current revision is PostgreSQL-only. Both SQLite revisions have identical data contracts.
+_SQLITE_SOURCE_REVISIONS = {SOURCE_REVISION, "n1b23456789a"}
 # From an empty SQLite database migrated to SOURCE_REVISION, not from a user's library.
 _LAYOUT_SHA256 = "e7cba84ac733597272281907576d8c689dc1db888b33f15e9c91f0112ebe0d66"
 _NEXT = (
@@ -179,7 +181,8 @@ def _layout_digest(db: sqlite3.Connection) -> str:
     return hashlib.sha256(json.dumps(shape).encode()).hexdigest()
 
 
-def _inspect(db: sqlite3.Connection, report: PreflightReport) -> None:
+def inspect_snapshot_connection(db: sqlite3.Connection, report: PreflightReport) -> None:
+    """Inspect the same immutable backup connection that an offline rehearsal will read."""
     db.execute("PRAGMA trusted_schema=OFF")
     db.execute("PRAGMA query_only=ON")
     if not db.execute(
@@ -194,7 +197,7 @@ def _inspect(db: sqlite3.Connection, report: PreflightReport) -> None:
         and re.fullmatch(r"[a-z0-9]{12}", versions[0][0])
     ):
         report.source_revision = versions[0][0]
-    if report.source_revision != SOURCE_REVISION:
+    if report.source_revision not in _SQLITE_SOURCE_REVISIONS:
         raise BackupInputError("unsupported_revision")
     if _layout_digest(db) != _LAYOUT_SHA256:
         raise BackupInputError("schema_mismatch")
@@ -204,6 +207,13 @@ def _inspect(db: sqlite3.Connection, report: PreflightReport) -> None:
     report.foreign_keys_ok = db.execute("PRAGMA foreign_key_check").fetchone() is None
     if not report.foreign_keys_ok:
         report.blockers["foreign_key_violation"] = _BLOCKERS["foreign_key_violation"]
+    if db.execute(
+        "SELECT 1 FROM import_jobs WHERE NOT json_valid(source_layout_snapshot) LIMIT 1"
+    ).fetchone():
+        report.blockers["invalid_import_layout"] = (
+            "An import job has malformed source layout JSON. Keep the backup intact "
+            "and review the import history on a separately restored copy before transfer."
+        )
     # Only application-owned identifiers and fixed predicates, never input names or values.
     inventory = {
         name: select(func.count()).select_from(table)
@@ -226,7 +236,7 @@ def inspect_migration_backup(path: Path, *, configured_url: str) -> PreflightRep
             # carrying a WAL-mode header. The boundary rejects adjacent journals.
             uri = snapshot.as_uri() + "?mode=ro&immutable=1"
             with closing(sqlite3.connect(uri, uri=True)) as db:
-                _inspect(db, report)
+                inspect_snapshot_connection(db, report)
     except BackupInputError as exc:
         code = str(exc)
         report.blockers[code] = _BLOCKERS[code]

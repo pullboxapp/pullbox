@@ -353,6 +353,37 @@ def test_populated_sqlite_migration_keeps_supported_layout_and_behavior(tmp_path
     assert report.source_checks_passed, report.blockers
 
 
+def test_postgres_downgrade_cannot_lose_large_import_byte_count(server):
+    _, password, port, sql = server
+    db = "import_bytes_" + uuid4().hex
+    sql("postgres", f"CREATE DATABASE {db} OWNER probe_owner TEMPLATE template0")
+    url = f"postgresql+asyncpg://probe_owner:{password}@127.0.0.1:{port}/{db}"
+    _migrate(url, "upgrade", "head")
+    sql(
+        db,
+        "INSERT INTO import_jobs(id,source_path,source_type,status,scan_total_files,"
+        "scan_total_dirs,series_found,series_duplicate,series_matched,series_no_match,"
+        "series_new,series_imported,series_failed,search_on_add,cv_match_threshold,"
+        "auto_accept_high_confidence,skip_no_match) VALUES (3,'/fixture','FILESYSTEM',"
+        "'COMPLETED',1,1,1,0,1,0,1,1,0,false,0.8,false,false); "
+        "INSERT INTO import_series(id,import_job_id,status,raw_series_name,file_count,has_files)"
+        " VALUES(9,3,'IMPORTED','Fixture',1,true); "
+        "INSERT INTO import_files(id,import_job_id,import_series_id,file_path,file_name,"
+        "file_size,file_format,has_comicinfo,status,is_preferred) VALUES(17,3,9,"
+        "'/fixture/f.cbz','f.cbz',4227910479,'cbz',false,'SAFETY_APPROVED',false)",
+    )
+    _migrate(url, "downgrade", "n1b23456789a", expected_error="Cannot narrow import byte counts")
+    assert (
+        sql(db, "SELECT file_size FROM import_files WHERE id=17 AND status='SAFETY_APPROVED'")
+        == "4227910479"
+    )
+    assert sql(db, "SELECT version_num FROM alembic_version") == "o2c3456789ab"
+    sql(db, "UPDATE import_files SET file_size=2147483647 WHERE id=17")
+    _migrate(url, "downgrade", "n1b23456789a")
+    _migrate(url, "upgrade", "head")
+    assert sql(db, "SELECT file_size FROM import_files WHERE id=17") == "2147483647"
+
+
 async def _suggestion_status_rehearsal(url, *, sqlite):
     from sqlalchemy import select, text
     from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine

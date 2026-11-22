@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- [Rehearse a SQLite library transfer](docs/sqlite-postgresql-migration.md#rehearse-a-copy)
+  against a disposable PostgreSQL 16 or 18 database. The rehearsal verifies
+  records and relationships without changing your files or switching databases.
 - Before a PostgreSQL migration, you can now [check the destination](docs/sqlite-postgresql-migration.md#check-the-destination)
   without changing it. Pullbox explains when a database is occupied, shared, or
   unsuitable. Neither the source nor the target command switches your live library.
@@ -139,6 +142,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- PostgreSQL now preserves import file sizes above 2 GiB, duplicate and
+  safety-approved import outcomes, and series classified as volumes.
 - Fixed a dashboard error after signing in on PostgreSQL. On SQLite, pending
   matching suggestions are now counted even if they were created with the
   database default. Previously accepted or dismissed suggestions stay closed.

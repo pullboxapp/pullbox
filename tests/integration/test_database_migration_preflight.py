@@ -197,7 +197,7 @@ def test_refuses_oversized_zip_directory(backup, tmp_path, monkeypatch, capsys):
 def test_backup_replaced_during_inspection_is_not_approved(backup, monkeypatch, capsys):
     from pullbox.services import database_migration_preflight as preflight
 
-    inspect = preflight._inspect
+    inspect = preflight.inspect_snapshot_connection
 
     def replace_after_read(*args):
         inspect(*args)
@@ -205,7 +205,7 @@ def test_backup_replaced_during_inspection_is_not_approved(backup, monkeypatch, 
         shutil.copyfile(backup, replacement)
         os.replace(replacement, backup)
 
-    monkeypatch.setattr(preflight, "_inspect", replace_after_read)
+    monkeypatch.setattr(preflight, "inspect_snapshot_connection", replace_after_read)
     code, report = run_cli(monkeypatch, capsys, backup)
     assert code == 1 and "backup_changed" in report["blockers"]
 

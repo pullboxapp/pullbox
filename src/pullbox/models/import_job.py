@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Float,
     ForeignKey,
     Index,
@@ -501,7 +502,9 @@ class ImportedFile(Base, IdentityMixin, TimestampMixin):
     # File metadata (populated from DiscoveredFile during scan)
     file_path: Mapped[str] = mapped_column(String(1000), nullable=False)
     file_name: Mapped[str] = mapped_column(String(500), nullable=False)
-    file_size: Mapped[int] = mapped_column(Integer, default=0)
+    file_size: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer(), "sqlite"), default=0
+    )
     file_format: Mapped[str] = mapped_column(String(10), nullable=False)
 
     # Parsed metadata from filename
