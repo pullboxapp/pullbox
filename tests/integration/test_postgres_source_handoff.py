@@ -5,18 +5,20 @@ import json
 import os
 import secrets
 import shutil
+import sqlite3
 import subprocess
 import sys
+from contextlib import closing
 from uuid import uuid4
 
 import pytest
+from sqlalchemy.engine import make_url
 
 from tests.integration import test_postgres_stage_review as review
 from tests.integration import test_postgres_transfer_stage as stages
 from tests.integration.test_postgres_first_start import docker
 from tests.integration.test_sqlite_source_snapshot import inspect
 
-server = stages.server
 backup = stages.backup
 populated = review.populated
 
@@ -51,8 +53,16 @@ def handoff(source, url, token, capture, scratch):
     return report
 
 
+@pytest.fixture(scope="module", params=[16, 18])
+def cluster(request):
+    from tests.integration.test_database_migration_target import disposable_server
+
+    with disposable_server(request.param) as instance:
+        yield instance
+
+
 async def test_recheck_original_source_and_reviewed_target(
-    server, populated, tmp_path, monkeypatch
+    cluster, populated, tmp_path, monkeypatch
 ):
     image = os.environ.get("PULLBOX_TEST_SQLITE_SNAPSHOT_IMAGE")
     if not image:
@@ -69,7 +79,30 @@ async def test_recheck_original_source_and_reviewed_target(
     scratch.mkdir(mode=0o700)
     source = data / "pullbox.db"
     shutil.copyfile(populated, source)
+    postgres, server = cluster
+    comics = data / "comics"
+    covers = comics / ".covers"
+    covers.mkdir()
+    (covers / "71").mkdir()
+    (covers / "71" / "series.jpg").write_bytes(b"original cover")
+    (comics / "one.cbz").write_bytes(b"first")
+    with closing(sqlite3.connect(source)) as db, db:
+        db.execute("INSERT INTO library_roots(id,path,name,enabled) VALUES(77,'/comics','main',1)")
+        db.execute(
+            "INSERT INTO library_files(id,library_root_id,file_path,file_name,file_size,"
+            "file_format,file_modified_at,match_confidence,has_comicinfo) VALUES "
+            "(101,77,'/comics/one.cbz','one.cbz',5,'CBZ',CURRENT_TIMESTAMP,'UNMATCHED',0)"
+        )
     token = tmp_path / "token"
+    key = secrets.token_hex(32)
+    xml = server[0] == 18
+    key_file = "config.xml" if xml else "application-key"
+
+    def key_contents(value):
+        return f"<Config><SecretKey>{value}</SecretKey></Config>" if xml else value
+
+    if xml:
+        (data / key_file).write_text(key_contents(key))
     token.write_text(secrets.token_hex(32))
     token.chmod(0o400)
     snapshot, receipt = tmp_path / "snapshot.db", tmp_path / "capture.json"
@@ -102,14 +135,19 @@ async def test_recheck_original_source_and_reviewed_target(
             "--pull=never",
             "--mount",
             f"type=bind,src={data},dst=/data",
+            "--mount",
+            f"type=bind,src={comics},dst=/comics",
             "-e",
             "PULLBOX_DB_URL=sqlite:////data/pullbox.db",
             "-e",
-            "PULLBOX_LIBRARY_ROOT=/data/comics",
+            "PULLBOX_LIBRARY_ROOT=/comics",
+            "-e",
+            "PULLBOX_SECRET_KEY",
             "--entrypoint=python",
             image,
             "-c",
             "pass",
+            env={**os.environ, "PULLBOX_SECRET_KEY": "" if xml else key},
             check=True,
         )
         checkpoint = inspect(name)["checkpoint_sha256"]
@@ -135,6 +173,110 @@ async def test_recheck_original_source_and_reviewed_target(
         await check_binding(url, token, captured["snapshot_sha256"])
         assert handoff(name, url, token, receipt, scratch)["source_and_target_verified"]
         captured_source = host.SourceCapture.read(receipt)
+        recovered = tmp_path / "restored.db"
+        shutil.copyfile(snapshot, recovered)
+        settings = tmp_path / "settings"
+        settings.mkdir(mode=0o700)
+        (settings / key_file).write_text(key_contents(key))
+        (settings / "compose.yaml").write_text("services: {pullbox: {image: local-test}}")
+        restored_settings = tmp_path / "restored-settings"
+        shutil.copytree(settings, restored_settings)
+        approval = scratch / "approval.json"
+        options = dict(
+            original_backup=snapshot,
+            restored_backup=recovered,
+            original_settings=settings,
+            restored_settings=restored_settings,
+            key_source="config-xml" if xml else "secret-file",
+            deployment_file="compose.yaml",
+            output=approval,
+        )
+        assert "cancelled" in await host.approve(
+            name, captured_source, scratch, url, token, confirm=lambda _: False, **options
+        )
+        assert not approval.exists()
+        assert "independent_backup" in await host.approve(
+            name,
+            captured_source,
+            scratch,
+            url,
+            token,
+            confirm=lambda _: True,
+            **{**options, "restored_backup": snapshot},
+        )
+        for directory in (settings, restored_settings):
+            (directory / key_file).write_text(key_contents("bc32" * 16))
+        assert "original_key" in await host.approve(
+            name, captured_source, scratch, url, token, confirm=lambda _: True, **options
+        )
+        assert not approval.exists()
+        for directory in (settings, restored_settings):
+            (directory / key_file).write_text(key_contents(key))
+        assert not await host.approve(
+            name, captured_source, scratch, url, token, confirm=lambda _: True, **options
+        )
+        assert approval.stat().st_mode & 0o777 == 0o600
+        assert key not in approval.read_text() and token.read_text() not in approval.read_text()
+
+        def deployment(secret, media, *, readonly=True):
+            inside = make_url(url).set(port=5432).render_as_string(hide_password=False)
+            run = docker(
+                "run",
+                "--rm",
+                "--pull=never",
+                "--network",
+                f"container:{postgres}",
+                "--user",
+                f"{os.getuid()}:{os.getgid()}",
+                "--read-only",
+                "--cap-drop=ALL",
+                "--mount",
+                f"type=bind,src={stages.ROOT / 'src'},dst=/candidate,readonly",
+                "--mount",
+                f"type=bind,src={token},dst=/run/secrets/token,readonly",
+                "--mount",
+                f"type=bind,src={approval},dst=/run/approval,readonly",
+                "--mount",
+                f"type=bind,src={recovered},dst=/run/backup.db" + (",readonly" if readonly else ""),
+                "--mount",
+                f"type=bind,src={media},dst=/comics,readonly",
+                "-e",
+                "PULLBOX_DB_URL",
+                "-e",
+                "PULLBOX_SECRET_KEY",
+                "--entrypoint=python",
+                image,
+                "-Bc",
+                "import sys,runpy;sys.path.insert(0,'/candidate');"
+                "runpy.run_module('pullbox.cli',run_name='__main__')",
+                "migration-check-first-start",
+                "--token-file",
+                "/run/secrets/token",
+                "--snapshot-sha256",
+                captured_source.snapshot,
+                "--approval-file",
+                "/run/approval",
+                "--restored-backup",
+                "/run/backup.db",
+                env={**os.environ, "PULLBOX_DB_URL": inside, "PULLBOX_SECRET_KEY": secret},
+            )
+            assert run.returncode in (0, 1) and secret not in run.stdout + run.stderr
+            result = json.loads(run.stdout)
+            assert run.returncode == int(not result["deployment_approval_verified"])
+            return result
+
+        assert deployment(key, comics)["deployment_approval_verified"]
+        assert not deployment(secrets.token_hex(32), comics)["deployment_approval_verified"]
+        wrong = tmp_path / "other-comics"
+        shutil.copytree(comics, wrong)
+        (wrong / "one.cbz").write_bytes(b"wrong")
+        assert not deployment(key, wrong)["deployment_approval_verified"]
+        shutil.copy2(comics / "one.cbz", wrong / "one.cbz")
+        (wrong / ".covers" / "71" / "series.jpg").write_bytes(b"replaced cover")
+        assert not deployment(key, wrong)["deployment_approval_verified"]
+        assert not deployment(key, comics, readonly=False)["deployment_approval_verified"]
+        approval.unlink()
+        assert stages.state(sql, db) == original_stage
         with monkeypatch.context() as patch:
             compare = host.compare_snapshot
 

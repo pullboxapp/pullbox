@@ -497,6 +497,62 @@ This command does not lock out host processes or change Compose. **Do not
 start either installation based on this report.** The configuration restore,
 file checks and explicit cutover are separate; `cutover_ready` remains false.
 
+### Approve and check the intended deployment
+
+Use this after the source-bound stage and independent backup restore above. It
+checks what the **proposed container actually sees**, not just what a host-side
+file browser sees. Keep the source stopped and automatic restarts disabled.
+
+1. From a private terminal on the source Docker host, request an approval:
+
+   ```sh
+   python scripts/check_postgres_handoff.py --container pullbox \
+     --capture-report /private-backups/capture.json --token-file first-start.token \
+     --scratch-dir /private-backups --write-approval /private-backups/approval.json \
+     --original-backup /private-backups/pullbox-offline.db \
+     --restored-backup /restored/pullbox-offline.db \
+     --original-settings /private-backups/settings --restored-settings /restored/settings \
+     --key-source secret-file
+   ```
+
+   Use `config-xml` instead for an installation whose effective key came from
+   `config.xml`. The tool checks that key against the stopped source, even
+   when there are no saved provider credentials. It never prints the key.
+   Confirm the snapshot identifier at the prompt. A private approval file is
+   written **only if** the two backups, settings, source media, stopped source
+   and reviewed target pass their checks. Enter cancels. An existing approval
+   is not overwritten. An approval expires in one hour.
+
+   Media paths come from the source database and Docker mounts. This host
+   workflow requires host-readable bind mounts without nested mounts under a
+   checked media directory, including access to the original data directory for
+   the legacy cover cache and, when applicable, the effective `config.xml`.
+   It does not guess paths for Docker-managed volumes.
+   The default checks every registered comic's file evidence and hashes a
+   representative sample per root, plus placement and cover evidence. Use
+   `--all-files` to hash every registered comic on both sides.
+
+2. In the proposed Compose deployment, temporarily mount **only the restored
+   SQLite backup file**, approval file and first-start token read-only. Keep
+   the secret files owner-only and readable by the Pullbox user. Use the
+   proposed service's normal key, comic mounts and cover settings:
+
+   ```sh
+   docker compose run --rm --no-deps --entrypoint python pullbox -m pullbox.cli \
+     migration-check-first-start --snapshot-sha256 "$STAGED_SNAPSHOT_SHA256" \
+     --token-file /run/secrets/pullbox-first-start \
+     --approval-file /run/secrets/pullbox-approval.json \
+     --restored-backup /run/migration/pullbox-offline.db
+   ```
+
+   Exit 0 and `deployment_approval_verified: true` mean the deployed key,
+   backup, actual media paths, content fingerprint and closed PostgreSQL target
+   matched the approval. A writable backup mount is rejected. Neither this
+   command nor issuing the approval enables PostgreSQL writes, runs migrations,
+   starts recovery, or edits Compose. If it expires, use a new approval filename
+   and repeat the host check. The container cannot tell whether someone restarted
+   SQLite after the approval was issued. Leave the stage closed.
+
 ## Check the key and comic files
 
 Use `migration-check-assets` from a Pullbox version that includes it. Supply

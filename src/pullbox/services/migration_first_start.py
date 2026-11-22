@@ -125,7 +125,7 @@ async def bind_reviewed_stage(
 
 async def check_binding(
     raw: str, token_file: Path, digest: str, *, source: str | None = None
-) -> None:
+) -> str:
     """Use the deployment's configured owner via postgres; never connect to the stage."""
     url = parse_target_url(raw)
     if url is None or not url.database or not _HEX.fullmatch(digest):
@@ -168,6 +168,7 @@ async def check_binding(
                         "The token, capture, snapshot or PostgreSQL instance does not match "
                         "the review."
                     )
+                return current
         finally:
             await engine.dispose()
     except (OSError, SQLAlchemyError, ModuleNotFoundError) as exc:

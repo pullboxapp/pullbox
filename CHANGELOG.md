@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- [Verify a migration approval inside the proposed Pullbox container](docs/sqlite-postgresql-migration.md#approve-and-check-the-intended-deployment).
+  Check the restored backup, application key, comic mounts and covers before opening PostgreSQL.
+
 - [Recheck a stopped SQLite library against its reviewed PostgreSQL stage](docs/sqlite-postgresql-migration.md#recheck-the-stopped-source-against-the-reviewed-target).
   Detect changes committed to the SQLite write-ahead log even when the source
   container has not restarted, without starting either installation.

@@ -24,7 +24,7 @@ from pullbox.services.migration_assets import AssetReport, check_saved_credentia
 from pullbox.services.migration_backup_input import BackupInputError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
 
@@ -130,7 +130,7 @@ def _settings(path: Path, key_file: str, definition: tuple[str, ...]) -> Iterato
         os.close(fd)
 
 
-def _key(raw: bytes, key_source: str) -> str:
+def restored_key(raw: bytes, key_source: str) -> str:
     try:
         if key_source == "config-xml":
             tree = parse_untrusted_xml(raw)
@@ -164,6 +164,7 @@ def check_restore(
     configured_url: str,
     *,
     deployment_file: str = "compose.yaml",
+    on_verified_key: Callable[[str], None] | None = None,
 ) -> RestoreReport:
     report = RestoreReport()
     try:
@@ -197,7 +198,8 @@ def check_restore(
                 report.blockers.update(dict.fromkeys(checks.blockers, 1))
             else:
                 evidence = AssetReport()
-                check_saved_credentials(db, _key(recovered.key_bytes, key_source), evidence)
+                recovered_key = restored_key(recovered.key_bytes, key_source)
+                check_saved_credentials(db, recovered_key, evidence)
                 report.credentials_checked = evidence.credentials_checked
                 report.key_evidence = evidence.key_evidence
                 report.blockers.update(evidence.blockers)
@@ -206,4 +208,6 @@ def check_restore(
     except (OSError, ValueError, RuntimeError, sqlite3.Error):
         report.blockers["restore_unavailable"] = 1
     report.restore_verified = not report.blockers
+    if report.restore_verified and on_verified_key is not None:
+        on_verified_key(recovered_key)
     return report

@@ -27,7 +27,7 @@ from pullbox.services.migration_covers import verify_covers
 from pullbox.services.migration_media import MediaMounts, verify_placements
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator
+    from collections.abc import Callable, Iterable, Iterator
 
 
 @dataclass
@@ -313,7 +313,7 @@ def checked_snapshot(
 def check_assets(
     path: Path,
     snapshot_sha256: str,
-    root_args: list[str],
+    root_args: list[str] | None,
     *,
     compare: str | None,
     all_files: bool,
@@ -321,6 +321,8 @@ def check_assets(
     config_path: Path,
     covers_dir: Path | None = None,
     legacy_covers_dir: Path | None = None,
+    verified_key: str | None = None,
+    root_on_host: Callable[[Path], Path] | None = None,
 ) -> AssetReport:
     report = AssetReport(hash_scope="all" if all_files else "sample")
     try:
@@ -332,7 +334,16 @@ def check_assets(
                 for code in checks.blockers:
                     report.block(code)
             else:
-                _credentials(db, config_path, report)
+                if verified_key is None:
+                    _credentials(db, config_path, report)
+                else:
+                    check_saved_credentials(db, verified_key, report)
+                if root_args is None:
+                    # A deployment check must use the paths Pullbox will actually open.
+                    root_args = [
+                        f"{i}={root_on_host(Path(p)) if root_on_host else p}"
+                        for i, p in db.execute("SELECT id,path FROM library_roots")
+                    ]
                 _files(
                     db,
                     _maps(root_args),

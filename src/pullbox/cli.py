@@ -157,6 +157,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     binding.add_argument("--token-file", type=Path, required=True)
     binding.add_argument("--snapshot-sha256", required=True)
+    binding.add_argument("--approval-file", type=Path, help="Private operator approval")
+    binding.add_argument(
+        "--restored-backup", type=Path, help="Read-only mount of the restored SQLite backup"
+    )
     restore = subparsers.add_parser(
         "migration-check-restore", help="Check independently restored deployment settings and key"
     )
@@ -281,11 +285,27 @@ def main() -> None:
         if not target.target_checks_passed:
             sys.exit(1)
     elif args.command == "migration-check-first-start":
+        from pullbox.services.migration_approval import verify_deployment
         from pullbox.services.migration_first_start import BindingError, check_binding
 
         blockers = {}
+        if bool(args.approval_file) != bool(args.restored_backup):
+            parser.error("--approval-file and --restored-backup must be used together")
         try:
-            asyncio.run(check_binding(get_settings().db_url, args.token_file, args.snapshot_sha256))
+            if args.approval_file:
+                asyncio.run(
+                    verify_deployment(
+                        get_settings(),
+                        args.restored_backup,
+                        args.approval_file,
+                        args.token_file,
+                        args.snapshot_sha256,
+                    )
+                )
+            else:
+                asyncio.run(
+                    check_binding(get_settings().db_url, args.token_file, args.snapshot_sha256)
+                )
         except BindingError as exc:
             blockers["first_start_binding"] = str(exc)
         except Exception:
@@ -295,6 +315,7 @@ def main() -> None:
             json.dumps(
                 {
                     "first_start_binding_verified": not blockers,
+                    "deployment_approval_verified": bool(args.approval_file) and not blockers,
                     "cutover_ready": False,
                     "blockers": blockers,
                 },
