@@ -21,7 +21,8 @@ if config.config_file_name is not None:
 # Override sqlalchemy.url from the PULLBOX_DB_URL environment variable.
 db_url = os.environ.get("PULLBOX_DB_URL", "")
 if db_url:
-    config.set_main_option("sqlalchemy.url", db_url)
+    # ConfigParser interpolates percent signs; SQLAlchemy needs the original URL escapes.
+    config.set_main_option("sqlalchemy.url", db_url.replace("%", "%%"))
 
 target_metadata = Base.metadata
 

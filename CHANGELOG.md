@@ -139,6 +139,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed a dashboard error after signing in on PostgreSQL. On SQLite, pending
+  matching suggestions are now counted even if they were created with the
+  database default. Previously accepted or dismissed suggestions stay closed.
+- Database setup now accepts percent-encoded characters in the PostgreSQL
+  password without printing the connection URL in a configuration error.
 - Fresh PostgreSQL installations can now run the historical schema migrations
   to completion. Existing SQLite libraries do not need to rerun migrations.
   This does not yet enable moving a library between database engines.

@@ -61,8 +61,12 @@ ownership, read-only databases, and targets with other connected sessions or
 pending prepared transactions. Use a fresh target rather than clearing a database
 that fails inspection. The same exit codes as the source check apply. Target
 inspection and application schema initialization have been rehearsed on
-PostgreSQL 16 and 18, including upgrades from a populated test database. This
-does not transfer a SQLite library or qualify the full application for cutover.
+PostgreSQL 16 and 18, including upgrades from a populated test database.
+On both versions, the packaged application passed first-run setup, sign-in,
+and opening the dashboard, Library, and Story Arcs. Populated rehearsals also
+verified that only pending matching suggestions count toward review and that
+retry-pending download history is preserved. These checks do not transfer a
+SQLite library or qualify the full application for cutover.
 
 **Neither pass is permission to cut over.** The checks do not reserve the
 target, stop live writers, initialize a schema, transfer rows, or verify a copy.

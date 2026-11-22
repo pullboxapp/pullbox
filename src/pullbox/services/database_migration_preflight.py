@@ -19,7 +19,7 @@ from pullbox.services.migration_backup_input import BackupInputError, database_s
 if TYPE_CHECKING:
     from pathlib import Path
 
-SOURCE_REVISION = "m0a123456789"
+SOURCE_REVISION = "n1b23456789a"
 # From an empty SQLite database migrated to SOURCE_REVISION, not from a user's library.
 _LAYOUT_SHA256 = "e7cba84ac733597272281907576d8c689dc1db888b33f15e9c91f0112ebe0d66"
 _NEXT = (

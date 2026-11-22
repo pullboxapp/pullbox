@@ -9,6 +9,7 @@ import sys
 import time
 from contextlib import closing
 from pathlib import Path
+from urllib.parse import quote
 from uuid import uuid4
 
 import pytest
@@ -197,7 +198,38 @@ def test_images_install_the_existing_postgres_extra(name):
 _CONFIG = str(Path(__file__).resolve().parents[2] / "alembic/alembic.ini")
 
 
-def _migrate(url, command, revision):
+def _check_migration_login(role, password, port, db, *, connects):
+    encoded = quote(password, safe="")
+    url = f"postgresql+asyncpg://{role}:{encoded}@127.0.0.1:{port}/{db}"
+    result = subprocess.run(
+        [sys.executable, "-m", "alembic", "-c", _CONFIG, "current"],
+        env={**os.environ, "PULLBOX_DB_URL": url},
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    output = result.stdout + result.stderr
+    if password in output or encoded in output:
+        pytest.fail(
+            "Migration diagnostics included the supplied database credential", pytrace=False
+        )
+    assert (result.returncode == 0) == connects
+
+
+def test_migration_connection_error_keeps_encoded_credentials_private():
+    _check_migration_login("fixture", secrets.token_hex(20) + "@:%", 1, "fixture", connects=False)
+
+
+def test_migration_accepts_encoded_database_credentials(server):
+    _, _, port, sql = server
+    role, db = "owner_" + uuid4().hex, "login_" + uuid4().hex
+    password = secrets.token_hex(20) + "@:%"
+    sql("postgres", f"CREATE ROLE {role} LOGIN PASSWORD '{password}'")
+    sql("postgres", f"CREATE DATABASE {db} OWNER {role} TEMPLATE template0")
+    _check_migration_login(role, password, port, db, connects=True)
+
+
+def _migrate(url, command, revision, *, expected_error=None):
     run = subprocess.run(
         [sys.executable, "-m", "alembic", "-c", _CONFIG, command, revision],
         env={**os.environ, "PULLBOX_DB_URL": url},
@@ -205,7 +237,9 @@ def _migrate(url, command, revision):
         text=True,
         timeout=120,
     )
-    if run.returncode:
+    if expected_error is not None:
+        assert run.returncode != 0 and expected_error in run.stderr
+    elif run.returncode:
         from sqlalchemy.engine import make_url
 
         step = [line for line in run.stderr.splitlines() if "Running " in line][-1:]
@@ -222,6 +256,7 @@ def test_fresh_postgres_migrations_reach_head(server):
     from alembic.script import ScriptDirectory
 
     from pullbox.models import Base
+    from pullbox.models.library import FileFormat
 
     _, password, port, sql = server
     database = "install_" + uuid4().hex
@@ -241,6 +276,8 @@ def test_fresh_postgres_migrations_reach_head(server):
         "'enable_interactive_search')",
     )
     assert defaults.splitlines() == ["true"] * 3
+    formats = sql(database, "SELECT enumlabel FROM pg_enum WHERE enumtypid='fileformat'::regtype")
+    assert set(formats.splitlines()) == {value.name for value in FileFormat}
 
 
 def _populated_upgrade(url, execute, scalar):
@@ -288,6 +325,14 @@ def test_populated_postgres_migration_preserves_values_and_backfills(server):
     _populated_upgrade(url, query, query)
     labels = query("SELECT enumlabel FROM pg_enum WHERE enumtypid='downloadclienttype'::regtype")
     assert {"AIRDCPP", "NZBGET", "DELUGE", "TRANSMISSION", "DIRECT"} <= set(labels.splitlines())
+    # The dashboard filters on retry-pending even when there are no such downloads.
+    query("UPDATE download_history SET state='RETRY_PENDING' WHERE id=93 AND issue_id=82")
+    for command, revision in [("downgrade", "m0a123456789"), ("upgrade", "head")]:
+        _migrate(url, command, revision)
+        assert (
+            query("SELECT state FROM download_history WHERE id=93 AND issue_id=82")
+            == "RETRY_PENDING"
+        )
 
 
 def test_populated_sqlite_migration_keeps_supported_layout_and_behavior(tmp_path):
@@ -306,3 +351,105 @@ def test_populated_sqlite_migration_keeps_supported_layout_and_behavior(tmp_path
     _populated_upgrade(f"sqlite+aiosqlite:///{db}", execute, scalar)
     report = inspect_migration_backup(db, configured_url="sqlite:///:memory:")
     assert report.source_checks_passed, report.blockers
+
+
+async def _suggestion_status_rehearsal(url, *, sqlite):
+    from sqlalchemy import select, text
+    from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+
+    from pullbox.models.matching_suggestion import MatchingSuggestion, SuggestionStatus
+    from pullbox.services.dashboard_intelligence_service import DashboardIntelligenceService
+
+    _migrate(url, "upgrade", "m0a123456789")
+    engine = create_async_engine(url)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO library_roots(id,name,path,enabled) "
+                    "VALUES (71,'Fixture','/fixture',true)"
+                )
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO library_files(id,library_root_id,file_path,"
+                    "file_name,file_size,file_format,file_modified_at,"
+                    "match_confidence,has_comicinfo) VALUES (82,71,"
+                    "'/fixture/test.cbz','test.cbz',10,'CBZ',CURRENT_TIMESTAMP,"
+                    "'UNMATCHED',false)"
+                )
+            )
+            # Omission exercises the historical database default, not the ORM default.
+            await conn.execute(
+                text("INSERT INTO matching_suggestions(id,library_file_id) VALUES (91,82)")
+            )
+            for i, status in enumerate(SuggestionStatus, start=92):
+                await conn.execute(
+                    text(
+                        "INSERT INTO matching_suggestions(id,library_file_id,"
+                        "status) VALUES (:id,82,:status)"
+                    ),
+                    {"id": i, "status": status.name if sqlite else status.value},
+                )
+
+        _migrate(url, "upgrade", "head")
+        async with AsyncSession(engine) as session:
+            dashboard = DashboardIntelligenceService(session)
+            assert (await dashboard._load_review_debt(None)).suggestions == 2
+            rows = (
+                await session.scalars(select(MatchingSuggestion).order_by(MatchingSuggestion.id))
+            ).all()
+            assert [(r.id, r.library_file_id, r.status) for r in rows] == [
+                (91, 82, SuggestionStatus.PENDING),
+                (92, 82, SuggestionStatus.PENDING),
+                (93, 82, SuggestionStatus.ACCEPTED),
+                (94, 82, SuggestionStatus.DISMISSED),
+            ]
+            rows[0].status = SuggestionStatus.ACCEPTED
+            rows[1].status = SuggestionStatus.DISMISSED
+            session.add(MatchingSuggestion(id=95, library_file_id=82))
+            await session.commit()
+            assert (await dashboard._load_review_debt(None)).suggestions == 1
+        async with engine.connect() as conn:
+            stored = (
+                (await conn.execute(text("SELECT status FROM matching_suggestions ORDER BY id")))
+                .scalars()
+                .all()
+            )
+            assert stored == ["accepted", "dismissed", "accepted", "dismissed", "pending"]
+        _migrate(url, "downgrade", "m0a123456789")
+        async with engine.connect() as conn:
+            restored = (
+                (await conn.execute(text("SELECT status FROM matching_suggestions ORDER BY id")))
+                .scalars()
+                .all()
+            )
+            assert restored == ([v.upper() for v in stored] if sqlite else stored)
+    finally:
+        await engine.dispose()
+
+
+async def test_dashboard_suggestions_on_migrated_postgres(server):
+    _, password, port, sql = server
+    db = "dashboard_" + uuid4().hex
+    sql("postgres", f"CREATE DATABASE {db} OWNER probe_owner TEMPLATE template0")
+    await _suggestion_status_rehearsal(
+        f"postgresql+asyncpg://probe_owner:{password}@127.0.0.1:{port}/{db}", sqlite=False
+    )
+
+
+async def test_dashboard_suggestions_on_migrated_sqlite(tmp_path):
+    file = tmp_path / "dashboard.db"
+    url = f"sqlite+aiosqlite:///{file}"
+    await _suggestion_status_rehearsal(url, sqlite=True)
+    # An unrecognized legacy decision must not be guessed, or its neighbors changed.
+    with closing(sqlite3.connect(file)) as db, db:
+        db.execute("UPDATE matching_suggestions SET status='other' WHERE id=94")
+        before = db.execute("SELECT id,status FROM matching_suggestions ORDER BY id").fetchall()
+    _migrate(url, "upgrade", "head", expected_error="Unrecognized matching suggestion status")
+    with closing(sqlite3.connect(file)) as db:
+        assert (
+            db.execute("SELECT id,status FROM matching_suggestions ORDER BY id").fetchall()
+            == before
+        )
+        assert db.execute("SELECT version_num FROM alembic_version").fetchone() == ("m0a123456789",)

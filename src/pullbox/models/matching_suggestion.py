@@ -74,8 +74,9 @@ class MatchingSuggestion(Base, IdentityMixin, TimestampMixin):
 
     # Status tracking
     status: Mapped[SuggestionStatus] = mapped_column(
-        SQLAlchemyEnum(SuggestionStatus),
+        SQLAlchemyEnum(SuggestionStatus, values_callable=lambda cls: [item.value for item in cls]),
         default=SuggestionStatus.PENDING,
+        server_default=SuggestionStatus.PENDING.value,
     )
 
     # Relationships
