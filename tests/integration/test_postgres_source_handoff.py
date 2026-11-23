@@ -17,6 +17,7 @@ from sqlalchemy.engine import make_url
 
 from tests.integration import postgres_import_workload as workload
 from tests.integration import postgres_linked_catalog as linked
+from tests.integration import postgres_manual_metadata as manual
 from tests.integration import postgres_native_followup as native
 from tests.integration import test_postgres_stage_review as review
 from tests.integration import test_postgres_transfer_stage as stages
@@ -115,6 +116,7 @@ async def test_recheck_original_source_and_reviewed_target(
             expected = workload.seed(db, comics, imports)
         if browser:
             owned_digest = linked.seed(db, imports, comics)
+            manual.seed(db, imports)
     originals = native.make_sources(imports) if browser else {}
     token = tmp_path / "token"
     key = secrets.token_hex(32)
@@ -474,6 +476,7 @@ async def test_recheck_original_source_and_reviewed_target(
                     )
                 if cases:
                     assert linked.verify(sql, restored) == refreshed_rows
+                    manual.verify(sql, restored, refreshed=True)
                     assert sql(restored, stat_query) == last_run
                 assert (
                     sql(restored, "SELECT name FROM story_arcs WHERE id=55")

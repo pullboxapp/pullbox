@@ -335,6 +335,7 @@ def test_file_metadata_preview_write_progress_and_focus(authed_page, seeded_serv
     page = authed_page
     page.set_viewport_size({"width": width, "height": 1000})
     state = {"job": None}
+    summary = "Preserved summary"
     endpoint = "**/api/v1/issues/1/file-metadata"
     page.route(endpoint + "/job", lambda route: route.fulfill(json=state))
     page.route(
@@ -351,7 +352,7 @@ def test_file_metadata_preview_write_progress_and_focus(authed_page, seeded_serv
                         "document": "MetronInfo.xml",
                         "field": "Summary",
                         "before": None,
-                        "after": "Preserved summary",
+                        "after": summary,
                     }
                 ],
             }
@@ -388,14 +389,31 @@ def test_file_metadata_preview_write_progress_and_focus(authed_page, seeded_serv
     dialog.get_by_role("button", name="Write both metadata files").click()
     expect(dialog.get_by_role("progressbar")).to_have_attribute("aria-valuenow", "42")
     expect(dialog.get_by_role("button", name="Cancel write")).to_be_visible()
+    dialog.get_by_role("button", name="Close", exact=True).click()
+    button.click()
+    expect(dialog.get_by_role("progressbar")).to_have_attribute("aria-valuenow", "42")
     state["job"]["state"] = "COMPLETED"
     state["job"]["percent"] = 100
     expect(dialog.get_by_text("Both metadata files are up to date.")).to_be_visible()
-    dialog.get_by_role("button", name="Preview again", exact=True).click()
+    summary = "New summary after refresh"
+    dialog.get_by_role("button", name="Close", exact=True).click()
+    button.click()
+    expect(dialog.get_by_text(summary, exact=False)).to_be_visible()
     expect(dialog.get_by_role("button", name="Write both metadata files")).to_be_visible()
     dialog.get_by_role("button", name="Close", exact=True).click()
     expect(dialog).not_to_be_visible()
     expect(button).to_be_focused()
+    page.route(
+        endpoint + "/preview",
+        lambda route: route.fulfill(status=409, json={"detail": "The comic changed."}),
+        times=1,
+    )
+    button.click()
+    expect(dialog.get_by_role("alert")).to_have_text("The comic changed.")
+    expect(dialog.get_by_text(summary, exact=False)).to_be_hidden()
+    expect(dialog.get_by_role("button", name="Write both metadata files")).to_be_hidden()
+    dialog.get_by_role("button", name="Preview again", exact=True).click()
+    expect(dialog.get_by_text(summary, exact=False)).to_be_visible()
     assert not errors
 
 

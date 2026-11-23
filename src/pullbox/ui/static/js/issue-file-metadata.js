@@ -54,7 +54,7 @@ function issueFileMetadata(issueId) {
       this.trigger = document.activeElement;
       this.open = true;
       this.$nextTick(() => this.$refs.dialog.focus({ preventScroll: true }));
-      if ((editor && !this.active() && !(this.job && this.job.state === "PAUSED")) || !this.job || ["FAILED", "CANCELLED"].includes(this.job.state)) await this.loadPreview();
+      if (!this.job || ["COMPLETED", "FAILED", "CANCELLED", "ROLLED_BACK"].includes(this.job.state)) await this.loadPreview();
     },
     close: function () {
       this.open = false;
@@ -130,6 +130,7 @@ function issueFileMetadata(issueId) {
       this.choicesDirty = true;
       var choices = reset ? {} : Object.assign({}, this.choices);
       var edits = reset ? {} : this.editorEdits();
+      if (reset && !this.recovery) { this.job = null; this.preview = null; }
       try {
         var data = await this.request(this.reviewEndpoint() + "/preview", this.editor ? { edits: edits } : Object.keys(choices).length ? { choices: choices } : {});
         if (this.disposed || generation !== this.generation) return;
