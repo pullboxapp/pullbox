@@ -214,6 +214,10 @@ def apply_issue_labels(
     ci: ET.Element, mi: ET.Element, ci_path: str, mi_path: str, values: tuple[str, ...]
 ) -> None:
     set_text(ci, ci_path, ", ".join(values))
+    apply_metron_labels(mi, mi_path, values)
+
+
+def apply_metron_labels(mi: ET.Element, mi_path: str, values: tuple[str, ...]) -> None:
     container = mi_path.split("/")[0]
     parent = mi.find(container)
     if parent is None:
@@ -223,6 +227,13 @@ def apply_issue_labels(
     _replace_list(mi, mi_path, values)
     if not len(parent) and not parent.attrib:
         mi.remove(parent)
+
+
+def embedded_reprints(mi: ET.Element) -> tuple[str, ...]:
+    parent = mi.find("Reprints")
+    if parent is not None and any(node.tag != "Reprint" or len(node) for node in parent):
+        raise ValueError("Reprints contain an XML annotation.")
+    return embedded_labels(mi, "Reprints/Reprint")
 
 
 SHARED_FIELD_LABELS = {

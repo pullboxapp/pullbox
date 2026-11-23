@@ -46,6 +46,7 @@ from pullbox.services.archive_metadata_preservation import (
     ArchiveMetadataRenderError,
     editor_arc_value,
     embedded_labels,
+    embedded_reprints,
     metron_simple_text,
     preserved_roots,
 )
@@ -69,6 +70,7 @@ EDITABLE_FIELDS = {
     "alternate_count": ("Total in alternate series", "text"),
     "alternative_number": ("Alternative issue number", "text"),
     "collection_title": ("Collection title", "text"),
+    "reprints": ("Reprints", "textarea"),
     "manga_volume": ("Manga volume", "text"),
     "black_and_white": ("Black and white", "text"),
     "manga": ("Manga", "text"),
@@ -85,6 +87,8 @@ EDITABLE_FIELDS = {
 }
 
 FIELD_HELP = {
+    "reprints": "MetronInfo.xml only. Enter one reprint per line; commas belong to the title. "
+    "Reordering keeps each retained entry's ID. New or renamed entries receive no ID.",
     "collection_title": "MetronInfo.xml only. The collection this book belongs to. "
     "This does not rename the issue, its stories, or its tracked series.",
     "manga_volume": "MetronInfo.xml only. A volume label for this book, such as 007-B. "
@@ -157,8 +161,8 @@ def _selectable(field: str, value: object) -> bool:
         return value is None or value in FLAG_CHOICES[field]
     if field == "community_rating":
         return value is None or shared_score(value) is not None
-    if field in LABEL_XML_PATHS or field == "series_groups":
-        return selectable_labels(value)
+    if field in LABEL_XML_PATHS or field in {"series_groups", "reprints"}:
+        return selectable_labels(value, reprints=field == "reprints")
     if field == "story_arcs":
         return not isinstance(value, str)
     if field == "imprint":
@@ -210,7 +214,7 @@ def _custom_value(field: str, text: str) -> object:
             raise IssueMetadataEditError(
                 "Enter a whole number from 0 to 2147483647 or -1 for unknown."
             )
-    elif field in SINGLE_DOCUMENT and field != "series_groups":
+    elif field in SINGLE_DOCUMENT and field not in {"series_groups", "reprints"}:
         try:
             value = descriptive_text(text)
         except ValueError as exc:
@@ -224,9 +228,15 @@ def _custom_value(field: str, text: str) -> object:
                 "Catalog page count must be a whole number from 0 to 1000000."
             )
         value = int(text)
-    elif field in LABEL_XML_PATHS or field == "series_groups":
+    elif field in LABEL_XML_PATHS or field in {"series_groups", "reprints"}:
         value = tuple(line.strip() for line in text.split("\n") if line.strip())
-        if not selectable_labels(value):
+        if field == "reprints":
+            if not selectable_labels(value, reprints=True):
+                raise IssueMetadataEditError(
+                    "Enter up to 128 distinct reprints, one per line, with no more than "
+                    f"{MAX_METRONINFO_FIELD_LENGTH} characters per entry."
+                )
+        elif not selectable_labels(value):
             raise IssueMetadataEditError(
                 f"Enter up to 128 distinct {field.replace('_', ' ')}, one per line, with no commas "
                 "and no more than 255 characters per entry."
@@ -310,9 +320,13 @@ def prepare_issue_editor(
                         f"{label} is read-only. {exc} Leave it unchanged or correct the source."
                     )
                     continue
-            elif field in METRON_ONLY_TAGS:
+            elif field in METRON_ONLY_TAGS or field == "reprints":
                 try:
-                    value = metron_simple_text(mi, METRON_ONLY_TAGS[field])
+                    value = (
+                        metron_simple_text(mi, METRON_ONLY_TAGS[field])
+                        if field in METRON_ONLY_TAGS
+                        else embedded_reprints(mi) or None
+                    )
                 except ValueError as exc:
                     locked_reason = (
                         f"{label} is read-only. {exc} Leave it unchanged or correct the source."

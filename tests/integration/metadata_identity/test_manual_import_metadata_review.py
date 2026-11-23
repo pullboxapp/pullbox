@@ -255,6 +255,7 @@ async def test_manual_editor_previews_and_applies_only_approved_edits(
                 "alternate_number": {"source": "custom", "value": "007-A"},
                 "alternative_number": {"source": "custom", "value": "105"},
                 "collection_title": {"source": "custom", "value": "Gotham Collection"},
+                "reprints": {"source": "custom", "value": "A, Vol. 1 #2\nGotham #3"},
             }
         },
     }
@@ -324,6 +325,10 @@ async def test_manual_editor_previews_and_applies_only_approved_edits(
                     and mi.findtext("AlternativeNumber") == "105"
                 )
                 assert mi.findtext("CollectionTitle") == "Gotham Collection"
+                assert [(r.text, r.get("id")) for r in mi.findall("Reprints/Reprint")] == [
+                    ("A, Vol. 1 #2", None),
+                    ("Gotham #3", None),
+                ]
                 assert ci.find("CollectionTitle") is None
                 assert archive.read("page-053.jpg") == b"page 53"
     assert source.read_bytes() == original

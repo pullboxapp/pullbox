@@ -1,16 +1,24 @@
-"""Issue label lists that round-trip through both embedded formats."""
+"""Bounded issue label lists and their format-specific separators."""
 
 from typing import Annotated
 
 from pydantic import AfterValidator, Field, TypeAdapter, ValidationError
 
+from pullbox.core.metroninfo import MAX_METRONINFO_FIELD_LENGTH
 
-def _labels(values: tuple[str, ...]) -> tuple[str, ...]:
-    if any(not v.isprintable() or "," in v or v != v.strip() for v in values) or len(
+
+def _distinct_lines(values: tuple[str, ...]) -> tuple[str, ...]:
+    if any(not v.isprintable() or v != v.strip() for v in values) or len(
         {v.casefold() for v in values}
     ) != len(values):
-        raise ValueError("Use distinct printable labels without commas")
+        raise ValueError("Use distinct printable labels, one per line")
     return values
+
+
+def _labels(values: tuple[str, ...]) -> tuple[str, ...]:
+    if any("," in v for v in values):
+        raise ValueError("Use distinct printable labels without commas")
+    return _distinct_lines(values)
 
 
 type IssueLabels = Annotated[
@@ -19,6 +27,12 @@ type IssueLabels = Annotated[
     AfterValidator(_labels),
 ]
 _LABELS: TypeAdapter[tuple[str, ...]] = TypeAdapter(IssueLabels)
+type ReprintLabels = Annotated[
+    tuple[Annotated[str, Field(min_length=1, max_length=MAX_METRONINFO_FIELD_LENGTH)], ...],
+    Field(min_length=1, max_length=128),
+    AfterValidator(_distinct_lines),
+]
+_REPRINTS: TypeAdapter[tuple[str, ...]] = TypeAdapter(ReprintLabels)
 
 # ComicInfo stores a single CSV element; MetronInfo stores individual resources.
 LABEL_XML_PATHS = {
@@ -30,11 +44,11 @@ LABEL_XML_PATHS = {
 }
 
 
-def selectable_labels(value: object) -> bool:
+def selectable_labels(value: object, *, reprints: bool = False) -> bool:
     if value is None:
         return True
     try:
-        _LABELS.validate_python(value)
+        (_REPRINTS if reprints else _LABELS).validate_python(value)
     except ValidationError:
         return False
     return True

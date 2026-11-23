@@ -37,10 +37,12 @@ from pullbox.services.archive_metadata_preservation import (
 )
 from pullbox.services.archive_metadata_preservation import (
     apply_issue_labels,
+    apply_metron_labels,
     apply_reviewed_arcs,
     coordinate_preserved_fields,
     editor_arc_value,
     embedded_labels,
+    embedded_reprints,
     metron_simple_text,
     preserved_roots,
     set_reviewed_imprint,
@@ -162,6 +164,17 @@ def render_archive_metadata(
             if not reviewed:
                 raise ArchiveMetadataRenderError("label_override_changed", tag)
             set_text(mi, tag, desired)
+    if "reprints" in protected:
+        try:
+            reprints = embedded_reprints(mi)
+        except ValueError as exc:
+            raise ArchiveMetadataRenderError("label_override_changed", "Reprints") from exc
+        desired_reprints = issue.values.reprints or ()
+        if "reprints" in reviewed_xml_fields:
+            if reprints != desired_reprints or not desired_reprints:
+                apply_metron_labels(mi, "Reprints/Reprint", desired_reprints)
+        elif reprints != desired_reprints:
+            raise ArchiveMetadataRenderError("label_override_changed", "Reprints")
     if "community_rating" in protected:
         _render_community_rating(
             ci, mi, issue.values.community_rating, "community_rating" in reviewed_xml_fields
