@@ -10,6 +10,7 @@ from pullbox.core.archive_metadata_fields import (
 )
 from pullbox.core.archive_metadata_fields import COMICINFO_ROLES, comicinfo_credits
 from pullbox.core.archive_metadata_fields import archive_format_label as _format_text
+from pullbox.core.issue_community_rating import annotated_rating, embedded_score
 from pullbox.core.issue_notes import UneditableNotesError, document_notes
 from pullbox.core.issue_numbers import normalize_issue_number_text
 from pullbox.core.metadata_identity import (
@@ -138,6 +139,10 @@ def render_archive_metadata(
     protected = {o.field for o in issue.origins if o.user_override}
     if not reviewed_xml_fields <= protected:
         raise ArchiveMetadataRenderError("invalid_choice")
+    if "community_rating" in protected:
+        _render_community_rating(
+            ci, mi, issue.values.community_rating, "community_rating" in reviewed_xml_fields
+        )
     if "notes" in protected:
         for root in (ci, mi):
             try:
@@ -189,6 +194,27 @@ def render_archive_metadata(
         raise ArchiveMetadataRenderError("label_override_changed", "StoryArc")
     coordinate_preserved_fields(ci, mi, shared_choices)
     return _validated_pair(ci, mi)
+
+
+def _render_community_rating(
+    ci: ET.Element, mi: ET.Element, score: str | None, reviewed: bool
+) -> None:
+    if not reviewed:
+        if any(embedded_score(root) != score for root in (ci, mi)):
+            raise ArchiveMetadataRenderError("label_override_changed", "CommunityRating")
+        return
+    if annotated_rating(mi):
+        raise ArchiveMetadataRenderError("unsupported_content", "CommunityRating")
+    if embedded_score(ci) != score:
+        set_text(ci, "CommunityRating", score)
+    if embedded_score(mi) == score:
+        return
+    node = mi.find("CommunityRating")
+    if node is not None:
+        mi.remove(node)
+    if score is not None:
+        # A changed average is a correction, not the result of the old votes.
+        ET.SubElement(ET.SubElement(mi, "CommunityRating"), "AverageRating").text = score
 
 
 def _identities(

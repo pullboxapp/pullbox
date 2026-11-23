@@ -6,6 +6,13 @@ from typing import cast
 from pydantic import ValidationError
 
 from pullbox.core.archive_metadata import ArchiveMetadataFiles
+from pullbox.core.issue_community_rating import (
+    RATING_HELP,
+    RATING_LOCKED,
+    annotated_rating,
+    embedded_score,
+    shared_score,
+)
 from pullbox.core.issue_notes import UneditableNotesError, document_notes, safe_notes_prose
 from pullbox.schemas.issue_metadata_editor import (
     EDITOR_XML_FIELDS,
@@ -48,6 +55,7 @@ EDITABLE_FIELDS = {
     "page_count": ("Catalog page count", "number"),
     "credits": ("Creator credits", "credits"),
     "age_rating": ("Age rating", "text"),
+    "community_rating": ("Community rating", "text"),
     "imprint": ("Imprint", "text"),
     "story_arcs": ("Embedded story arcs", "arcs"),
     **{name: (name.capitalize(), "textarea") for name in LABEL_XML_PATHS},
@@ -91,6 +99,8 @@ def display_editor_value(value: object) -> str:
 
 
 def _selectable(field: str, value: object) -> bool:
+    if field == "community_rating":
+        return value is None or shared_score(value) is not None
     if field in LABEL_XML_PATHS:
         return selectable_labels(value)
     if field == "story_arcs":
@@ -98,6 +108,18 @@ def _selectable(field: str, value: object) -> bool:
     if field == "imprint":
         return selectable_imprint(value)
     return field != "age_rating" or value is None or value in tuple(SharedAgeRating)
+
+
+def _score_help(count: str, *, reviewed: bool, keeps_average: bool) -> str:
+    if not count:
+        return RATING_HELP
+    votes = f" of {count} vote{'s' if count != '1' else ''}" if len(count) <= 16 else ""
+    if reviewed:
+        action = "keeps" if keeps_average else "removes"
+        return f"{RATING_HELP} This edit {action} the count{votes} in MetronInfo."
+    return (
+        f"{RATING_HELP} Changing or clearing the MetronInfo average also removes the count{votes}."
+    )
 
 
 def _custom_value(field: str, text: str) -> object:
@@ -118,6 +140,9 @@ def _custom_value(field: str, text: str) -> object:
                 "Enter Notes as plain text of up to 4096 characters, without identity markers "
                 "or legacy retailer references."
             )
+    elif field == "community_rating":
+        if shared_score(text) is None:
+            raise IssueMetadataEditError(RATING_HELP)
     elif field == "page_count":
         if not text.isascii() or not text.isdecimal() or len(text) > 7:
             raise IssueMetadataEditError(
@@ -179,6 +204,9 @@ def prepare_issue_editor(
         current = getattr(issue_state.values, field)
         options: dict[str, object] = {"library": current}
         locked_reason = ""
+        help_text = FIELD_HELP.get(field, "")
+        if field == "community_rating" and annotated_rating(mi):
+            locked_reason = RATING_LOCKED
         for source, document, root in (
             ("ComicInfo.xml", archive.comicinfo, ci),
             ("MetronInfo.xml", archive.metroninfo, mi),
@@ -190,6 +218,8 @@ def prepare_issue_editor(
                 except UneditableNotesError as exc:
                     locked_reason = str(exc)
                     continue
+            elif field == "community_rating":
+                value = embedded_score(root)
             elif field in LABEL_XML_PATHS:
                 ci_path, mi_path = LABEL_XML_PATHS[field]
                 value = embedded_labels(root, ci_path if root is ci else mi_path) or None
@@ -230,6 +260,8 @@ def prepare_issue_editor(
                         f"{label} has no value in that source. Leave it unchanged "
                         "or choose Clear value to keep it empty."
                     )
+                if field == "community_rating" and not _selectable(field, options[edit.source]):
+                    raise IssueMetadataEditError(RATING_HELP)
                 if field == "story_arcs" and isinstance(options[edit.source], str):
                     raise IssueMetadataEditError(
                         "These arc names and positions cannot be paired safely. "
@@ -264,6 +296,12 @@ def prepare_issue_editor(
                 provider_managed=edit.source == "reset",
             )
         proposed = MetadataValues.model_validate(values)
+        if field == "community_rating":
+            help_text = _score_help(
+                mi.findtext("CommunityRating/RatingCount", "").strip(),
+                reviewed=edit is not None and edit.source != "reset",
+                keeps_average=proposed.community_rating == options.get("MetronInfo.xml"),
+            )
         differs = any(value != current for value in options.values())
         arc_draft: tuple[IssueArcEntry, ...] = ()
         if field == "story_arcs":
@@ -300,7 +338,7 @@ def prepare_issue_editor(
                 allowed_values=tuple(SharedAgeRating) if field == "age_rating" else (),
                 overridden=bool(previous and previous.user_override),
                 differs=differs
-                or bool(locked_reason and previous and previous.user_override)
+                or bool(field == "notes" and locked_reason and previous and previous.user_override)
                 or (
                     field in EDITOR_XML_FIELDS
                     and current is not None
@@ -320,7 +358,7 @@ def prepare_issue_editor(
                     "Set the publisher in the series editor before adding or keeping an imprint. "
                     "To remove an existing imprint from this issue, choose Clear value."
                     if field == "imprint" and not series.values.publisher
-                    else FIELD_HELP.get(field, "")
+                    else help_text
                 ),
             )
         )

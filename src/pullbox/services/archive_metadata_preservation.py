@@ -216,6 +216,7 @@ def apply_issue_labels(
 
 
 SHARED_FIELD_LABELS = {
+    "CommunityRating": "community rating",
     "Notes": "notes",
     "AgeRating": "age rating",
     "Genre": "genres",

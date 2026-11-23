@@ -6,6 +6,7 @@ from typing import Literal, Self
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from pullbox.core.issue_community_rating import RATING_HELP, shared_score
 from pullbox.core.issue_notes import NOTES_LIMIT, safe_notes_prose
 from pullbox.core.issue_numbers import normalize_issue_number_text
 from pullbox.core.metadata_identity import (
@@ -70,6 +71,7 @@ class MetadataValues(BaseModel):
     store_date: date | None = None
     page_count: int | None = Field(default=None, ge=0, le=1000000, strict=True)
     age_rating: SharedAgeRating | None = Field(default=None, exclude_if=lambda v: v is None)
+    community_rating: str | None = Field(default=None, exclude_if=lambda v: v is None)
     tags: IssueLabels | None = Field(default=None, exclude_if=lambda v: v is None)
     story_arcs: IssueArcList | None = Field(default=None, exclude_if=lambda v: v is None)
     imprint: str | None = Field(default=None, max_length=255, exclude_if=lambda v: v is None)
@@ -80,6 +82,15 @@ class MetadataValues(BaseModel):
     locations: IssueLabels | None = Field(default=None, exclude_if=lambda v: v is None)
     image_url: str | None = Field(default=None, max_length=500)
     credits: MetadataCredits | None = None
+
+    @field_validator("community_rating")
+    @classmethod
+    def canonical_score(cls, value: str | None) -> str | None:
+        if value is not None and (normalized := shared_score(value)) is not None:
+            return normalized
+        if value is not None:
+            raise ValueError(RATING_HELP)
+        return None
 
     @field_validator("notes")
     @classmethod

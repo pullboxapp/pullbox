@@ -414,8 +414,10 @@ def review_metadata_pair(
         missing_publisher = (
             editor_field == "imprint" and not series.values.publisher and any(embedded.values())
         )
-        incompatible = any(not o.selectable for o in row.options) and (
-            embedded.get("ComicInfo.xml") != embedded.get("MetronInfo.xml")
+        incompatible = (
+            editor_field != "community_rating"
+            and any(not o.selectable for o in row.options)
+            and (embedded.get("ComicInfo.xml") != embedded.get("MetronInfo.xml"))
         )
         if ((row.overridden and row.differs) or incompatible or missing_publisher) and not any(
             c.key == key for c in shared_conflicts

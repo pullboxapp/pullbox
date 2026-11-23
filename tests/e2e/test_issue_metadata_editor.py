@@ -22,6 +22,17 @@ def test_editor_select_preview_apply_and_validation_retention(
     previews = []
     fields = [
         {
+            "key": "issue.community_rating",
+            "label": "Community rating",
+            "xml_conflict_key": "xml.CommunityRating",
+            "current": "",
+            "editable": True,
+            "input_type": "text",
+            "options": [{"source": "MetronInfo.xml", "value": "4.5"}],
+            "reason": "MetronInfo records 12 votes for this average.",
+            "differs": False,
+        },
+        {
             "key": "issue.notes",
             "label": "Notes",
             "xml_conflict_key": "xml.Notes",
@@ -218,6 +229,13 @@ def test_editor_select_preview_apply_and_validation_retention(
     tags = dialog.get_by_label("New Tags", exact=True)
     expect(tags).to_have_value("City\nNight")
     tags.fill("City\nHarbor")
+    dialog.get_by_label("Update Community rating", exact=True).check()
+    expect(dialog.get_by_text("MetronInfo records 12 votes for this average.")).to_be_visible()
+    dialog.get_by_role("button", name="Value source for Community rating", exact=True).click()
+    page.get_by_role("option", name="Enter correction", exact=True).click()
+    score = dialog.get_by_label("New Community rating", exact=True)
+    expect(score).to_have_attribute("inputmode", "decimal")
+    score.fill("0")
     dialog.get_by_label("Update Notes", exact=True).check()
     dialog.get_by_role("button", name="Value source for Notes", exact=True).click()
     page.get_by_role("option", name="ComicInfo.xml", exact=False).click()
@@ -244,6 +262,7 @@ def test_editor_select_preview_apply_and_validation_retention(
     dialog.get_by_role("button", name="Update preview", exact=True).click()
     expect(dialog.get_by_role("button", name="Apply selected changes", exact=True)).to_be_enabled()
     selected = {
+        "community_rating": {"source": "custom", "value": "0"},
         "notes": {"source": "ComicInfo.xml"},
         "title": {"source": "custom", "value": "My corrected title"},
         "age_rating": {"source": "custom", "value": "Teen"},

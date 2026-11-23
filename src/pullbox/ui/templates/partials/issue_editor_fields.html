@@ -64,7 +64,7 @@
               <div>{{ dropdown_select(name="issue-editor-value", trigger_id_expression="fieldIdPrefix + 'value-' + field.key", local_model="editorDrafts[field.key].value", options_expression="field.allowed_values.map(value => ({value: value, label: value}))", local_on_change="choicesDirty = true", disabled_expression="busy") }}</div>
             </template>
             <template x-if="!(field.allowed_values && field.allowed_values.length) && !['textarea', 'credits', 'arcs'].includes(field.input_type)">
-              <input class="input-pb w-full" :id="fieldIdPrefix + 'value-' + field.key" :type="field.input_type" x-model="editorDrafts[field.key].value" @input="choicesDirty = true" :disabled="busy">
+              <input class="input-pb w-full" :id="fieldIdPrefix + 'value-' + field.key" :type="field.input_type" :inputmode="field.key === 'issue.community_rating' ? 'decimal' : null" x-model="editorDrafts[field.key].value" @input="choicesDirty = true" :disabled="busy">
             </template>
           </div>
         </div>

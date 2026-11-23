@@ -65,6 +65,7 @@ before moving it aside. The selected source file is never the replacement target
 | Catalog page count | Integer 0-1000000 | PageCount | PageCount | Editable, never changes physical pages |
 | Creator credits | Up to 128 normalized Name / Role entries | Role-specific elements | Credits | Editable; resource IDs/unsupported content block destructive changes |
 | Age rating | Unknown, Everyone, Teen, or explicit clear | AgeRating | AgeRating | Editable even when both old values agree; a manual correction is saved with the issue |
+| Community rating | Exact score from 0 to 5, up to two decimal places | CommunityRating | CommunityRating/AverageRating | Zero is a score; clearing removes the rating. Metron's optional RatingCount stays only with the same numeric average. |
 | Tags | Up to 128 distinct labels, one per line, maximum 255 characters each | Tags, comma-separated | Tags/Tag | Editable; retained labels keep their resource IDs, added labels have no ID |
 | Genres, characters, teams, locations | Same limits as tags, separately per list | Genre, Characters, Teams, Locations | Genres/Genre, Characters/Character, Teams/Team, Locations/Location | Editable; IDs are preserved within the selected list only |
 | Issue number, native provider IDs | Identity | Number/Web | Number/IDs | Protected; use validated provider linking |
@@ -85,6 +86,28 @@ removes the prose, not the markers. If a note contains ambiguous identity text,
 it stays read-only; other fields can still be edited unless an earlier saved
 Notes correction now conflicts with the source. Different notes alone do not
 require review during an ordinary import.
+
+Community rating is separate from age rating and from the What's New release
+feed. A Metron average of 4.500 can be chosen as 4.5 without losing its votes.
+An average of 4.555 cannot be copied exactly to ComicInfo; leave it unchanged
+or explicitly enter the score to keep. Changing the Metron average or clearing
+it also removes its old vote count, shown in the preview before approval.
+Unselected ratings do not create new import conflicts.
+
+### Remaining XML Fields
+
+These groups are not yet editable in the single-issue review. This inventory
+distinguishes missing controls from fields that need a different workflow; it
+does not authorize dropping preserved data or writing to a new field on import.
+
+| Source fields | Remaining decision or workflow |
+| --- | --- |
+| ComicInfo Review, ScanInformation, MainCharacterOrTeam, SeriesGroup, BlackAndWhite, Manga | Format-specific descriptive fields. Review and scan information are not Summary or Notes; the Manga flag can also specify reading direction. |
+| ComicInfo AlternateSeries, AlternateNumber, AlternateCount; Metron AlternativeNumber, MangaVolume, CollectionTitle | Alternate numbering, collections, and manga volumes are not the tracked issue number or its parent series. Do not rematch or renumber from these fields. |
+| Metron Universes, Reprints, multiple Stories, Prices | Structured entries need controls that preserve resource IDs, universe designations and price currencies where present. A list of stories is not a single issue title. |
+| ComicInfo Web, GTIN; Metron URLs, GTIN | Distinguish descriptive links from provider identity evidence; keep primary URLs, ISBNs and UPCs distinct. |
+| ComicInfo Pages and attributes; Metron LastModified and nested resource IDs | Page annotations and source timestamps are not descriptive corrections. Resource IDs cannot be assigned by position or inferred from a renamed label. |
+| Metron Series/AlternativeNames and Series/VolumeCount | Series-wide values; do not implement these as issue-only overrides. |
 
 Arbitrary extension nodes, resource identifiers and page annotations remain under
 the existing preservation contract, not editable raw XML. See the separate
