@@ -83,6 +83,7 @@ before moving it aside. The selected source file is never the replacement target
 | Tags | Up to 128 distinct labels, one per line, maximum 255 characters each | Tags, comma-separated | Tags/Tag | Editable; retained labels keep their resource IDs, added labels have no ID |
 | Genres, characters, teams, locations | Same limits as tags, separately per list | Genre, Characters, Teams, Locations | Genres/Genre, Characters/Character, Teams/Team, Locations/Location | Editable; IDs are preserved within the selected list only |
 | Issue number, native provider IDs | Identity | Number/Web | Number/IDs | Protected; use validated provider linking |
+| Reference links | Ordered public HTTP(S) URLs, at most one primary | Web | URLs/URL with optional primary flag | Preview, reorder, correct, select from an XML document or clear. Provider links stay in their own document. |
 | Edition barcodes | Check digit and format | GTIN | GTIN/ISBN, GTIN/UPC | Edit either native identifier independently; explicitly select which one to use in an empty ComicInfo field. Does not change any provider match. |
 | Cover artwork URL | Artwork | Existing renderer projection | Existing renderer projection | Protected; artwork workflow |
 | Series title, sort title, publisher, summary, dates, type, archive format, status, count, volume, language, artwork | Series-wide catalog values | Existing series projection | Existing series projection | Read-only; no changes to siblings |
@@ -130,7 +131,6 @@ does not authorize dropping preserved data or writing to a new field on import.
 
 | Source fields | Remaining decision or workflow |
 | --- | --- |
-| ComicInfo Web; Metron URLs | Distinguish descriptive links from provider identity evidence; retain the primary URL separately. |
 | ComicInfo Pages and attributes; Metron LastModified and nested resource IDs | Page annotations and source timestamps are not descriptive corrections. Resource IDs cannot be assigned by position or inferred from a renamed label. |
 | Metron Series/AlternativeNames and Series/VolumeCount | Series-wide values; do not implement these as issue-only overrides. |
 
@@ -152,6 +152,17 @@ MetronInfo. Projection uses the ISBN-13 or full UPC without the supplement
 ([GS1 General Specifications](https://ref.gs1.org/standards/genspecs/)).
 Checksum validation cannot prove the number belongs to this edition. Barcodes
 are never used to create a provider link.
+
+**Reference links.** The [ComicInfo Web field](https://anansi-project.github.io/docs/comicinfo/documentation#web)
+stores multiple URLs separated by spaces; MetronInfo also supports one optional
+primary link. Choosing ComicInfo keeps the existing Metron primary if that URL
+remains in the list. Moving a row does not make it primary. Clear removes only
+descriptive links, never provider URLs or IDs. If a protected provider URL is
+primary, it stays primary. The editor does not visit these URLs. Lists containing
+credentials, ambiguous text or opaque XML are left alone rather than copied.
+If an external edit makes a previously saved link override unreadable, **Remove
+manual override** is still available. Used on its own, it releases the saved
+override without rewriting the comic.
 
 The age rating selector offers only identical labels from the
 [ComicInfo 2.0 schema](https://raw.githubusercontent.com/anansi-project/comicinfo/main/schema/v2.0/ComicInfo.xsd)

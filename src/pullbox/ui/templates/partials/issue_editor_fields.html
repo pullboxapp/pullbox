@@ -36,17 +36,22 @@
           <template x-for="option in field.options" :key="option.source">
             <p class="text-sm text-pb-text whitespace-pre-wrap break-words max-h-32 overflow-y-auto" x-show="editorDrafts[field.key].source === option.source || option.selectable === false" x-text="option.selectable === false ? option.source + ': ' + option.value + ' (no exact equivalent)' : editorValueLabel(field, option.value) || 'Not set'"></p>
           </template>
-          <p class="text-sm text-pb-warning" x-show="editorDrafts[field.key].source === 'clear'">This deliberately removes the value and keeps it empty during refresh.</p>
+          <p class="text-sm text-pb-warning" x-show="editorDrafts[field.key].source === 'clear'" x-text="field.key === 'issue.web_links' ? 'Clears the descriptive links in both documents. Protected provider links stay in place.' : 'This deliberately removes the value and keeps it empty during refresh.'"></p>
           <p class="text-sm text-pb-text-sec" x-show="editorDrafts[field.key].source === 'reset'">Keep the current value now and allow future provider refreshes to update it.</p>
           <p class="text-sm text-pb-warning" x-show="editorDrafts[field.key].source === 'reset' && !choicesDirty && preview && (preview.conflicts || []).some(c => c.key === field.key || c.key === field.xml_conflict_key)">This field has conflicting values. Choose which value to keep and apply it first, then remove the override.</p>
           <div x-show="editorDrafts[field.key].source === 'custom'" class="space-y-2">
-            <label x-show="!['arcs', 'universes', 'prices'].includes(field.input_type)" class="field-label" :for="fieldIdPrefix + 'value-' + field.key" x-text="'New ' + field.label"></label>
-            {% for kind, entry_name in [('universes', 'universe'), ('prices', 'price')] %}
+            <label x-show="!['arcs', 'universes', 'prices', 'links'].includes(field.input_type)" class="field-label" :for="fieldIdPrefix + 'value-' + field.key" x-text="'New ' + field.label"></label>
+            {% for kind, entry_name in [('universes', 'universe'), ('prices', 'price'), ('links', 'link')] %}
             <template x-if="field.input_type === '{{ kind }}'">
               <div class="space-y-2">
                 <template x-for="(entry, index) in editorDrafts[field.key].value" :key="entry.key">
                   <div class="flex flex-wrap items-end gap-2">
-                    {% if kind == 'prices' %}
+                    {% if kind == 'links' %}
+                    <label class="field-label grow min-w-0">Reference URL
+                      <input class="input-pb w-full" type="url" maxlength="2048" autocomplete="off" :aria-label="'Reference URL ' + (index + 1)" x-model="entry.url" @input="choicesDirty = true" :disabled="busy">
+                    </label>
+                    <label class="field-label"><input class="checkbox-pb" type="checkbox" :aria-label="'Primary link ' + (index + 1)" :checked="entry.primary" @change="setPrimaryLink(editorDrafts[field.key].value, entry, $event.target.checked)" :disabled="busy || field.primary_link_locked === true"> Primary</label>
+                    {% elif kind == 'prices' %}
                     <label class="field-label">Country code
                       <input class="input-pb w-24" type="text" maxlength="2" autocapitalize="characters" :aria-label="'Price country ' + (index + 1)" x-model="entry.country" @input="choicesDirty = true" :disabled="busy">
                     </label>
@@ -94,7 +99,7 @@
             <template x-if="field.allowed_values && field.allowed_values.length">
               <div>{{ dropdown_select(name="issue-editor-value", trigger_id_expression="fieldIdPrefix + 'value-' + field.key", local_model="editorDrafts[field.key].value", options_expression="field.allowed_values.map(value => ({value: value, label: editorValueLabel(field, value)}))", local_on_change="choicesDirty = true", disabled_expression="busy") }}</div>
             </template>
-            <template x-if="!(field.allowed_values && field.allowed_values.length) && !['textarea', 'credits', 'arcs', 'universes', 'prices'].includes(field.input_type)">
+            <template x-if="!(field.allowed_values && field.allowed_values.length) && !['textarea', 'credits', 'arcs', 'universes', 'prices', 'links'].includes(field.input_type)">
               <input class="input-pb w-full" :id="fieldIdPrefix + 'value-' + field.key" :type="field.input_type" :inputmode="field.key === 'issue.community_rating' ? 'decimal' : null" x-model="editorDrafts[field.key].value" @input="choicesDirty = true" :disabled="busy">
             </template>
           </div>

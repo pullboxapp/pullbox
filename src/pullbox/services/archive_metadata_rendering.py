@@ -33,6 +33,7 @@ from pullbox.schemas.issue_metadata_editor import EditorXmlField
 from pullbox.schemas.metadata_issue_arcs import comicinfo_arcs
 from pullbox.schemas.metadata_labels import LABEL_XML_PATHS, METRON_TITLE_LISTS
 from pullbox.schemas.metadata_snapshot import MetadataSnapshot, MetadataValues
+from pullbox.services.archive_metadata_links import DocumentLinks
 from pullbox.services.archive_metadata_preservation import (
     ArchiveMetadataRenderError as ArchiveMetadataRenderError,
 )
@@ -158,6 +159,21 @@ def render_archive_metadata(
     protected = {o.field for o in issue.origins if o.user_override}
     if not reviewed_xml_fields <= protected:
         raise ArchiveMetadataRenderError("invalid_choice")
+    if "web_links" in protected:
+        try:
+            links = DocumentLinks.read(ci, mi)
+            desired_links = issue.values.web_links or ()
+            if "web_links" in reviewed_xml_fields:
+                before_links = _document_ids(ci)
+                links.apply(ci, mi, desired_links)
+                if _document_ids(ci) != before_links:
+                    raise ArchiveMetadataRenderError("comicinfo_text_identity_change", "Web")
+            elif links.comicinfo != desired_links or links.metron != desired_links:
+                raise ArchiveMetadataRenderError("label_override_changed", "Web")
+        except ArchiveMetadataRenderError:
+            raise
+        except ValueError as exc:
+            raise ArchiveMetadataRenderError("label_override_changed", "Web") from exc
     if protected.intersection(COMICINFO_ONLY_TAGS):
         _render_comicinfo_fields(ci, issue.values, protected, reviewed_xml_fields)
     for barcode, child in NATIVE_BARCODES.items():
@@ -286,20 +302,20 @@ def render_archive_metadata(
     return _validated_pair(ci, mi, story_baseline=issue)
 
 
+def _document_ids(ci: ET.Element) -> tuple[set[str], set[str]]:
+    # Wrapper matching reads neighboring elements together, ignoring comments and PIs.
+    root = ci
+    if any(not isinstance(node.tag, str) for node in ci.iter()):
+        try:
+            root = parse_metadata_xml(ET.tostring(ci, encoding="utf-8"), root_name="ComicInfo")
+        except MetadataXmlError as exc:
+            raise ArchiveMetadataRenderError("invalid_output") from exc
+    return comicinfo_text_ids(" ".join(root.itertext()))
+
+
 def _render_comicinfo_fields(
     ci: ET.Element, values: MetadataValues, protected: set[str], reviewed: frozenset[EditorXmlField]
 ) -> None:
-    def document_ids() -> tuple[set[str], set[str]]:
-        # Wrapper matching reads all text together, so an ID may span neighboring elements.
-        # The nested reader ignores comments and processing instructions.
-        root = ci
-        if any(not isinstance(node.tag, str) for node in ci.iter()):
-            try:
-                root = parse_metadata_xml(ET.tostring(ci, encoding="utf-8"), root_name="ComicInfo")
-            except MetadataXmlError as exc:
-                raise ArchiveMetadataRenderError("invalid_output") from exc
-        return comicinfo_text_ids(" ".join(root.itertext()))
-
     for field, tag in COMICINFO_ONLY_TAGS.items():
         if field not in protected:
             continue
@@ -316,9 +332,9 @@ def _render_comicinfo_fields(
             continue
         if field not in reviewed:
             raise ArchiveMetadataRenderError("label_override_changed", tag)
-        before = document_ids()
+        before = _document_ids(ci)
         set_text(ci, tag, ", ".join(desired) if field == "series_groups" and desired else desired)
-        if before != document_ids():
+        if before != _document_ids(ci):
             raise ArchiveMetadataRenderError("comicinfo_text_identity_change", tag)
 
 

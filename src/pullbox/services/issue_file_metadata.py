@@ -445,6 +445,13 @@ def review_metadata_pair(
             shared_conflicts = [c for c in shared_conflicts if c.key != key]
             continue
         row = next(f for f in editor_fields if f.key == f"issue.{editor_field}")
+        if (
+            row.reset_only
+            and editor is not None
+            and editor_field in editor.edits
+            and editor.edits[editor_field].source == "reset"
+        ):
+            continue  # No XML selection is needed to relinquish this override.
         embedded = {o.source: o.value for o in row.options if o.source != "library"}
         missing_publisher = (
             editor_field == "imprint" and not series.values.publisher and any(embedded.values())
@@ -630,6 +637,20 @@ def _prepare(
         and files.metroninfo.payload == rendered.metroninfo
         and not (effective and any(edit.source != "reset" for edit in effective.edits.values()))
     )
+    if (
+        not converts
+        and not choices
+        and effective
+        and effective.edits
+        and all(e.source == "reset" for e in effective.edits.values())
+        and {f"issue.{key}" for key in effective.edits}
+        <= {f.key for f in editor_fields if f.reset_only}
+    ):
+        # A release-only field cannot authorize even incidental archive normalization.
+        changes, unchanged = [], True
+        review_key = hashlib.sha256(
+            evidence + (files.comicinfo.payload or b"") + (files.metroninfo.payload or b"")
+        ).hexdigest()
     return PreparedFileMetadata(
         target,
         series,

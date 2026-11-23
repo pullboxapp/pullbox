@@ -41,6 +41,7 @@ from pullbox.schemas.issue_metadata_editor import (
     IssueMetadataEditorReview,
 )
 from pullbox.schemas.metadata_issue_arcs import IssueArcEntry, comicinfo_arcs
+from pullbox.schemas.metadata_issue_links import IssueWebLink
 from pullbox.schemas.metadata_issue_prices import IssuePriceEntry
 from pullbox.schemas.metadata_issue_universes import IssueUniverseEntry
 from pullbox.schemas.metadata_labels import LABEL_XML_PATHS, METRON_TITLE_LISTS, selectable_labels
@@ -52,6 +53,7 @@ from pullbox.schemas.metadata_snapshot import (
     field_domain,
     selectable_imprint,
 )
+from pullbox.services.archive_metadata_links import DocumentLinks
 from pullbox.services.archive_metadata_preservation import (
     ArchiveMetadataRenderError,
     editor_arc_value,
@@ -71,6 +73,7 @@ from pullbox.services.metadata_series_refresh_state import (
 )
 
 EDITABLE_FIELDS = {
+    "web_links": ("Reference links", "links"),
     "title": ("Title", "text"),
     "description": ("Summary", "textarea"),
     "review": ("Review", "textarea"),
@@ -105,6 +108,8 @@ EDITABLE_FIELDS = {
 }
 
 FIELD_HELP = {
+    "web_links": "List reference links in the order you want. MetronInfo can mark one as primary. "
+    "Provider links stay in their original documents, even if you clear this list.",
     **BARCODE_HELP,
     **{
         key: f"MetronInfo.xml: {BARCODE_HELP[key]} If ComicInfo already uses this number, "
@@ -164,7 +169,7 @@ def display_editor_value(value: object) -> str:
     if value is None:
         return ""
     if isinstance(value, tuple):
-        if value and isinstance(value[0], (IssueUniverseEntry, IssuePriceEntry)):
+        if value and isinstance(value[0], (IssueUniverseEntry, IssuePriceEntry, IssueWebLink)):
             return "\n".join(e.label() for e in value)
         if value and isinstance(value[0], IssueArcEntry):
             return "\n".join(
@@ -370,11 +375,20 @@ def prepare_issue_editor(
     effective = dict(review.edits)
     native_barcodes: dict[str, object] = {}
     ci, mi = preserved_roots(files, allow_price_review=True)
+    links: DocumentLinks | None = None
     for field, (label, input_type) in EDITABLE_FIELDS.items():
         current = getattr(issue_state.values, field)
         options: dict[str, object] = {"library": current}
         locked_reason = ""
         help_text = FIELD_HELP.get(field, "")
+        if field == "web_links":
+            try:
+                links = DocumentLinks.read(ci, mi)
+            except ValueError as exc:
+                locked_reason = str(exc)
+            else:
+                if links.primary_locked:
+                    help_text += " The current primary link is a protected provider link."
         if field == "community_rating" and annotated_rating(mi):
             locked_reason = RATING_LOCKED
         for source, document, root in (
@@ -384,7 +398,11 @@ def prepare_issue_editor(
             value: object
             if field in SINGLE_DOCUMENT and source != SINGLE_DOCUMENT[field]:
                 continue
-            if field in COMICINFO_ONLY_TAGS:
+            if field == "web_links":
+                if links is None:
+                    continue
+                value = (links.comicinfo if root is ci else links.metron) or None
+            elif field in COMICINFO_ONLY_TAGS:
                 try:
                     value = embedded_comicinfo_value(field, ci.findtext(COMICINFO_ONLY_TAGS[field]))
                 except ValueError as exc:
@@ -445,7 +463,13 @@ def prepare_issue_editor(
                 edit = _mirrored_edit(options.get("ComicInfo.xml"), native_barcodes, values, review)
                 if edit:
                     effective[key] = edit
-        if edit and locked_reason:
+        previous = origins.get(field)
+        reset_only = bool(
+            field == "web_links" and locked_reason and previous and previous.user_override
+        )
+        if reset_only:
+            locked_reason += " Remove the manual override to keep the file as it is."
+        if edit and locked_reason and not (reset_only and edit.source == "reset"):
             raise IssueMetadataEditError(locked_reason)
         if (
             edit
@@ -458,7 +482,6 @@ def prepare_issue_editor(
         if edit and edit.source == "library" and all(v in (None, "", ()) for v in options.values()):
             del effective[key]
             edit = None
-        previous = origins.get(field)
         if edit is not None:
             if edit.source in ("isbn", "upc"):
                 projected = _native_choice(edit.source, review, native_barcodes, values)
@@ -553,6 +576,11 @@ def prepare_issue_editor(
                         "correct both values, or clear the one that does not belong."
                     )
         proposed = MetadataValues.model_validate(values)
+        if field == "web_links" and links and edit and edit.source != "reset":
+            try:
+                links.checked_web(proposed.web_links or ())
+            except ValueError as exc:
+                raise IssueMetadataEditError(str(exc)) from None
         if field == "community_rating":
             help_text = _score_help(
                 mi.findtext("CommunityRating/RatingCount", "").strip(),
@@ -595,11 +623,20 @@ def prepare_issue_editor(
                 current=display_editor_value(current),
                 current_source_label=issue_sources.get(field),
                 proposed=display_editor_value(getattr(proposed, field)),
-                editable=not locked_reason,
+                editable=not locked_reason or reset_only,
+                reset_only=reset_only,
                 input_type=input_type,
                 arc_draft=arc_draft,
                 universe_draft=universe_draft,
                 price_draft=price_draft,
+                link_draft=(
+                    issue_state.values.web_links or ()
+                    if current or (previous and previous.user_override)
+                    else tuple(dict.fromkeys((*links.metron, *links.comicinfo)))
+                )
+                if field == "web_links" and links
+                else (),
+                primary_link_locked=bool(field == "web_links" and links and links.primary_locked),
                 options=[
                     IssueMetadataEditorOption(
                         source=source,
@@ -614,7 +651,7 @@ def prepare_issue_editor(
                 overridden=bool(previous and previous.user_override),
                 differs=differs
                 or bool(
-                    (field == "notes" or field in SINGLE_DOCUMENT)
+                    (field in {"notes", "web_links"} or field in SINGLE_DOCUMENT)
                     and locked_reason
                     and previous
                     and previous.user_override

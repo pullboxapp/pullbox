@@ -33,6 +33,7 @@ from pullbox.core.metadata_identity import (
 from pullbox.core.metroninfo import MAX_METRONINFO_FIELD_LENGTH
 from pullbox.schemas.metadata_credits import MetadataCredits
 from pullbox.schemas.metadata_issue_arcs import IssueArcList
+from pullbox.schemas.metadata_issue_links import IssueWebLinks
 from pullbox.schemas.metadata_issue_prices import IssuePriceList
 from pullbox.schemas.metadata_issue_universes import IssueUniverseList
 from pullbox.schemas.metadata_labels import IssueLabels, MetronTitleList
@@ -108,6 +109,7 @@ class MetadataValues(BaseModel):
     story_titles: MetronTitleList | None = Field(default=None, exclude_if=lambda v: v is None)
     universes: IssueUniverseList | None = Field(default=None, exclude_if=lambda v: v is None)
     prices: IssuePriceList | None = Field(default=None, exclude_if=lambda v: v is None)
+    web_links: IssueWebLinks | None = Field(default=None, exclude_if=lambda v: v is None)
     isbn: str | None = Field(default=None, exclude_if=lambda v: v is None)
     upc: str | None = Field(default=None, exclude_if=lambda v: v is None)
     gtin: str | None = Field(default=None, exclude_if=lambda v: v is None)

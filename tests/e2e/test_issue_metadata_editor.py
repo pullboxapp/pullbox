@@ -22,6 +22,16 @@ def test_editor_select_preview_apply_and_validation_retention(
     previews = []
     fields = [
         {
+            "key": "issue.web_links",
+            "label": "Reference links",
+            "editable": True,
+            "input_type": "links",
+            "xml_conflict_key": "xml.Web",
+            "options": [],
+            "link_draft": [{"url": "https://publisher.example/edition", "primary": True}],
+            "differs": False,
+        },
+        {
             "key": "issue.upc",
             "label": "UPC",
             "editable": True,
@@ -316,6 +326,16 @@ def test_editor_select_preview_apply_and_validation_retention(
     expect(page.get_by_role("option", name="Use Metron ISBN", exact=True)).to_have_count(0)
     page.get_by_role("option", name="Use Metron UPC", exact=True).click()
     dialog.get_by_label("Update Cover prices", exact=True).check()
+    dialog.get_by_label("Update Reference links", exact=True).check()
+    dialog.get_by_role("button", name="Value source for Reference links", exact=True).click()
+    page.get_by_role("option", name="Enter correction", exact=True).click()
+    expect(dialog.get_by_label("Primary link 1", exact=True)).to_be_checked()
+    dialog.get_by_role("button", name="Add link entry", exact=True).click()
+    dialog.get_by_label("Reference URL 2", exact=True).fill("https://writer.example/interview")
+    dialog.get_by_label("Primary link 2", exact=True).check()
+    expect(dialog.get_by_label("Primary link 1", exact=True)).not_to_be_checked()
+    dialog.get_by_role("button", name="Move link 2 up", exact=True).click()
+    expect(dialog.get_by_label("Primary link 1", exact=True)).to_be_checked()
     dialog.get_by_role("button", name="Value source for Cover prices", exact=True).click()
     page.get_by_role("option", name="Enter correction", exact=True).click()
     expect(dialog.get_by_label("Price amount 2", exact=True)).to_have_value("0", timeout=2000)
@@ -378,6 +398,13 @@ def test_editor_select_preview_apply_and_validation_retention(
     dialog.get_by_role("button", name="Update preview", exact=True).click()
     expect(dialog.get_by_role("button", name="Apply selected changes", exact=True)).to_be_enabled()
     selected = {
+        "web_links": {
+            "source": "custom",
+            "value": [
+                {"url": "https://writer.example/interview", "primary": True},
+                {"url": "https://publisher.example/edition", "primary": False},
+            ],
+        },
         "gtin": {"source": "upc"},
         "prices": {
             "source": "custom",

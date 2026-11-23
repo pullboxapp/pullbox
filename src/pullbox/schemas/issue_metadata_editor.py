@@ -5,6 +5,7 @@ from typing import Annotated, Literal, Self, get_args
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from pullbox.schemas.metadata_issue_arcs import IssueArcEntry, IssueArcList
+from pullbox.schemas.metadata_issue_links import IssueWebLink, IssueWebLinks
 from pullbox.schemas.metadata_issue_prices import IssuePriceEntry, IssuePriceList
 from pullbox.schemas.metadata_issue_universes import (
     UNIVERSE_LIST,
@@ -13,6 +14,7 @@ from pullbox.schemas.metadata_issue_universes import (
 )
 
 type EditorConflictField = Literal[
+    "xml.Web",
     "xml.ISBN",
     "xml.UPC",
     "xml.GTIN",
@@ -45,6 +47,7 @@ type EditorConflictField = Literal[
 ]
 
 type EditableIssueField = Literal[
+    "web_links",
     "isbn",
     "upc",
     "gtin",
@@ -82,6 +85,7 @@ type EditableIssueField = Literal[
     "story_arcs",
 ]
 type EditorXmlField = Literal[
+    "web_links",
     "isbn",
     "upc",
     "gtin",
@@ -113,6 +117,7 @@ type EditorXmlField = Literal[
     "story_arcs",
 ]
 EDITOR_XML_FIELDS: dict[EditorXmlField, EditorConflictField] = {
+    "web_links": "xml.Web",
     "isbn": "xml.ISBN",
     "upc": "xml.UPC",
     "gtin": "xml.GTIN",
@@ -156,6 +161,7 @@ class IssueMetadataEdit(BaseModel):
         | IssueArcList
         | IssueUniverseList
         | IssuePriceList
+        | IssueWebLinks
         | None
     ) = None
 
@@ -193,7 +199,10 @@ class IssueMetadataEditorReview(BaseModel):
                 raise ValueError("Only the ComicInfo barcode can use a Metron ISBN or UPC.")
             if edit.source != "custom":
                 continue
-            if field == "prices":
+            if field == "web_links":
+                if not isinstance(edit.value, tuple) or not isinstance(edit.value[0], IssueWebLink):
+                    raise ValueError("Enter reference links and an optional primary designation.")
+            elif field == "prices":
                 if not isinstance(edit.value, tuple) or not isinstance(
                     edit.value[0], IssuePriceEntry
                 ):
@@ -242,11 +251,14 @@ class IssueMetadataEditorField(BaseModel):
     editable: bool = False
     reason: str = ""
     input_type: Literal[
-        "text", "textarea", "date", "number", "credits", "arcs", "universes", "prices"
+        "text", "textarea", "date", "number", "credits", "arcs", "universes", "prices", "links"
     ] = "text"
     arc_draft: tuple[IssueArcEntry, ...] = ()
     universe_draft: tuple[IssueUniverseEntry, ...] = Field(default=(), exclude_if=lambda v: not v)
     price_draft: tuple[IssuePriceEntry, ...] = Field(default=(), exclude_if=lambda v: not v)
+    link_draft: tuple[IssueWebLink, ...] = Field(default=(), exclude_if=lambda v: not v)
+    primary_link_locked: bool = Field(default=False, exclude_if=lambda v: not v)
+    reset_only: bool = Field(default=False, exclude_if=lambda v: not v)
     allowed_values: tuple[str, ...] = ()
     options: list[IssueMetadataEditorOption] = Field(default_factory=list)
     overridden: bool = False

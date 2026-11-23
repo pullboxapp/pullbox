@@ -19,6 +19,7 @@ function issueEditorDraftState(fieldIdPrefix) {
     },
     editorOptions: function (field) {
       var options = [{ value: "unchanged", label: "Leave unchanged" }];
+      if (field.reset_only) return options.concat({ value: "reset", label: "Remove manual override" });
       for (const option of field.options || []) {
         if (option.selectable !== false && option.value != null && String(option.value).trim() !== "")
           options.push({ value: option.source, label: option.source === "library" ? "Keep library value" : option.source });
@@ -38,6 +39,10 @@ function issueEditorDraftState(fieldIdPrefix) {
       return options;
     },
     initialEditorValue: function (field) {
+      if (field.input_type === "links") {
+        const entries = field.link_draft?.length ? field.link_draft : [{}];
+        return entries.map(entry => this.linkRow(entry));
+      }
       if (field.input_type === "prices") {
         const rows = field.price_draft?.length ? field.price_draft : [{}];
         return rows.map(entry => this.priceRow(entry));
@@ -63,6 +68,13 @@ function issueEditorDraftState(fieldIdPrefix) {
     },
     priceRow: function (entry = {}) {
       return { key: ++this.editorRowId, country: entry.country || "", amount: entry.amount || "" };
+    },
+    linkRow: function (entry = {}) {
+      return { key: ++this.editorRowId, url: entry.url || "", primary: entry.primary === true };
+    },
+    setPrimaryLink: function (rows, row, checked) {
+      for (const item of rows) item.primary = checked && item.key === row.key;
+      this.choicesDirty = true;
     },
     priceValues: function (rows) {
       if (!rows.length) throw new Error("Choose Clear value to remove all cover prices.");
@@ -133,6 +145,11 @@ function issueEditorDraftState(fieldIdPrefix) {
           if (key === "issue.story_arcs") edit.value = this.arcValues(draft.value);
           else if (key === "issue.universes") edit.value = this.universeValues(draft.value);
           else if (key === "issue.prices") edit.value = this.priceValues(draft.value);
+          else if (key === "issue.web_links") {
+            if (!draft.value.length) throw new Error("Choose Clear value to remove all reference links.");
+            if (draft.value.some(row => !row.url.trim())) throw new Error("Enter a URL for each reference link.");
+            edit.value = draft.value.map(row => ({ url: row.url.trim(), primary: row.primary }));
+          }
           else edit.value = draft.value;
         }
         edits[key.slice(6)] = edit;

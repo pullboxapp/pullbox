@@ -923,6 +923,11 @@ class SourceMetadataExtractor:
         return parse_source_sidecar(raw_text)
 
 
+def import_web_ids(web: str | None) -> tuple[int | None, int | None]:
+    """Issue and series evidence the existing import reader sees in the whole Web field."""
+    return _extract_issue_id_from_web(web), _extract_series_id_from_web(web)[0]
+
+
 def _extract_issue_id_from_web(web: str | None) -> int | None:
     if not web:
         return None

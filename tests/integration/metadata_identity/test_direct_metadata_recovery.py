@@ -750,6 +750,10 @@ async def test_recovery_offers_editor_for_an_unrenderable_arc_list(identity_prob
                     "prices": {"source": "custom", "value": [{"country": "CA", "amount": "0"}]},
                     "upc": {"source": "custom", "value": "036000291452-00311"},
                     "gtin": {"source": "upc"},
+                    "web_links": {
+                        "source": "custom",
+                        "value": [{"url": "https://publisher.example/book"}],
+                    },
                     "universes": {
                         "source": "custom",
                         "value": [{"name": "Earth", "designation": "Earth-2"}],
@@ -802,6 +806,14 @@ async def test_recovery_offers_editor_for_an_unrenderable_arc_list(identity_prob
             assert ET.fromstring(archive.read("ComicInfo.xml")).find("Reprints") is None
             universe = ET.fromstring(archive.read("MetronInfo.xml")).find("Universes/Universe")
             price = ET.fromstring(archive.read("MetronInfo.xml")).find("Prices/Price")
+            assert (
+                ET.fromstring(archive.read("ComicInfo.xml")).findtext("Web")
+                == "https://publisher.example/book"
+            )
+            assert (
+                ET.fromstring(archive.read("MetronInfo.xml")).findtext("URLs/URL")
+                == "https://publisher.example/book"
+            )
             assert ET.fromstring(archive.read("ComicInfo.xml")).findtext("GTIN") == "036000291452"
             assert (
                 ET.fromstring(archive.read("MetronInfo.xml")).findtext("GTIN/UPC")

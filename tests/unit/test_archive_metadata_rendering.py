@@ -373,6 +373,20 @@ def test_exact_issue_anchor_allows_series_separator_aliases(embedded, canonical)
     assert parse_metroninfo(pair.metroninfo).series == canonical
 
 
+def test_clearing_web_references_keeps_the_exact_comicvine_match():
+    series, issue = snapshots()
+    issue = issue.model_copy(update={"origins": (origin("web_links", user=True),)})
+    anchor = "https://comicvine.gamespot.com/issue/4000-7/"
+    pair = render_archive_metadata(
+        series,
+        issue,
+        files(ci=f"<ComicInfo><Web>https://example.org/notes {anchor}</Web></ComicInfo>"),
+        reviewed_xml_fields=frozenset({"web_links"}),
+    )
+    assert ET.fromstring(pair.comicinfo).findtext("Web") == anchor
+    assert ET.fromstring(pair.metroninfo).find("URLs") is None
+
+
 @pytest.mark.parametrize(
     "embedded,canonical,anchored",
     [
