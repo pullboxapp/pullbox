@@ -80,7 +80,7 @@ function issueFileMetadata(issueId) {
       return options;
     },
     initialEditorValue: function (field) {
-      if (field.key !== "issue.tags" || field.current || field.overridden) return field.current || "";
+      if (field.input_type !== "textarea" || !field.xml_conflict_key || field.current || field.overridden) return field.current || "";
       var files = field.options.filter(option => option.source !== "library");
       return files.length && files.every(option => option.selectable !== false && option.value === files[0].value)
         ? files[0].value : "";

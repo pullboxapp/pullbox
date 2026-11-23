@@ -37,10 +37,11 @@ contains an actual XML change, the normal reviewed archive write still applies.
 | Creator credits | Up to 128 normalized Name / Role entries | Role-specific elements | Credits | Editable; resource IDs/unsupported content block destructive changes |
 | Age rating | Unknown, Everyone, Teen, or explicit clear | AgeRating | AgeRating | Editable even when both old values agree; a manual correction is saved with the issue |
 | Tags | Up to 128 distinct labels, one per line, maximum 255 characters each | Tags, comma-separated | Tags/Tag | Editable; retained labels keep their resource IDs, added labels have no ID |
+| Genres, characters, teams, locations | Same limits as tags, separately per list | Genre, Characters, Teams, Locations | Genres/Genre, Characters/Character, Teams/Team, Locations/Location | Editable; IDs are preserved within the selected list only |
 | Issue number, native provider IDs | Identity | Number/Web | Number/IDs | Protected; use validated provider linking |
 | Cover artwork URL | Artwork | Existing renderer projection | Existing renderer projection | Protected; artwork workflow |
 | Series title, sort title, publisher, summary, dates, type, archive format, status, count, volume, language, artwork | Series-wide catalog values | Existing series projection | Existing series projection | Read-only; no changes to siblings |
-| Genres, characters, teams, locations, imprint, arcs/positions | Preserved XML-only values | Corresponding elements | Corresponding elements | Display both documents; existing Write file metadata resolves disagreements |
+| Imprint, arcs/positions | Preserved XML-only values | Corresponding elements | Corresponding elements | Display both documents; existing Write file metadata resolves disagreements |
 
 Arbitrary extension nodes, resource identifiers and page annotations remain under
 the existing preservation contract, not editable raw XML. See the separate
@@ -54,10 +55,11 @@ evidence, not translated into a guessed audience. Explicitly clearing a rating
 removes both elements; selecting Unknown writes both elements. No provider is
 queried for a rating. A provider refresh preserves a manual correction.
 
-Tags preserve the selected order. A comma inside one Metron tag is not two
-ComicInfo tags: review the original and explicitly replace or clear it. An
+Genres, characters, teams, locations, and tags preserve the selected order.
+A comma inside one Metron name is not two ComicInfo entries: review the
+original and explicitly replace or clear it. Within each field, an
 exact retained label keeps its Metron resource ID, a renamed label starts
-without one, and ambiguous duplicate IDs are never reassigned. A saved tag
+without one, and ambiguous duplicate IDs are never reassigned. A saved list
 override does not authorize overwriting later external changes.
 
 ## Safety Boundary

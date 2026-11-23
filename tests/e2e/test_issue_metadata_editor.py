@@ -62,6 +62,7 @@ def test_editor_select_preview_apply_and_validation_retention(
         },
         {
             "key": "issue.tags",
+            "xml_conflict_key": "xml.Tags",
             "label": "Tags",
             "current": "",
             "editable": True,

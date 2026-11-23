@@ -16,6 +16,7 @@ from pullbox.schemas.issue_file_metadata import (
     SharedXmlChoices,
     SharedXmlField,
 )
+from pullbox.schemas.metadata_labels import LABEL_XML_PATHS
 
 _SCHEMA_HINT = "{http://www.w3.org/2001/XMLSchema-instance}noNamespaceSchemaLocation"
 _CI_FIELDS = frozenset(
@@ -172,22 +173,24 @@ def _parts(value: str | None) -> tuple[str, ...]:
     return tuple(part.strip() for part in value.split(",") if part.strip()) if value else ()
 
 
-def embedded_tags(ci: ET.Element, mi: ET.Element) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    return _parts(ci.findtext("Tags")), tuple(
-        (n.text or "").strip() for n in mi.findall("Tags/Tag")
-    )
+def embedded_labels(root: ET.Element, path: str) -> tuple[str, ...]:
+    if "/" not in path:
+        return _parts(root.findtext(path))
+    return tuple((n.text or "").strip() for n in root.findall(path))
 
 
-def apply_issue_tags(ci: ET.Element, mi: ET.Element, values: tuple[str, ...]) -> None:
-    set_text(ci, "Tags", ", ".join(values))
-    parent = mi.find("Tags")
+def apply_issue_labels(
+    ci: ET.Element, mi: ET.Element, ci_path: str, mi_path: str, values: tuple[str, ...]
+) -> None:
+    set_text(ci, ci_path, ", ".join(values))
+    container = mi_path.split("/")[0]
+    parent = mi.find(container)
     if parent is None:
         if not values:
             return
-        ET.SubElement(mi, "Tags")
-    _replace_list(mi, "Tags/Tag", values)
-    parent = mi.find("Tags")
-    if parent is not None and not len(parent) and not parent.attrib:
+        parent = ET.SubElement(mi, container)
+    _replace_list(mi, mi_path, values)
+    if not len(parent) and not parent.attrib:
         mi.remove(parent)
 
 
@@ -202,13 +205,7 @@ SHARED_FIELD_LABELS = {
     "StoryArc": "story arcs and positions",
     "StoryArcNumber": "story-arc positions",
 }
-_LIST_FIELDS = (
-    ("Genre", "Genres/Genre"),
-    ("Tags", "Tags/Tag"),
-    ("Characters", "Characters/Character"),
-    ("Teams", "Teams/Team"),
-    ("Locations", "Locations/Location"),
-)
+_LIST_FIELDS = tuple(LABEL_XML_PATHS.values())
 _SCALAR_FIELDS = (("Imprint", "Publisher/Imprint"), ("AgeRating", "AgeRating"))
 _AGE_RATINGS = frozenset(
     {"Unknown", "Everyone", "Teen", "Teen Plus", "Mature", "Explicit", "Adult"}
@@ -275,17 +272,16 @@ def _replace_list(mi: ET.Element, path: str, values: tuple[str, ...]) -> None:
     matches_by_label: defaultdict[str, list[ET.Element]] = defaultdict(list)
     for node in old:
         matches_by_label[(node.text or "").strip()].append(node)
-    if path == "Tags/Tag":
-        counts = Counter(values)
-        for label, matches in matches_by_label.items():
-            if (
-                counts[label]
-                and (len(matches) != 1 or counts[label] != 1)
-                and any("id" in node.attrib for node in matches)
-            ):
-                raise ArchiveMetadataRenderError("ambiguous_tag_id", "Tags")
-            if any(len(node) for node in matches):
-                raise ArchiveMetadataRenderError("unsupported_content", "Tags")
+    counts = Counter(values)
+    for label, matches in matches_by_label.items():
+        if (
+            counts[label]
+            and (len(matches) != 1 or counts[label] != 1)
+            and any("id" in node.attrib for node in matches)
+        ):
+            raise ArchiveMetadataRenderError("ambiguous_list_id", parent_tag)
+        if any(len(node) for node in matches):
+            raise ArchiveMetadataRenderError("unsupported_content", parent_tag)
     for node in old:
         parent.remove(node)
     for value in values:
@@ -362,14 +358,16 @@ def _resolve_shared_fields(
         left = _parts(ci.findtext(field))
         right = tuple((n.text or "").strip() for n in mi.findall(path))
         if any(not value or "," in value for value in right):
-            if field == "Tags" and "xml.Tags" not in choices:
+            key = cast("SharedXmlField", f"xml.{field}")
+            if key not in choices:
+                label = SHARED_FIELD_LABELS[field]
                 conflicts.append(
                     FileMetadataConflict(
-                        key="xml.Tags",
-                        label="Tags",
+                        key=key,
+                        label=label.capitalize(),
                         options=[],
-                        note="A Metron tag cannot be represented as a ComicInfo tag. Open Edit "
-                        "metadata and enter the tags to keep, one per line, or clear them.",
+                        note=f"These Metron {label} cannot be copied directly to ComicInfo. Open "
+                        f"Edit metadata to enter the {label} to keep, one per line, or clear them.",
                     )
                 )
                 continue

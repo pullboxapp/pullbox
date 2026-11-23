@@ -87,17 +87,18 @@ def file_metadata_error(exc: BaseException) -> str:
     if isinstance(exc, IssueMetadataEditError):
         return str(exc)
     code = getattr(exc, "code", "")
-    if code in {"rating_override_changed", "tags_override_changed"}:
-        label = "age rating" if code == "rating_override_changed" else "tags"
+    if code in {"rating_override_changed", "label_override_changed"}:
+        label = SHARED_FIELD_LABELS.get(getattr(exc, "field", ""), "metadata")
         return (
             f"The file no longer matches your saved {label}. Open Edit metadata on "
             f"the issue, select {label.capitalize()}, and preview the value to keep. "
             "No file was changed."
         )
-    if code == "ambiguous_tag_id":
+    if code == "ambiguous_list_id":
+        label = getattr(exc, "field", "entries").lower()
         return (
-            "Multiple Metron tags share a name. Pullbox cannot tell which identifier to keep. "
-            "Remove that tag from your proposed list, or correct its IDs in the source, "
+            f"Multiple Metron {label} share a name. Pullbox cannot tell which identifier to keep. "
+            "Remove that name from your proposed list, or correct its IDs in the source, "
             "then preview again. No file was changed."
         )
     if code == "propagation_pair_required":
@@ -416,7 +417,7 @@ def _prepare(
             or (
                 exc.code != "unreconciled_field"
                 and not (
-                    editor and exc.code in {"rating_override_changed", "tags_override_changed"}
+                    editor and exc.code in {"rating_override_changed", "label_override_changed"}
                 )
             )
             or not any(

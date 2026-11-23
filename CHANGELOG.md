@@ -9,8 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Edit a managed issue's tags in both metadata files from **Edit metadata**. Preview
-  additions, removals, and reordering without losing IDs attached to retained tags.
+- Edit a managed issue's genres, characters, teams, locations, and tags in both
+  metadata files from **Edit metadata**. Preview additions, removals, and
+  reordering without losing the Metron IDs attached to names you keep.
 
 - **Edit metadata** on a managed issue can now change or clear its age rating even when
   the existing ratings agree. Preview the change to both XML documents before applying it.

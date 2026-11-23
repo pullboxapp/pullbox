@@ -4,19 +4,10 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from pullbox.schemas.issue_metadata_editor import IssueMetadataEditorField
+from pullbox.schemas.issue_metadata_editor import EditorConflictField, IssueMetadataEditorField
 
 type FileMetadataSource = Literal["library", "ComicInfo.xml", "MetronInfo.xml"]
-type SharedXmlField = Literal[
-    "xml.AgeRating",
-    "xml.Genre",
-    "xml.Tags",
-    "xml.Characters",
-    "xml.Teams",
-    "xml.Locations",
-    "xml.Imprint",
-    "xml.StoryArc",
-]
+type SharedXmlField = EditorConflictField | Literal["xml.Imprint", "xml.StoryArc"]
 type SharedXmlChoices = dict[SharedXmlField, Literal["ComicInfo.xml", "MetronInfo.xml"]]
 type FileMetadataField = (
     Literal[

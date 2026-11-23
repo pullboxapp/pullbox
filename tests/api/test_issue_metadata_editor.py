@@ -44,6 +44,29 @@ async def test_editor_exposes_clean_empty_and_protected_fields_without_writing(
         assert (path.read_bytes(), path.stat()) == before
 
 
+async def test_preview_accepts_all_editable_fields_together(authenticated_client, sec_db, tmp_path):
+    async with prepared(sec_db, tmp_path) as (path, _, plan):
+        issue_id = plan.target.binding.metadata.issues[0].local_id
+        endpoint = f"/api/v1/issues/{issue_id}/metadata-editor/preview"
+        headers = csrf(authenticated_client)
+        before = path.read_bytes()
+        initial = await authenticated_client.post(endpoint, json={}, headers=headers)
+        assert initial.status_code == 200
+        keys = {
+            f["key"].removeprefix("issue.")
+            for f in initial.json()["editor_fields"]
+            if f["editable"]
+        }
+        assert {"genres", "tags", "characters", "teams", "locations"} <= keys
+        edits = {key: {"source": "library"} for key in keys}
+        report = await authenticated_client.post(endpoint, json={"edits": edits}, headers=headers)
+        assert report.status_code == 200, report.text
+        assert {
+            f["key"].removeprefix("issue.") for f in report.json()["editor_fields"] if f["selected"]
+        } == keys
+        assert path.read_bytes() == before
+
+
 async def test_editor_custom_title_writes_both_xml_and_persists_override(
     authenticated_client, sec_db, tmp_path, monkeypatch
 ):

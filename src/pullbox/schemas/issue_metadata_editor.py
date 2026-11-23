@@ -4,6 +4,10 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+type EditorConflictField = Literal[
+    "xml.AgeRating", "xml.Tags", "xml.Genre", "xml.Characters", "xml.Teams", "xml.Locations"
+]
+
 type EditableIssueField = Literal[
     "title",
     "description",
@@ -13,11 +17,19 @@ type EditableIssueField = Literal[
     "credits",
     "age_rating",
     "tags",
+    "genres",
+    "characters",
+    "teams",
+    "locations",
 ]
-type EditorXmlField = Literal["age_rating", "tags"]
-EDITOR_XML_FIELDS: dict[EditorXmlField, Literal["xml.AgeRating", "xml.Tags"]] = {
+type EditorXmlField = Literal["age_rating", "tags", "genres", "characters", "teams", "locations"]
+EDITOR_XML_FIELDS: dict[EditorXmlField, EditorConflictField] = {
     "age_rating": "xml.AgeRating",
     "tags": "xml.Tags",
+    "genres": "xml.Genre",
+    "characters": "xml.Characters",
+    "teams": "xml.Teams",
+    "locations": "xml.Locations",
 }
 
 
@@ -37,7 +49,7 @@ class IssueMetadataEdit(BaseModel):
 class IssueMetadataEditorReview(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    edits: dict[EditableIssueField, IssueMetadataEdit] = Field(default_factory=dict, max_length=8)
+    edits: dict[EditableIssueField, IssueMetadataEdit] = Field(default_factory=dict, max_length=12)
 
     @property
     def reviewed_xml_fields(self) -> frozenset[EditorXmlField]:

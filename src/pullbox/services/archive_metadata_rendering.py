@@ -20,14 +20,15 @@ from pullbox.core.metadata_xml import MetadataXmlError, parse_metadata_xml
 from pullbox.core.metroninfo_schema import validate_metroninfo_xml
 from pullbox.schemas.issue_file_metadata import SharedXmlChoices
 from pullbox.schemas.issue_metadata_editor import EditorXmlField
+from pullbox.schemas.metadata_labels import LABEL_XML_PATHS
 from pullbox.schemas.metadata_snapshot import MetadataSnapshot, MetadataValues
 from pullbox.services.archive_metadata_preservation import (
     ArchiveMetadataRenderError as ArchiveMetadataRenderError,
 )
 from pullbox.services.archive_metadata_preservation import (
-    apply_issue_tags,
+    apply_issue_labels,
     coordinate_preserved_fields,
-    embedded_tags,
+    embedded_labels,
     preserved_roots,
     set_text,
 )
@@ -140,12 +141,14 @@ def render_archive_metadata(
     ):
         # A saved correction is not fresh approval to replace externally changed metadata.
         raise ArchiveMetadataRenderError("rating_override_changed", "AgeRating")
-    if "tags" in reviewed_xml_fields:
-        apply_issue_tags(ci, mi, issue.values.tags or ())
-    elif "tags" in protected and any(
-        existing != (issue.values.tags or ()) for existing in embedded_tags(ci, mi)
-    ):
-        raise ArchiveMetadataRenderError("tags_override_changed", "Tags")
+    for field, (ci_path, mi_path) in LABEL_XML_PATHS.items():
+        values = getattr(issue.values, field) or ()
+        if field in reviewed_xml_fields:
+            apply_issue_labels(ci, mi, ci_path, mi_path, values)
+        elif field in protected and (
+            embedded_labels(ci, ci_path) != values or embedded_labels(mi, mi_path) != values
+        ):
+            raise ArchiveMetadataRenderError("label_override_changed", ci_path)
     coordinate_preserved_fields(ci, mi, shared_choices)
     return _validated_pair(ci, mi)
 

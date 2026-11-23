@@ -14,6 +14,7 @@ from pullbox.schemas.issue_metadata_editor import (
     IssueMetadataEditorOption,
     IssueMetadataEditorReview,
 )
+from pullbox.schemas.metadata_labels import LABEL_XML_PATHS, selectable_labels
 from pullbox.schemas.metadata_snapshot import (
     FieldOrigin,
     MetadataSnapshot,
@@ -21,11 +22,10 @@ from pullbox.schemas.metadata_snapshot import (
     SharedAgeRating,
     field_domain,
 )
-from pullbox.schemas.metadata_tags import selectable_tags
 from pullbox.services.archive_metadata_binding import ArchiveMetadataBinding
 from pullbox.services.archive_metadata_preservation import (
     ArchiveMetadataRenderError,
-    embedded_tags,
+    embedded_labels,
     preserved_roots,
     review_preserved_fields,
 )
@@ -40,20 +40,20 @@ EDITABLE_FIELDS = {
     "page_count": ("Catalog page count", "number"),
     "credits": ("Creator credits", "credits"),
     "age_rating": ("Age rating", "text"),
-    "tags": ("Tags", "textarea"),
+    **{name: (name.capitalize(), "textarea") for name in LABEL_XML_PATHS},
 }
 SHARED_TAGS = {
-    "Genre": ("Genre", "Genres/Genre"),
-    "Characters": ("Characters", "Characters/Character"),
-    "Teams": ("Teams", "Teams/Team"),
-    "Locations": ("Locations", "Locations/Location"),
     "Imprint": ("Imprint", "Publisher/Imprint"),
     "StoryArc": ("Story arc", "Arcs/Arc/Name"),
     "StoryArcNumber": ("Story arc position", "Arcs/Arc/Number"),
 }
 
 FIELD_HELP = {
-    "tags": "One tag per line. Retained tags keep their Metron IDs; new or renamed tags get no ID.",
+    **{
+        name: "One entry per line. Existing names keep their Metron IDs; new or renamed entries "
+        "get no ID."
+        for name in LABEL_XML_PATHS
+    },
     "age_rating": "Only ratings with the same label in both formats are offered. "
     "Clear removes the rating; Unknown writes a rating of Unknown.",
     "page_count": "Catalog page count does not change the number of comic pages.",
@@ -91,12 +91,12 @@ def _custom_value(field: str, text: str) -> object:
                 "Catalog page count must be a whole number from 0 to 1000000."
             )
         value = int(text)
-    elif field == "tags":
+    elif field in LABEL_XML_PATHS:
         value = tuple(line.strip() for line in text.split("\n") if line.strip())
-        if not selectable_tags(value):
+        if not selectable_labels(value):
             raise IssueMetadataEditError(
-                "Enter up to 128 distinct tags, one per line, with no commas "
-                "and no more than 255 characters per tag."
+                f"Enter up to 128 distinct {field}, one per line, with no commas "
+                "and no more than 255 characters per entry."
             )
     elif field == "credits":
         credits = []
@@ -134,17 +134,17 @@ def prepare_issue_editor(
     values = issue.values.model_dump()
     fields: list[IssueMetadataEditorField] = []
     ci, mi = preserved_roots(files)
-    ci_tags, mi_tags = embedded_tags(ci, mi)
     for field, (label, input_type) in EDITABLE_FIELDS.items():
         current = getattr(issue_state.values, field)
         options: dict[str, object] = {"library": current}
-        for source, document, root, tags in (
-            ("ComicInfo.xml", archive.comicinfo, ci, ci_tags),
-            ("MetronInfo.xml", archive.metroninfo, mi, mi_tags),
+        for source, document, root in (
+            ("ComicInfo.xml", archive.comicinfo, ci),
+            ("MetronInfo.xml", archive.metroninfo, mi),
         ):
             value: object
-            if field == "tags":
-                value = tags or None
+            if field in LABEL_XML_PATHS:
+                ci_path, mi_path = LABEL_XML_PATHS[field]
+                value = embedded_labels(root, ci_path if root is ci else mi_path) or None
             elif field == "age_rating":
                 value = root.findtext("AgeRating")
             else:
@@ -162,10 +162,10 @@ def prepare_issue_editor(
                 if previous is None or not previous.user_override:
                     raise IssueMetadataEditError(f"{label} has no manual override to remove.")
             elif edit.source in options:
-                if field == "tags" and not selectable_tags(options[edit.source]):
+                if field in LABEL_XML_PATHS and not selectable_labels(options[edit.source]):
                     raise IssueMetadataEditError(
-                        "These tags cannot be written to both formats. "
-                        "Enter the tags to keep or choose Clear value."
+                        f"These {field} cannot be written to both formats. "
+                        f"Enter the {field} to keep or choose Clear value."
                     )
                 if (
                     field == "age_rating"
@@ -207,8 +207,8 @@ def prepare_issue_editor(
                         source=source,
                         value=display_editor_value(value),
                         selectable=(
-                            selectable_tags(value)
-                            if field == "tags"
+                            selectable_labels(value)
+                            if field in LABEL_XML_PATHS
                             else field != "age_rating"
                             or value is None
                             or value in tuple(SharedAgeRating)
