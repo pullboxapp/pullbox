@@ -22,6 +22,19 @@ def test_editor_select_preview_apply_and_validation_retention(
     previews = []
     fields = [
         {
+            "key": "issue.universes",
+            "label": "Universes",
+            "editable": True,
+            "input_type": "universes",
+            "xml_conflict_key": "xml.Universes",
+            "universe_draft": [
+                {"name": "Earth", "designation": "616"},
+                {"name": "Earth", "designation": "1610"},
+            ],
+            "options": [{"source": "MetronInfo.xml", "value": "Earth (616)\nEarth (1610)"}],
+            "differs": False,
+        },
+        {
             "key": "issue.series_groups",
             "label": "Series groups",
             "editable": True,
@@ -259,6 +272,15 @@ def test_editor_select_preview_apply_and_validation_retention(
     groups = dialog.get_by_label("New Series groups", exact=True)
     expect(groups).to_have_value("Gotham\nClassics")
     groups.fill("Classics\nGotham & Beyond")
+    dialog.get_by_label("Update Universes", exact=True).check()
+    dialog.get_by_role("button", name="Value source for Universes", exact=True).click()
+    page.get_by_role("option", name="Enter correction", exact=True).click()
+    expect(dialog.get_by_label("Universe designation 1", exact=True)).to_have_value("616")
+    dialog.get_by_role("button", name="Move universe 2 up", exact=True).click()
+    expect(dialog.get_by_label("Universe designation 1", exact=True)).to_have_value("1610")
+    dialog.get_by_role("button", name="Remove universe 2", exact=True).click()
+    dialog.get_by_role("button", name="Add universe entry", exact=True).click()
+    dialog.get_by_label("Universe name 2", exact=True).fill("Elsewhere, too")
     dialog.get_by_label("Update Community rating", exact=True).check()
     expect(dialog.get_by_text("MetronInfo records 12 votes for this average.")).to_be_visible()
     dialog.get_by_role("button", name="Value source for Community rating", exact=True).click()
@@ -292,6 +314,13 @@ def test_editor_select_preview_apply_and_validation_retention(
     dialog.get_by_role("button", name="Update preview", exact=True).click()
     expect(dialog.get_by_role("button", name="Apply selected changes", exact=True)).to_be_enabled()
     selected = {
+        "universes": {
+            "source": "custom",
+            "value": [
+                {"name": "Earth", "designation": "1610"},
+                {"name": "Elsewhere, too", "designation": None},
+            ],
+        },
         "series_groups": {"source": "custom", "value": "Classics\nGotham & Beyond"},
         "manga": {"source": "custom", "value": "YesAndRightToLeft"},
         "community_rating": {"source": "custom", "value": "0"},

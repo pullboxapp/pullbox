@@ -20,6 +20,7 @@ from pullbox.schemas.issue_file_metadata import (
     SharedXmlField,
 )
 from pullbox.schemas.metadata_issue_arcs import ARC_LIST, IssueArcEntry
+from pullbox.schemas.metadata_issue_universes import UNIVERSE_LIST, IssueUniverseEntry
 from pullbox.schemas.metadata_labels import LABEL_XML_PATHS
 
 _SCHEMA_HINT = "{http://www.w3.org/2001/XMLSchema-instance}noNamespaceSchemaLocation"
@@ -234,6 +235,57 @@ def embedded_reprints(mi: ET.Element) -> tuple[str, ...]:
     if parent is not None and any(node.tag != "Reprint" or len(node) for node in parent):
         raise ValueError("Reprints contain an XML annotation.")
     return embedded_labels(mi, "Reprints/Reprint")
+
+
+def _universe_pair(node: ET.Element) -> tuple[str, str | None]:
+    return node.findtext("Name", "").strip(), node.findtext("Designation", "").strip() or None
+
+
+def embedded_universes(mi: ET.Element) -> tuple[IssueUniverseEntry, ...] | str | None:
+    parent = mi.find("Universes")
+    if parent is None:
+        return None
+    if parent.attrib or any(
+        n.tag != "Universe"
+        or set(n.attrib) - {"id"}
+        or any(c.tag not in {"Name", "Designation"} or c.attrib or len(c) for c in n)
+        for n in parent
+    ):
+        raise ValueError("Universes contain an XML annotation.")
+    pairs = [_universe_pair(n) for n in parent]
+    if not pairs:
+        return None
+    try:
+        return UNIVERSE_LIST.validate_python([{"name": n, "designation": d} for n, d in pairs])
+    except ValidationError:
+        # Show historical values without claiming that they are safe to adopt.
+        return "\n".join(
+            f"{n} (designation: {d})" if d else n or "(missing name)" for n, d in pairs
+        )
+
+
+def apply_universes(mi: ET.Element, entries: tuple[IssueUniverseEntry, ...]) -> None:
+    parent = mi.find("Universes")
+    if not entries:
+        if parent is not None:
+            mi.remove(parent)
+        return
+    if parent is None:
+        parent = ET.SubElement(mi, "Universes")
+    by_pair: defaultdict[tuple[str, str | None], list[ET.Element]] = defaultdict(list)
+    for node in list(parent):
+        by_pair[_universe_pair(node)].append(node)
+        parent.remove(node)
+    for entry in entries:
+        retained = by_pair[entry.name, entry.designation]
+        if len(retained) == 1:
+            parent.append(retained[0])
+            continue
+        if any("id" in node.attrib for node in retained):
+            raise ArchiveMetadataRenderError("ambiguous_list_id", "Universes")
+        node = ET.SubElement(parent, "Universe")
+        set_text(node, "Name", entry.name)
+        set_text(node, "Designation", entry.designation)
 
 
 SHARED_FIELD_LABELS = {

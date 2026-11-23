@@ -40,7 +40,27 @@
           <p class="text-sm text-pb-text-sec" x-show="editorDrafts[field.key].source === 'reset'">Keep the current value now and allow future provider refreshes to update it.</p>
           <p class="text-sm text-pb-warning" x-show="editorDrafts[field.key].source === 'reset' && !choicesDirty && preview && (preview.conflicts || []).some(c => c.key === field.key || c.key === field.xml_conflict_key)">This field has conflicting values. Choose which value to keep and apply it first, then remove the override.</p>
           <div x-show="editorDrafts[field.key].source === 'custom'" class="space-y-2">
-            <label x-show="field.input_type !== 'arcs'" class="field-label" :for="fieldIdPrefix + 'value-' + field.key" x-text="'New ' + field.label"></label>
+            <label x-show="!['arcs', 'universes'].includes(field.input_type)" class="field-label" :for="fieldIdPrefix + 'value-' + field.key" x-text="'New ' + field.label"></label>
+            <template x-if="field.input_type === 'universes'">
+              <div class="space-y-2">
+                <template x-for="(entry, index) in editorDrafts[field.key].value" :key="entry.key">
+                  <div class="flex flex-wrap items-end gap-2">
+                    <label class="field-label grow min-w-0">Universe name
+                      <input class="input-pb w-full" type="text" maxlength="4096" :aria-label="'Universe name ' + (index + 1)" x-model="entry.name" @input="choicesDirty = true" :disabled="busy">
+                    </label>
+                    <label class="field-label grow min-w-0">Designation (optional)
+                      <input class="input-pb w-full" type="text" maxlength="4096" :aria-label="'Universe designation ' + (index + 1)" x-model="entry.designation" @input="choicesDirty = true" :disabled="busy">
+                    </label>
+                    <div class="flex flex-wrap gap-2">
+                      <button type="button" class="btn-ghost btn-sm" :aria-label="'Move universe ' + (index + 1) + ' up'" :disabled="busy || index === 0" @click="moveUniverse(editorDrafts[field.key].value, index, -1)">Up</button>
+                      <button type="button" class="btn-ghost btn-sm" :aria-label="'Move universe ' + (index + 1) + ' down'" :disabled="busy || index === editorDrafts[field.key].value.length - 1" @click="moveUniverse(editorDrafts[field.key].value, index, 1)">Down</button>
+                      <button type="button" class="btn-ghost btn-sm" :aria-label="'Remove universe ' + (index + 1)" :disabled="busy" @click="editorDrafts[field.key].value.splice(index, 1); choicesDirty = true">Remove</button>
+                    </div>
+                  </div>
+                </template>
+                <button type="button" class="btn-ghost btn-sm" :disabled="busy || editorDrafts[field.key].value.length >= 128" @click="editorDrafts[field.key].value.push(universeRow()); choicesDirty = true">Add universe entry</button>
+              </div>
+            </template>
             <template x-if="field.input_type === 'arcs'">
               <div class="space-y-2">
                 <template x-for="(entry, index) in editorDrafts[field.key].value" :key="entry.key">
@@ -63,7 +83,7 @@
             <template x-if="field.allowed_values && field.allowed_values.length">
               <div>{{ dropdown_select(name="issue-editor-value", trigger_id_expression="fieldIdPrefix + 'value-' + field.key", local_model="editorDrafts[field.key].value", options_expression="field.allowed_values.map(value => ({value: value, label: editorValueLabel(field, value)}))", local_on_change="choicesDirty = true", disabled_expression="busy") }}</div>
             </template>
-            <template x-if="!(field.allowed_values && field.allowed_values.length) && !['textarea', 'credits', 'arcs'].includes(field.input_type)">
+            <template x-if="!(field.allowed_values && field.allowed_values.length) && !['textarea', 'credits', 'arcs', 'universes'].includes(field.input_type)">
               <input class="input-pb w-full" :id="fieldIdPrefix + 'value-' + field.key" :type="field.input_type" :inputmode="field.key === 'issue.community_rating' ? 'decimal' : null" x-model="editorDrafts[field.key].value" @input="choicesDirty = true" :disabled="busy">
             </template>
           </div>

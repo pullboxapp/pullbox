@@ -1,7 +1,7 @@
 /* Preview and approve one managed comic; native conversion is explicit. */
 function issueEditorDraftState(fieldIdPrefix) {
   return {
-    fieldIdPrefix: fieldIdPrefix, allFields: false, editorDrafts: {}, arcRowId: 0, choicesDirty: false,
+    fieldIdPrefix: fieldIdPrefix, allFields: false, editorDrafts: {}, editorRowId: 0, choicesDirty: false,
     lastEditorDocument: "",
     initializeFields: function (data) {
       this.allFields = false; this.editorDrafts = {}; this.lastEditorDocument = "";
@@ -28,6 +28,10 @@ function issueEditorDraftState(fieldIdPrefix) {
       return options;
     },
     initialEditorValue: function (field) {
+      if (field.input_type === "universes") {
+        const rows = field.universe_draft?.length ? field.universe_draft : [{}];
+        return rows.map(entry => this.universeRow(entry));
+      }
       if (field.input_type === "arcs") {
         return (field.arc_draft && field.arc_draft.length ? field.arc_draft : [{ name: "", position: null }])
           .map(entry => this.arcRow(entry));
@@ -38,7 +42,24 @@ function issueEditorDraftState(fieldIdPrefix) {
         ? files[0].value : "";
     },
     arcRow: function (entry = {}) {
-      return { key: ++this.arcRowId, name: entry.name || "", position: entry.position == null ? "" : String(entry.position) };
+      return { key: ++this.editorRowId, name: entry.name || "", position: entry.position == null ? "" : String(entry.position) };
+    },
+    universeRow: function (entry = {}) {
+      return { key: ++this.editorRowId, name: entry.name || "", designation: entry.designation || "" };
+    },
+    moveUniverse: function (rows, index, offset) {
+      const target = index + offset;
+      if (this.busy || target < 0 || target >= rows.length) return;
+      rows.splice(target, 0, rows.splice(index, 1)[0]);
+      this.choicesDirty = true;
+    },
+    universeValues: function (rows) {
+      if (!rows.length) throw new Error("Choose Clear value to remove all universes.");
+      return rows.map(row => {
+        const name = row.name.trim(), designation = row.designation.trim();
+        if (!name) throw new Error("Each universe needs a name. The designation is optional.");
+        return { name: name, designation: designation || null };
+      });
     },
     arcValues: function (rows) {
       if (!rows.length) throw new Error("Choose Clear value to remove all embedded arcs.");
@@ -80,9 +101,13 @@ function issueEditorDraftState(fieldIdPrefix) {
       Object.keys(this.editorDrafts).forEach(key => {
         var draft = this.editorDrafts[key];
         if (!draft.selected || draft.source === "unchanged") return;
-        edits[key.slice(6)] = draft.source === "custom"
-          ? { source: draft.source, value: key === "issue.story_arcs" ? this.arcValues(draft.value) : draft.value }
-          : { source: draft.source };
+        const edit = { source: draft.source };
+        if (draft.source === "custom") {
+          if (key === "issue.story_arcs") edit.value = this.arcValues(draft.value);
+          else if (key === "issue.universes") edit.value = this.universeValues(draft.value);
+          else edit.value = draft.value;
+        }
+        edits[key.slice(6)] = edit;
       });
       return edits;
     },

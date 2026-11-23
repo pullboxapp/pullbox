@@ -39,10 +39,12 @@ from pullbox.services.archive_metadata_preservation import (
     apply_issue_labels,
     apply_metron_labels,
     apply_reviewed_arcs,
+    apply_universes,
     coordinate_preserved_fields,
     editor_arc_value,
     embedded_labels,
     embedded_reprints,
+    embedded_universes,
     metron_simple_text,
     preserved_roots,
     set_reviewed_imprint,
@@ -164,6 +166,16 @@ def render_archive_metadata(
             if not reviewed:
                 raise ArchiveMetadataRenderError("label_override_changed", tag)
             set_text(mi, tag, desired)
+    if "universes" in protected:
+        try:
+            universes = embedded_universes(mi)
+        except ValueError as exc:
+            raise ArchiveMetadataRenderError("label_override_changed", "Universes") from exc
+        if "universes" in reviewed_xml_fields:
+            if universes != issue.values.universes or not universes:
+                apply_universes(mi, issue.values.universes or ())
+        elif universes != issue.values.universes:
+            raise ArchiveMetadataRenderError("label_override_changed", "Universes")
     if "reprints" in protected:
         try:
             reprints = embedded_reprints(mi)

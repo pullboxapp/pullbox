@@ -2,11 +2,17 @@
 
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from pullbox.schemas.metadata_issue_arcs import IssueArcEntry, IssueArcList
+from pullbox.schemas.metadata_issue_universes import (
+    UNIVERSE_LIST,
+    IssueUniverseEntry,
+    IssueUniverseList,
+)
 
 type EditorConflictField = Literal[
+    "xml.Universes",
     "xml.Reprints",
     "xml.CollectionTitle",
     "xml.MangaVolume",
@@ -33,6 +39,7 @@ type EditorConflictField = Literal[
 ]
 
 type EditableIssueField = Literal[
+    "universes",
     "reprints",
     "collection_title",
     "manga_volume",
@@ -64,6 +71,7 @@ type EditableIssueField = Literal[
     "story_arcs",
 ]
 type EditorXmlField = Literal[
+    "universes",
     "reprints",
     "collection_title",
     "manga_volume",
@@ -89,6 +97,7 @@ type EditorXmlField = Literal[
     "story_arcs",
 ]
 EDITOR_XML_FIELDS: dict[EditorXmlField, EditorConflictField] = {
+    "universes": "xml.Universes",
     "reprints": "xml.Reprints",
     "collection_title": "xml.CollectionTitle",
     "manga_volume": "xml.MangaVolume",
@@ -119,7 +128,7 @@ class IssueMetadataEdit(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     source: Literal["library", "ComicInfo.xml", "MetronInfo.xml", "custom", "clear", "reset"]
-    value: Annotated[str, Field(max_length=200000)] | IssueArcList | None = None
+    value: Annotated[str, Field(max_length=200000)] | IssueArcList | IssueUniverseList | None = None
 
     @model_validator(mode="after")
     def explicit_custom_value(self) -> Self:
@@ -131,13 +140,38 @@ class IssueMetadataEdit(BaseModel):
 class IssueMetadataEditorReview(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    edits: dict[EditableIssueField, IssueMetadataEdit] = Field(default_factory=dict, max_length=29)
+    edits: dict[EditableIssueField, IssueMetadataEdit] = Field(default_factory=dict, max_length=30)
+
+    @field_validator("edits", mode="before")
+    @classmethod
+    def bind_universe_rows(cls, edits: object) -> object:
+        # A name-only row also fits an arc. Select the schema by field, not by guessing its shape.
+        if (
+            isinstance(edits, dict)
+            and isinstance(edit := edits.get("universes"), dict)
+            and edit.get("source") == "custom"
+        ):
+            rows = UNIVERSE_LIST.validate_python(edit.get("value"))
+            return {**edits, "universes": {**edit, "value": rows}}
+        return edits
 
     @model_validator(mode="after")
     def matching_input_types(self) -> Self:
         for field, edit in self.edits.items():
-            if edit.source == "custom" and (field == "story_arcs") != isinstance(edit.value, tuple):
-                raise ValueError("Enter arc names and optional positive positions as pairs")
+            if edit.source != "custom":
+                continue
+            if field == "universes":
+                if not isinstance(edit.value, tuple) or not isinstance(
+                    edit.value[0], IssueUniverseEntry
+                ):
+                    raise ValueError("Enter universe names and optional designations as pairs")
+            elif field == "story_arcs":
+                if not isinstance(edit.value, tuple) or not isinstance(
+                    edit.value[0], IssueArcEntry
+                ):
+                    raise ValueError("Enter arc names and optional positive positions as pairs")
+            elif isinstance(edit.value, tuple):
+                raise ValueError("This field accepts a text correction, not a list of entries")
         return self
 
     @property
@@ -167,8 +201,11 @@ class IssueMetadataEditorField(BaseModel):
     proposed: str
     editable: bool = False
     reason: str = ""
-    input_type: Literal["text", "textarea", "date", "number", "credits", "arcs"] = "text"
+    input_type: Literal["text", "textarea", "date", "number", "credits", "arcs", "universes"] = (
+        "text"
+    )
     arc_draft: tuple[IssueArcEntry, ...] = ()
+    universe_draft: tuple[IssueUniverseEntry, ...] = Field(default=(), exclude_if=lambda v: not v)
     allowed_values: tuple[str, ...] = ()
     options: list[IssueMetadataEditorOption] = Field(default_factory=list)
     overridden: bool = False

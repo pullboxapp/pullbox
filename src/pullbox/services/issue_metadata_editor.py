@@ -33,6 +33,7 @@ from pullbox.schemas.issue_metadata_editor import (
     IssueMetadataEditorReview,
 )
 from pullbox.schemas.metadata_issue_arcs import IssueArcEntry, comicinfo_arcs
+from pullbox.schemas.metadata_issue_universes import IssueUniverseEntry
 from pullbox.schemas.metadata_labels import LABEL_XML_PATHS, selectable_labels
 from pullbox.schemas.metadata_snapshot import (
     FieldOrigin,
@@ -47,6 +48,7 @@ from pullbox.services.archive_metadata_preservation import (
     editor_arc_value,
     embedded_labels,
     embedded_reprints,
+    embedded_universes,
     metron_simple_text,
     preserved_roots,
 )
@@ -71,6 +73,7 @@ EDITABLE_FIELDS = {
     "alternative_number": ("Alternative issue number", "text"),
     "collection_title": ("Collection title", "text"),
     "reprints": ("Reprints", "textarea"),
+    "universes": ("Universes", "universes"),
     "manga_volume": ("Manga volume", "text"),
     "black_and_white": ("Black and white", "text"),
     "manga": ("Manga", "text"),
@@ -87,6 +90,8 @@ EDITABLE_FIELDS = {
 }
 
 FIELD_HELP = {
+    "universes": "MetronInfo.xml only. A name can appear with different designations. "
+    "Reordering keeps IDs; new or changed name/designation pairs get no ID.",
     "reprints": "MetronInfo.xml only. Enter one reprint per line; commas belong to the title. "
     "Reordering keeps each retained entry's ID. New or renamed entries receive no ID.",
     "collection_title": "MetronInfo.xml only. The collection this book belongs to. "
@@ -134,6 +139,8 @@ def display_editor_value(value: object) -> str:
     if value is None:
         return ""
     if isinstance(value, tuple):
+        if value and isinstance(value[0], IssueUniverseEntry):
+            return "\n".join(e.label() for e in value)
         if value and isinstance(value[0], IssueArcEntry):
             return "\n".join(
                 f"{e.name} (position {e.position})" if e.position is not None else e.name
@@ -163,7 +170,7 @@ def _selectable(field: str, value: object) -> bool:
         return value is None or shared_score(value) is not None
     if field in LABEL_XML_PATHS or field in {"series_groups", "reprints"}:
         return selectable_labels(value, reprints=field == "reprints")
-    if field == "story_arcs":
+    if field in {"story_arcs", "universes"}:
         return not isinstance(value, str)
     if field == "imprint":
         return selectable_imprint(value)
@@ -320,13 +327,14 @@ def prepare_issue_editor(
                         f"{label} is read-only. {exc} Leave it unchanged or correct the source."
                     )
                     continue
-            elif field in METRON_ONLY_TAGS or field == "reprints":
+            elif field in METRON_ONLY_TAGS or field in {"reprints", "universes"}:
                 try:
-                    value = (
-                        metron_simple_text(mi, METRON_ONLY_TAGS[field])
-                        if field in METRON_ONLY_TAGS
-                        else embedded_reprints(mi) or None
-                    )
+                    if field in METRON_ONLY_TAGS:
+                        value = metron_simple_text(mi, METRON_ONLY_TAGS[field])
+                    elif field == "reprints":
+                        value = embedded_reprints(mi) or None
+                    else:
+                        value = embedded_universes(mi)
                 except ValueError as exc:
                     locked_reason = (
                         f"{label} is read-only. {exc} Leave it unchanged or correct the source."
@@ -443,6 +451,13 @@ def prepare_issue_editor(
             )
         differs = any(value != current for value in options.values())
         arc_draft: tuple[IssueArcEntry, ...] = ()
+        universe_draft: tuple[IssueUniverseEntry, ...] = ()
+        if field == "universes":
+            embedded = options.get("MetronInfo.xml")
+            if current or (previous and previous.user_override):
+                universe_draft = issue_state.values.universes or ()
+            elif isinstance(embedded, tuple):
+                universe_draft = embedded
         if field == "story_arcs":
             left, right = options.get("ComicInfo.xml"), options.get("MetronInfo.xml")
             expected = issue_state.values.story_arcs or ()
@@ -466,6 +481,7 @@ def prepare_issue_editor(
                 editable=not locked_reason,
                 input_type=input_type,
                 arc_draft=arc_draft,
+                universe_draft=universe_draft,
                 options=[
                     IssueMetadataEditorOption(
                         source=source,

@@ -119,6 +119,7 @@ def file_metadata_error(exc: BaseException) -> str:
             "AlternativeNumber": "alternative issue number",
             "CollectionTitle": "collection title",
             "Reprints": "reprints",
+            "Universes": "universes",
             "MangaVolume": "manga volume",
             "SeriesGroup": "series groups",
             "BlackAndWhite": "black and white",
@@ -133,6 +134,12 @@ def file_metadata_error(exc: BaseException) -> str:
             "No file was changed."
         )
     if code == "ambiguous_list_id":
+        if getattr(exc, "field", "") == "Universes":
+            return (
+                "Multiple Metron universes have the same name and designation. Pullbox cannot "
+                "tell which ID to keep. Omit that pair from your correction or correct its IDs "
+                "in the source, then preview again. No file was changed."
+            )
         label = getattr(exc, "field", "entries").lower()
         return (
             f"Multiple Metron {label} share a name. Pullbox cannot tell which identifier to keep. "
