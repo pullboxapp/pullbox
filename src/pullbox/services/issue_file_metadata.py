@@ -98,6 +98,11 @@ def file_metadata_error(exc: BaseException) -> str:
     if isinstance(exc, IssueMetadataEditError):
         return str(exc)
     code = getattr(exc, "code", "")
+    if code == "unsafe_note_edit":
+        return (
+            "Notes cannot be safely written with this file's protected identity evidence. "
+            "Shorten the note or correct the source, then preview again. No file was changed."
+        )
     if code in {"rating_override_changed", "label_override_changed"}:
         label = SHARED_FIELD_LABELS.get(getattr(exc, "field", ""), "metadata")
         if getattr(exc, "field", "") == "StoryArc":
@@ -421,7 +426,7 @@ def review_metadata_pair(
                     label=row.label,
                     options=[],
                     note=row.reason
-                    if missing_publisher
+                    if missing_publisher or not row.editable
                     else f"Select {row.label} to choose the value to write to both documents.",
                 )
             )

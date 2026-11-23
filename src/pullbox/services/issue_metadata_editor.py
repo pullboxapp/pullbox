@@ -6,6 +6,7 @@ from typing import cast
 from pydantic import ValidationError
 
 from pullbox.core.archive_metadata import ArchiveMetadataFiles
+from pullbox.core.issue_notes import UneditableNotesError, document_notes, safe_notes_prose
 from pullbox.schemas.issue_metadata_editor import (
     EDITOR_XML_FIELDS,
     EditableIssueField,
@@ -41,6 +42,7 @@ from pullbox.services.metadata_series_refresh_state import (
 EDITABLE_FIELDS = {
     "title": ("Title", "text"),
     "description": ("Summary", "textarea"),
+    "notes": ("Notes", "textarea"),
     "cover_date": ("Cover date", "date"),
     "store_date": ("Store date", "date"),
     "page_count": ("Catalog page count", "number"),
@@ -52,6 +54,7 @@ EDITABLE_FIELDS = {
 }
 
 FIELD_HELP = {
+    "notes": "Only the note text changes. Identity markers stay in their original XML document.",
     "story_arcs": "This edits the comic, not tracked arcs or their reading order. "
     "Positions are optional. If any are blank, only MetronInfo can store the known positions.",
     **{
@@ -107,9 +110,14 @@ def _custom_value(field: str, text: str) -> object:
             f"{EDITABLE_FIELDS[field][0]} contains unsupported control characters."
         )
     value: object = text
-    if field in {"description", "title"}:
+    if field in {"description", "title", "notes"}:
         # Use the text that both XML readers will return on the next preview.
         value = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+        if field == "notes" and not safe_notes_prose(value):
+            raise IssueMetadataEditError(
+                "Enter Notes as plain text of up to 4096 characters, without identity markers "
+                "or legacy retailer references."
+            )
     elif field == "page_count":
         if not text.isascii() or not text.isdecimal() or len(text) > 7:
             raise IssueMetadataEditError(
@@ -170,12 +178,19 @@ def prepare_issue_editor(
     for field, (label, input_type) in EDITABLE_FIELDS.items():
         current = getattr(issue_state.values, field)
         options: dict[str, object] = {"library": current}
+        locked_reason = ""
         for source, document, root in (
             ("ComicInfo.xml", archive.comicinfo, ci),
             ("MetronInfo.xml", archive.metroninfo, mi),
         ):
             value: object
-            if field in LABEL_XML_PATHS:
+            if field == "notes":
+                try:
+                    value = document_notes(root).prose
+                except UneditableNotesError as exc:
+                    locked_reason = str(exc)
+                    continue
+            elif field in LABEL_XML_PATHS:
                 ci_path, mi_path = LABEL_XML_PATHS[field]
                 value = embedded_labels(root, ci_path if root is ci else mi_path) or None
             elif field == "age_rating":
@@ -190,6 +205,8 @@ def prepare_issue_editor(
                 options[source] = value
         key = cast("EditableIssueField", field)
         edit = review.edits.get(key)
+        if edit and locked_reason:
+            raise IssueMetadataEditError(locked_reason)
         # Older select-all clients sent "keep library" even when no source had a value.
         if edit and edit.source == "library" and all(v in (None, "", ()) for v in options.values()):
             del effective[key]
@@ -269,7 +286,7 @@ def prepare_issue_editor(
                 current=display_editor_value(current),
                 current_source_label=issue_sources.get(field),
                 proposed=display_editor_value(getattr(proposed, field)),
-                editable=True,
+                editable=not locked_reason,
                 input_type=input_type,
                 arc_draft=arc_draft,
                 options=[
@@ -283,6 +300,7 @@ def prepare_issue_editor(
                 allowed_values=tuple(SharedAgeRating) if field == "age_rating" else (),
                 overridden=bool(previous and previous.user_override),
                 differs=differs
+                or bool(locked_reason and previous and previous.user_override)
                 or (
                     field in EDITOR_XML_FIELDS
                     and current is not None
@@ -297,7 +315,8 @@ def prepare_issue_editor(
                     if previous and previous.source
                     else "Library"
                 ),
-                reason=(
+                reason=locked_reason
+                or (
                     "Set the publisher in the series editor before adding or keeping an imprint. "
                     "To remove an existing imprint from this issue, choose Clear value."
                     if field == "imprint" and not series.values.publisher

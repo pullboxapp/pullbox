@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pullbox.schemas.metadata_issue_arcs import IssueArcEntry, IssueArcList
 
 type EditorConflictField = Literal[
+    "xml.Notes",
     "xml.AgeRating",
     "xml.Imprint",
     "xml.Tags",
@@ -18,6 +19,7 @@ type EditorConflictField = Literal[
 ]
 
 type EditableIssueField = Literal[
+    "notes",
     "title",
     "description",
     "cover_date",
@@ -34,9 +36,18 @@ type EditableIssueField = Literal[
     "story_arcs",
 ]
 type EditorXmlField = Literal[
-    "age_rating", "imprint", "tags", "genres", "characters", "teams", "locations", "story_arcs"
+    "notes",
+    "age_rating",
+    "imprint",
+    "tags",
+    "genres",
+    "characters",
+    "teams",
+    "locations",
+    "story_arcs",
 ]
 EDITOR_XML_FIELDS: dict[EditorXmlField, EditorConflictField] = {
+    "notes": "xml.Notes",
     "age_rating": "xml.AgeRating",
     "imprint": "xml.Imprint",
     "tags": "xml.Tags",
@@ -64,7 +75,7 @@ class IssueMetadataEdit(BaseModel):
 class IssueMetadataEditorReview(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    edits: dict[EditableIssueField, IssueMetadataEdit] = Field(default_factory=dict, max_length=14)
+    edits: dict[EditableIssueField, IssueMetadataEdit] = Field(default_factory=dict, max_length=15)
 
     @model_validator(mode="after")
     def matching_input_types(self) -> Self:

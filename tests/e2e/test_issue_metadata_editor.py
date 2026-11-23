@@ -22,6 +22,16 @@ def test_editor_select_preview_apply_and_validation_retention(
     previews = []
     fields = [
         {
+            "key": "issue.notes",
+            "label": "Notes",
+            "xml_conflict_key": "xml.Notes",
+            "current": "",
+            "editable": True,
+            "input_type": "textarea",
+            "options": [{"source": "ComicInfo.xml", "value": "Scan note"}],
+            "differs": False,
+        },
+        {
             "key": "issue.title",
             "label": "Title",
             "current": "Original",
@@ -208,6 +218,9 @@ def test_editor_select_preview_apply_and_validation_retention(
     tags = dialog.get_by_label("New Tags", exact=True)
     expect(tags).to_have_value("City\nNight")
     tags.fill("City\nHarbor")
+    dialog.get_by_label("Update Notes", exact=True).check()
+    dialog.get_by_role("button", name="Value source for Notes", exact=True).click()
+    page.get_by_role("option", name="ComicInfo.xml", exact=False).click()
     dialog.get_by_label("Update Imprint", exact=True).check()
     dialog.get_by_role("button", name="Value source for Imprint", exact=True).click()
     page.get_by_role("option", name="Enter correction", exact=True).click()
@@ -231,6 +244,7 @@ def test_editor_select_preview_apply_and_validation_retention(
     dialog.get_by_role("button", name="Update preview", exact=True).click()
     expect(dialog.get_by_role("button", name="Apply selected changes", exact=True)).to_be_enabled()
     selected = {
+        "notes": {"source": "ComicInfo.xml"},
         "title": {"source": "custom", "value": "My corrected title"},
         "age_rating": {"source": "custom", "value": "Teen"},
         "tags": {"source": "custom", "value": "City\nHarbor"},

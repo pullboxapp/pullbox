@@ -59,6 +59,7 @@ before moving it aside. The selected source file is never the replacement target
 | --- | --- | --- | --- | --- |
 | Issue title | Bounded text | Title | Stories/Story | Editable |
 | Summary | Bounded text | Summary | Summary | Editable |
+| Notes | Plain text, up to 4096 characters including protected markers | Notes | Notes | Choose the prose from either file, enter text, or clear it. Each document keeps its own trailing identity markers. |
 | Cover date | ISO date | Year/Month/Day | CoverDate | Editable, distinct from store date |
 | Store date | ISO date | No native equivalent | StoreDate | Editable; does not overwrite the cover date |
 | Catalog page count | Integer 0-1000000 | PageCount | PageCount | Editable, never changes physical pages |
@@ -77,6 +78,13 @@ any position is unknown, Pullbox writes the names but omits the ComicInfo
 position list; MetronInfo retains each known position on the correct arc.
 Ambiguous or malformed source values cannot be chosen as corrections. Review
 the other XML source, enter explicit pairs, or choose **Clear value**.
+
+Notes are not the issue summary. For example, copying a scan note from ComicInfo
+to MetronInfo does not copy a trailing `[CVDB1234]` marker. Clearing Notes
+removes the prose, not the markers. If a note contains ambiguous identity text,
+it stays read-only; other fields can still be edited unless an earlier saved
+Notes correction now conflicts with the source. Different notes alone do not
+require review during an ordinary import.
 
 Arbitrary extension nodes, resource identifiers and page annotations remain under
 the existing preservation contract, not editable raw XML. See the separate

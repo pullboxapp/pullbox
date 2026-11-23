@@ -10,6 +10,7 @@ from pullbox.core.archive_metadata_fields import (
 )
 from pullbox.core.archive_metadata_fields import COMICINFO_ROLES, comicinfo_credits
 from pullbox.core.archive_metadata_fields import archive_format_label as _format_text
+from pullbox.core.issue_notes import UneditableNotesError, document_notes
 from pullbox.core.issue_numbers import normalize_issue_number_text
 from pullbox.core.metadata_identity import (
     ExternalIdentityRef,
@@ -137,6 +138,23 @@ def render_archive_metadata(
     protected = {o.field for o in issue.origins if o.user_override}
     if not reviewed_xml_fields <= protected:
         raise ArchiveMetadataRenderError("invalid_choice")
+    if "notes" in protected:
+        for root in (ci, mi):
+            try:
+                note = document_notes(root)
+                if note.prose == issue.values.notes:
+                    continue
+                if "notes" not in reviewed_xml_fields:
+                    raise ArchiveMetadataRenderError("label_override_changed", "Notes")
+                replacement = note.replace(issue.values.notes)
+            except UneditableNotesError as exc:
+                code = (
+                    "unsafe_note_edit"
+                    if "notes" in reviewed_xml_fields
+                    else "label_override_changed"
+                )
+                raise ArchiveMetadataRenderError(code, "Notes") from exc
+            set_text(root, "Notes", replacement)
     if "age_rating" in reviewed_xml_fields:
         for root in (ci, mi):
             set_text(root, "AgeRating", issue.values.age_rating)

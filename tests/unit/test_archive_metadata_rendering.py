@@ -102,6 +102,22 @@ def test_paired_core_output_uses_one_snapshot_and_validates_offline():
     assert "[cv_vol_id:42]" in ci.findtext("Notes")
 
 
+def test_reviewed_notes_keep_generated_ids_in_comicinfo_and_never_truncate():
+    series, issue = snapshots(notes="Reviewed")
+    issue = issue.model_copy(update={"origins": (origin("notes", user=True),)})
+    source = files(ci="<ComicInfo><Notes>Source [CVDB0014]</Notes></ComicInfo>")
+    result = render_archive_metadata(
+        series, issue, source, reviewed_xml_fields=frozenset({"notes"})
+    )
+    assert ET.fromstring(result.comicinfo).findtext("Notes") == (
+        "Reviewed [CVDB0014] [cv_vol_id:42] [cv_issue_id:7]"
+    )
+    assert ET.fromstring(result.metroninfo).findtext("Notes") == "Reviewed"
+    oversized = issue.model_copy(update={"values": MetadataValues(notes="x" * 4096)})
+    with pytest.raises(ArchiveMetadataRenderError, match="unsafe_note_edit"):
+        render_archive_metadata(series, oversized, source, reviewed_xml_fields=frozenset({"notes"}))
+
+
 def test_long_synopsis_round_trips_in_both_documents_without_truncation():
     synopsis = "S" * 11531
     series, issue = snapshots(description=synopsis)

@@ -6,6 +6,7 @@ from typing import Literal, Self
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from pullbox.core.issue_notes import NOTES_LIMIT, safe_notes_prose
 from pullbox.core.issue_numbers import normalize_issue_number_text
 from pullbox.core.metadata_identity import (
     ExternalIdentityRef,
@@ -72,12 +73,22 @@ class MetadataValues(BaseModel):
     tags: IssueLabels | None = Field(default=None, exclude_if=lambda v: v is None)
     story_arcs: IssueArcList | None = Field(default=None, exclude_if=lambda v: v is None)
     imprint: str | None = Field(default=None, max_length=255, exclude_if=lambda v: v is None)
+    notes: str | None = Field(default=None, max_length=NOTES_LIMIT, exclude_if=lambda v: v is None)
     genres: IssueLabels | None = Field(default=None, exclude_if=lambda v: v is None)
     characters: IssueLabels | None = Field(default=None, exclude_if=lambda v: v is None)
     teams: IssueLabels | None = Field(default=None, exclude_if=lambda v: v is None)
     locations: IssueLabels | None = Field(default=None, exclude_if=lambda v: v is None)
     image_url: str | None = Field(default=None, max_length=500)
     credits: MetadataCredits | None = None
+
+    @field_validator("notes")
+    @classmethod
+    def notes_are_prose(cls, value: str | None) -> str | None:
+        if value is not None and (
+            not value or value.strip() != value or not safe_notes_prose(value)
+        ):
+            raise ValueError("Notes must contain only descriptive text, without identity markers")
+        return value
 
     @field_validator("imprint")
     @classmethod

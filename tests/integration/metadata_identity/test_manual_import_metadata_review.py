@@ -45,6 +45,7 @@ async def gargoyle_case(factory, tmp_path, *, embedded_title="Canonical series")
             "ComicInfo.xml",
             f"<ComicInfo><Series>{embedded_title}</Series><Issue>50-X</Issue>"
             "<writer>Local Writer</writer><PageCount>54</PageCount>"
+            "<Notes>Original note [CVDB123]</Notes>"
             "<Year>2024</Year><Month>12</Month></ComicInfo>",
         )
     return issue_id, source
@@ -247,6 +248,7 @@ async def test_manual_editor_previews_and_applies_only_approved_edits(
                 "credits": {"source": "library"},
                 "cover_date": {"source": "library"},
                 "tags": {"source": "custom", "value": "Noir"},
+                "notes": {"source": "custom", "value": "Reviewed scan"},
             }
         },
     }
@@ -306,6 +308,8 @@ async def test_manual_editor_previews_and_applies_only_approved_edits(
                 assert ci.findtext("PageCount") == mi.findtext("PageCount") == "52"
                 assert ci.findtext("Series") == "Canonical series"
                 assert ci.findtext("Tags") == mi.findtext("Tags/Tag") == "Noir"
+                assert ci.findtext("Notes").startswith("Reviewed scan [CVDB123]")
+                assert mi.findtext("Notes") == "Reviewed scan"
                 assert archive.read("page-053.jpg") == b"page 53"
     assert source.read_bytes() == original
 

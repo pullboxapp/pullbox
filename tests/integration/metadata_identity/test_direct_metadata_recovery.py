@@ -717,7 +717,7 @@ async def test_recovery_offers_editor_for_an_unrenderable_arc_list(identity_prob
         z.writestr(
             "ComicInfo.xml",
             "<ComicInfo><Number>50-X</Number><StoryArc>A, B</StoryArc>"
-            "<StoryArcNumber>2</StoryArcNumber></ComicInfo>",
+            "<StoryArcNumber>2</StoryArcNumber><Notes>Retained scan [CVDB123]</Notes></ComicInfo>",
         )
     before = source.read_bytes()
     assert (
@@ -735,10 +735,11 @@ async def test_recovery_offers_editor_for_an_unrenderable_arc_list(identity_prob
         correction = IssueMetadataEditorReview.model_validate(
             {
                 "edits": {
+                    "notes": {"source": "ComicInfo.xml"},
                     "story_arcs": {
                         "source": "custom",
                         "value": [{"name": "A", "position": None}, {"name": "B", "position": 2}],
-                    }
+                    },
                 }
             }
         )
@@ -759,6 +760,10 @@ async def test_recovery_offers_editor_for_an_unrenderable_arc_list(identity_prob
         assert (await session.get(PendingMatch, pending)).status == "approved"
         with ZipFile((await session.scalar(select(LibraryFile))).file_path) as archive:
             arcs = ET.fromstring(archive.read("MetronInfo.xml")).findall("Arcs/Arc")
+            assert "[CVDB123]" in ET.fromstring(archive.read("ComicInfo.xml")).findtext("Notes")
+            assert (
+                ET.fromstring(archive.read("MetronInfo.xml")).findtext("Notes") == "Retained scan"
+            )
             assert [(a.findtext("Name"), a.findtext("Number")) for a in arcs] == [
                 ("A", None),
                 ("B", "2"),
