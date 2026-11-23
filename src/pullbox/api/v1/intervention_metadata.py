@@ -9,6 +9,7 @@ from pullbox.api.deps import DbSession, InteractiveOperatorUser
 from pullbox.api.v1.issue_metadata_links import LocalId, file_job_status
 from pullbox.models.pending_match import PendingMatch, PendingMatchStatus
 from pullbox.schemas.issue_file_metadata import FileMetadataApproval, FileMetadataReview
+from pullbox.schemas.issue_metadata_editor import IssueMetadataEditorReview
 from pullbox.services.archive_metadata_binding import ArchiveMetadataBindingError
 from pullbox.services.direct_metadata_recovery import (
     DirectMetadataRecoveryError,
@@ -26,6 +27,15 @@ from pullbox.utilities.router import _get_manager, _schedule_dispatch
 router = APIRouter(prefix="/intervention", tags=["intervention"])
 
 
+class RecoveryReview(FileMetadataReview):
+    editor: IssueMetadataEditorReview | None = None
+    offer_field_repair: bool = False
+
+
+class RecoveryApproval(FileMetadataApproval):
+    editor: IssueMetadataEditorReview | None = None
+
+
 def _error(exc: ValueError | OSError) -> HTTPException:
     return HTTPException(
         409, str(exc) if isinstance(exc, DirectMetadataRecoveryError) else file_metadata_error(exc)
@@ -37,12 +47,16 @@ async def preview(
     pending_id: LocalId,
     session: DbSession,
     _user: InteractiveOperatorUser,
-    body: FileMetadataReview | None = None,
+    body: RecoveryReview | None = None,
 ) -> DirectMetadataRecoveryPreview:
     try:
         return (
             await prepare_direct_metadata_recovery(
-                session, pending_id, choices=body.choices if body else None
+                session,
+                pending_id,
+                choices=body.choices if body else None,
+                editor=body.editor if body else None,
+                offer_field_repair=bool(body and body.offer_field_repair),
             )
         ).preview
     except (ValueError, OSError) as exc:
@@ -71,12 +85,14 @@ async def dismiss(
 @router.post("/{pending_id}/file-metadata/write", status_code=202)
 async def write(
     pending_id: LocalId,
-    body: FileMetadataApproval,
+    body: RecoveryApproval,
     session: DbSession,
     user: InteractiveOperatorUser,
 ) -> dict[str, str]:
     try:
-        prepared = await prepare_direct_metadata_recovery(session, pending_id, choices=body.choices)
+        prepared = await prepare_direct_metadata_recovery(
+            session, pending_id, choices=body.choices, editor=body.editor
+        )
         if not prepared.preview.ready or prepared.preview.review_key != body.review_key:
             raise DirectMetadataRecoveryError(
                 "Review each conflicting field and update the preview before recovering this file."
@@ -123,6 +139,11 @@ async def write(
                 "recovery_pending_id": pending_id,
                 "review_key": body.review_key,
                 "choices": body.choices,
+                **(
+                    {"editor": body.editor.model_dump(mode="json")}
+                    if body.editor is not None
+                    else {}
+                ),
             },
             created_by=user.username,
         )

@@ -361,12 +361,16 @@ def _prepare(
     if editor is not None:
         from pullbox.services.issue_metadata_editor import prepare_issue_editor
 
-        if choices:
+        if any(not key.startswith("series.") for key in choices):
             raise ArchiveMetadataRenderError("invalid_choice")
         series, issue, editor_fields = prepare_issue_editor(
             binding, archive, series, issue, files, editor
         )
-        _, _, conflicts = review_metadata_fields(binding, archive, series, issue, {})
+        reviewed_series, _, conflicts = review_metadata_fields(
+            binding, archive, series, issue, choices
+        )
+        if choices:
+            series = reviewed_series
         chosen_values = {
             f"issue.{field}" for field, edit in editor.edits.items() if edit.source != "reset"
         }

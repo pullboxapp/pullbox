@@ -103,7 +103,10 @@ def _custom_value(field: str, text: str) -> object:
             f"{EDITABLE_FIELDS[field][0]} contains unsupported control characters."
         )
     value: object = text
-    if field == "page_count":
+    if field in {"description", "title"}:
+        # Use the text that both XML readers will return on the next preview.
+        value = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    elif field == "page_count":
         if not text.isascii() or not text.isdecimal() or len(text) > 7:
             raise IssueMetadataEditError(
                 "Catalog page count must be a whole number from 0 to 1000000."

@@ -54,14 +54,15 @@ class FileMetadataExecutor(JobExecutor):
             or job_config["recovery_pending_id"] <= 0
         ):
             return ["Choose a pending metadata recovery."]
+        allowed_keys = [
+            {"issue_id", "review_key"},
+            {"issue_id", "review_key", "choices"},
+            {"issue_id", "review_key", "editor"},
+        ]
+        if "recovery_pending_id" in job_config:
+            allowed_keys.append({"issue_id", "review_key", "editor", "choices"})
         if (
-            set(metadata_config)
-            not in (
-                {"issue_id", "review_key"},
-                {"issue_id", "review_key", "choices"},
-                {"issue_id", "review_key", "editor"},
-            )
-            or ("editor" in job_config and "recovery_pending_id" in job_config)
+            set(metadata_config) not in allowed_keys
             or type(job_config.get("issue_id")) is not int
             or job_config["issue_id"] <= 0
             or not isinstance(job_config.get("review_key"), str)
@@ -69,12 +70,13 @@ class FileMetadataExecutor(JobExecutor):
         ):
             return ["Choose an issue and approve its current file metadata preview."]
         try:
-            FileMetadataReview(choices=job_config.get("choices", {}))
-            if (
-                "editor" in job_config
-                and not IssueMetadataEditorReview.model_validate(job_config["editor"]).edits
-            ):
-                return ["Select at least one issue field to update."]
+            choices = FileMetadataReview(choices=job_config.get("choices", {})).choices
+            if "editor" in job_config:
+                editor = IssueMetadataEditorReview.model_validate(job_config["editor"])
+                if not editor.edits and "recovery_pending_id" not in job_config:
+                    return ["Select at least one issue field to update."]
+                if any(not key.startswith("series.") for key in choices):
+                    return ["Use the issue editor to resolve issue field differences."]
         except ValidationError:
             return ["Review the metadata choices before writing."]
         return []
@@ -173,7 +175,11 @@ class FileMetadataExecutor(JobExecutor):
             if item is None:
                 raise ValueError("Metadata job item was removed")
             job_id = item.job_id
-            if "editor" in job_config and released_override(item):
+            if (
+                "editor" in job_config
+                and "recovery_pending_id" not in job_config
+                and released_override(item)
+            ):
                 return ProcessedItem(
                     item.id, ItemResult.COMPLETED, after_state={"outcome": RELEASE_OUTCOME}
                 )
@@ -251,30 +257,20 @@ class FileMetadataExecutor(JobExecutor):
             writer = (
                 run_direct_metadata_recovery if recovery_id is not None else write_file_metadata
             )
-            if "editor" in job_config:
-                outcome = await write_file_metadata(
-                    factory,
-                    job_config["issue_id"],
-                    job_config["review_key"],
-                    UUID(item_data["id"]),
-                    limit=context["limit"],
-                    check_control=check_control,
-                    progress=progress,
-                    job_id=job_id,
-                    editor=IssueMetadataEditorReview.model_validate(job_config["editor"]),
-                )
-            else:
-                outcome = await writer(
-                    factory,
-                    recovery_id if recovery_id is not None else job_config["issue_id"],
-                    job_config["review_key"],
-                    UUID(item_data["id"]),
-                    limit=context["limit"],
-                    check_control=check_control,
-                    progress=progress,
-                    job_id=job_id,
-                    choices=FileMetadataReview(choices=job_config.get("choices", {})).choices,
-                )
+            outcome = await writer(
+                factory,
+                recovery_id if recovery_id is not None else job_config["issue_id"],
+                job_config["review_key"],
+                UUID(item_data["id"]),
+                limit=context["limit"],
+                check_control=check_control,
+                progress=progress,
+                job_id=job_id,
+                choices=FileMetadataReview(choices=job_config.get("choices", {})).choices,
+                editor=IssueMetadataEditorReview.model_validate(job_config["editor"])
+                if "editor" in job_config
+                else None,
+            )
             return ProcessedItem(
                 item_data["id"],
                 ItemResult.COMPLETED,

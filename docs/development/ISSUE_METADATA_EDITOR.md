@@ -76,6 +76,19 @@ referenced/read-only, actively importing and ambiguous files retain the existing
 writer's rejection. Native formats require the separate explicit conversion
 workflow. There is no implicit conversion, rename, move, download or sidecar write.
 
+In **Intervention → Recovery**, **Review metadata** still opens the usual
+conflict choices. If those choices cannot represent a fixable field disagreement,
+the modal can open the field editor directly. Nothing is approved automatically.
+**Edit issue fields** is available when the recovered issue
+has its original verified managed CBZ or ZIP. Choose corrections under
+**All fields**, review any separate series conflicts, then **Update preview**
+and **Finish recovery**. Neither merely opening the editor nor updating its
+preview writes the file. The approved job uses the same retained download
+and the same publication journal. A changed copy, a missing registration,
+a native conversion, or an incomplete issue keeps its existing recovery path.
+When only removing an override, the library update and queue resolution commit
+together without rewriting the comic.
+
 Preview binds the exact field actions into the existing evidence key. Apply and
 the worker revalidate file identity, ownership and current library state. The
 existing archive publication journal publishes the reconciled pair and finalizes

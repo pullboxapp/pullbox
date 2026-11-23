@@ -18,6 +18,7 @@ from pullbox.models.direct_acquisition import DirectAcquisitionAttempt, DirectAc
 from pullbox.models.download import DownloadHistory, DownloadState
 from pullbox.models.issue import IssueStatus
 from pullbox.models.pending_match import PendingMatch
+from pullbox.schemas.issue_metadata_editor import IssueMetadataEditorReview
 from pullbox.services.archive_metadata_binding import ArchiveMetadataBindingError
 from pullbox.services.archive_metadata_rendering import ArchiveMetadataRenderError
 from pullbox.services.direct_metadata_recovery import (
@@ -56,7 +57,6 @@ async def test_embedded_partial_preview_returns_replacement_actions_and_blocks_w
     from fastapi import HTTPException
 
     from pullbox.api.v1 import intervention_metadata
-    from pullbox.schemas.issue_file_metadata import FileMetadataApproval
 
     _, factory, _ = identity_probe_db
     pending_id, _, issue_id, source = await _partial_case(factory, tmp_path)
@@ -67,7 +67,10 @@ async def test_embedded_partial_preview_returns_replacement_actions_and_blocks_w
         assert preview.issue_id == issue_id and not preview.ready
         with pytest.raises(HTTPException) as error:
             await intervention_metadata.write(
-                pending_id, FileMetadataApproval(review_key="a" * 64), session, SimpleNamespace()
+                pending_id,
+                intervention_metadata.RecoveryApproval(review_key="a" * 64),
+                session,
+                SimpleNamespace(),
             )
         assert error.value.status_code == 409
     async with factory() as session:
@@ -552,6 +555,13 @@ async def test_review_reuses_copy_or_restores_retained_download(
     async with factory() as session:
         prepared = await prepare_direct_metadata_recovery(session, pending_id)
         assert prepared is not None, "Recovery has no retained-file metadata review"
+        assert prepared.preview.editor_available is (not remove_copy and suffix == ".cbz")
+        assert not prepared.preview.editor_fields
+        if not prepared.preview.editor_available:
+            with pytest.raises(ValueError, match="original managed CBZ"):
+                await prepare_direct_metadata_recovery(
+                    session, pending_id, editor=IssueMetadataEditorReview()
+                )
         assert not prepared.preview.ready
         assert prepared.preview.restores_copy is remove_copy
         assert prepared.preview.conflicts[0].key == "series.issue_count"
@@ -602,6 +612,158 @@ async def test_review_reuses_copy_or_restores_retained_download(
     )
     async with factory() as session:
         assert Path((await session.scalar(select(LibraryFile))).file_path).read_bytes() == written
+
+
+@pytest.mark.usefixtures("paired_download_setting")
+async def test_recovery_reset_commits_only_with_resolution(
+    identity_probe_db, tmp_path, monkeypatch
+):
+    from pullbox.services import direct_metadata_recovery as recovery
+    from pullbox.services.direct_metadata_file_proof import capture_file_proof, proof_identity
+    from pullbox.services.issue_file_metadata import prepare_file_metadata, write_file_metadata
+
+    _, factory, _ = identity_probe_db
+    pending, attempt_id, issue_id, source = await _review_case(factory, tmp_path)
+    original_source = source.read_bytes()
+    title = IssueMetadataEditorReview.model_validate(
+        {"edits": {"title": {"source": "custom", "value": "Reviewed"}}}
+    )
+    choices = {"series.issue_count": "library"}
+    async with factory() as session:
+        plan = await prepare_file_metadata(session, issue_id, choices=choices, editor=title)
+    await write_file_metadata(
+        factory,
+        issue_id,
+        plan.preview.review_key,
+        uuid4(),
+        limit=10**6,
+        editor=title,
+        choices=choices,
+        check_control=AsyncMock(),
+        progress=AsyncMock(),
+    )
+    # Model an acquisition whose recorded managed copy already contains this manual value.
+    async with factory.begin() as session:
+        path = Path((await session.scalar(select(LibraryFile))).file_path)
+        proof = capture_file_proof(path)
+        attempt = await session.get(DirectAcquisitionAttempt, attempt_id)
+        snapshot = attempt.plan_snapshot
+        attempt.plan_snapshot = {
+            **snapshot,
+            "paired_metadata_copy": {
+                **snapshot["paired_metadata_copy"],
+                "copy_signature": proof_identity(proof),
+                "copy_sha256": proof["sha256"],
+            },
+        }
+    reset = IssueMetadataEditorReview.model_validate({"edits": {"title": {"source": "reset"}}})
+    async with factory() as session:
+        reviewed = await prepare_direct_metadata_recovery(session, pending, editor=reset)
+        assert (
+            reviewed.preview.ready
+            and reviewed.preview.unchanged
+            and reviewed.preview.editor_changed
+        )
+    operation = uuid4()
+
+    async def finish():
+        return await run_direct_metadata_recovery(
+            factory,
+            pending,
+            reviewed.preview.review_key,
+            operation,
+            choices={},
+            editor=reset,
+            limit=10**6,
+            check_control=AsyncMock(),
+            progress=AsyncMock(),
+        )
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            recovery, "_complete", AsyncMock(side_effect=RuntimeError("Lost acknowledgement"))
+        )
+        with pytest.raises(RuntimeError, match="Lost acknowledgement"):
+            await finish()
+    async with factory() as session:
+        assert (await session.get(PendingMatch, pending)).status == "pending"
+        assert (
+            await prepare_direct_metadata_recovery(session, pending, editor=reset)
+        ).preview.review_key == reviewed.preview.review_key
+    assert await finish() == "override_released"
+    assert await finish() == "already_completed"
+    assert proof == capture_file_proof(path)
+    assert source.read_bytes() == original_source
+    async with factory() as session:
+        assert (await session.get(PendingMatch, pending)).status == "approved"
+        fields = (
+            await prepare_file_metadata(session, issue_id, editor=IssueMetadataEditorReview())
+        ).preview.editor_fields
+        assert not next(f for f in fields if f.key == "issue.title").overridden
+
+
+@pytest.mark.usefixtures("paired_download_setting")
+async def test_recovery_offers_editor_for_an_unrenderable_arc_list(identity_probe_db, tmp_path):
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    from pullbox.api.v1 import intervention_metadata as api
+
+    _, factory, _ = identity_probe_db
+    attempt, artifact, _, source = await direct_artifact(factory, tmp_path)
+    with ZipFile(source, "w") as z:
+        z.writestr("page.jpg", b"page bytes")
+        z.writestr(
+            "ComicInfo.xml",
+            "<ComicInfo><Number>50-X</Number><StoryArc>A, B</StoryArc>"
+            "<StoryArcNumber>2</StoryArcNumber></ComicInfo>",
+        )
+    before = source.read_bytes()
+    assert (
+        await execute(factory, tmp_path, attempt, artifact)
+    ).state is DirectAcquisitionState.INTERVENTION
+    async with factory() as session:
+        pending = (await session.scalar(select(PendingMatch))).id
+        with pytest.raises(HTTPException):
+            await api.preview(pending, session, SimpleNamespace())
+        review = api.RecoveryReview.model_validate({"offer_field_repair": True})
+        result = await api.preview(pending, session, SimpleNamespace(), review)
+        assert not result.ready and result.editor_available
+        assert any(f.key == "issue.story_arcs" for f in result.editor_fields)
+        assert (await session.get(PendingMatch, pending)).status == "pending"
+        correction = IssueMetadataEditorReview.model_validate(
+            {
+                "edits": {
+                    "story_arcs": {
+                        "source": "custom",
+                        "value": [{"name": "A", "position": None}, {"name": "B", "position": 2}],
+                    }
+                }
+            }
+        )
+        approved = await prepare_direct_metadata_recovery(session, pending, editor=correction)
+        assert approved.preview.ready
+    await run_direct_metadata_recovery(
+        factory,
+        pending,
+        approved.preview.review_key,
+        uuid4(),
+        choices={},
+        editor=correction,
+        limit=10**6,
+        check_control=AsyncMock(),
+        progress=AsyncMock(),
+    )
+    async with factory() as session:
+        assert (await session.get(PendingMatch, pending)).status == "approved"
+        with ZipFile((await session.scalar(select(LibraryFile))).file_path) as archive:
+            arcs = ET.fromstring(archive.read("MetronInfo.xml")).findall("Arcs/Arc")
+            assert [(a.findtext("Name"), a.findtext("Number")) for a in arcs] == [
+                ("A", None),
+                ("B", "2"),
+            ]
+    assert source.read_bytes() == before
 
 
 @pytest.mark.usefixtures("paired_download_setting")
@@ -694,8 +856,9 @@ async def test_changed_recovery_or_cancel_preserves_both_copies(
 
 
 @pytest.mark.usefixtures("paired_download_setting")
+@pytest.mark.parametrize("edit", [False, True], ids=["legacy", "field-editor"])
 async def test_recovery_api_previews_approval_and_deduplicates_admission(
-    identity_probe_db, tmp_path, monkeypatch
+    identity_probe_db, tmp_path, monkeypatch, edit
 ):
     from types import SimpleNamespace
 
@@ -710,7 +873,7 @@ async def test_recovery_api_previews_approval_and_deduplicates_admission(
     from pullbox.utilities.models import JobType, UtilityJob
 
     _, factory, _ = identity_probe_db
-    pending_id, _, _, source = await _review_case(factory, tmp_path)
+    pending_id, _, issue_id, source = await _review_case(factory, tmp_path)
     original = source.read_bytes()
     app = FastAPI()
     app.include_router(v1_router)
@@ -728,17 +891,30 @@ async def test_recovery_api_previews_approval_and_deduplicates_admission(
     monkeypatch.setattr(utilities_router, "_queue_manager", manager)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         url = f"/api/v1/intervention/{pending_id}/file-metadata"
-        preview = await client.post(url + "/preview", json={})
+        fields = (
+            {"editor": {"edits": {"title": {"source": "custom", "value": "Reviewed"}}}}
+            if edit
+            else {}
+        )
+        preview = await client.post(url + "/preview", json=fields)
         assert preview.status_code == 200, preview.text
         assert preview.json()["ready"] is False
+        if edit:
+            assert any(
+                f["key"] == "issue.title" and f["proposed"] == "Reviewed"
+                for f in preview.json()["editor_fields"]
+            )
         blocked = await client.post(
             url + "/write", json={"review_key": preview.json()["review_key"]}
         )
         assert blocked.status_code == 409
         choices = {"series.issue_count": "library"}
-        preview = await client.post(url + "/preview", json={"choices": choices})
+        preview = await client.post(url + "/preview", json={"choices": choices, **fields})
         assert preview.status_code == 200
-        body = {"review_key": preview.json()["review_key"], "choices": choices}
+        body = {"review_key": preview.json()["review_key"], "choices": choices, **fields}
+        if edit:
+            stale = await client.post(url + "/write", json={**body, "editor": {"edits": {}}})
+            assert stale.status_code == 409
         # Keep dispatch queued so simultaneous/double clicks must reuse admission.
         from pullbox.api.v1 import intervention_metadata
 
@@ -754,13 +930,28 @@ async def test_recovery_api_previews_approval_and_deduplicates_admission(
         assert await session.scalar(select(func.count()).select_from(UtilityJob)) == 1
         assert (await session.get(PendingMatch, pending_id)).status == "pending"
     assert source.read_bytes() == original
+    if edit:
+        await manager.dispatch_next()
+        async with factory() as session:
+            file = await session.scalar(select(LibraryFile))
+            assert (await session.get(PendingMatch, pending_id)).status == "approved"
+            assert (await session.get(Issue, issue_id)).title == "Reviewed"
+            assert (
+                await session.scalar(select(func.count()).select_from(DirectAcquisitionAttempt))
+                == 1
+            )
+            with ZipFile(file.file_path) as archive:
+                assert ET.fromstring(archive.read("ComicInfo.xml")).findtext("Title") == "Reviewed"
+                assert b"Reviewed" in archive.read("MetronInfo.xml")
+                assert archive.read("page.jpg") == b"page bytes"
+        assert source.read_bytes() == original
 
 
 @pytest.mark.usefixtures("paired_download_setting")
-@pytest.mark.parametrize("suffix", [".cbz", ".cb7"])
+@pytest.mark.parametrize("suffix,edit", [(".cbz", False), (".cb7", False), (".cbz", True)])
 @pytest.mark.parametrize("tamper", [False, True])
 async def test_restart_settles_proven_write_and_recovery_together(
-    identity_probe_db, tmp_path, monkeypatch, suffix, tamper
+    identity_probe_db, tmp_path, monkeypatch, suffix, edit, tamper
 ):
     from pullbox.services import direct_metadata_recovery as recovery
     from pullbox.services.issue_file_metadata_recovery import recover_file_metadata_jobs
@@ -770,9 +961,17 @@ async def test_restart_settles_proven_write_and_recovery_together(
 
     _, factory, _ = identity_probe_db
     pending_id, attempt_id, issue_id, _source = await _review_case(factory, tmp_path, suffix=suffix)
+    # A valid issue summary can exceed the size of old source-choice-only job configs.
+    editor = (
+        IssueMetadataEditorReview.model_validate(
+            {"edits": {"description": {"source": "custom", "value": "Reviewed. " * 7000}}}
+        )
+        if edit
+        else None
+    )
     async with factory() as session:
         prepared = await prepare_direct_metadata_recovery(
-            session, pending_id, choices={"series.issue_count": "library"}
+            session, pending_id, choices={"series.issue_count": "library"}, editor=editor
         )
     manager = JobQueueManager(factory)
     manager.register_executor(JobType.FILE_METADATA, FileMetadataExecutor)
@@ -786,14 +985,15 @@ async def test_restart_settles_proven_write_and_recovery_together(
                 "recovery_pending_id": pending_id,
                 "review_key": prepared.preview.review_key,
                 "choices": {"series.issue_count": "library"},
+                **({"editor": editor.model_dump(mode="json")} if editor else {}),
             },
         )
         job_id = job.id
     with monkeypatch.context() as patch:
-        patch.setattr(
-            recovery, "_complete", AsyncMock(side_effect=RuntimeError("Lost acknowledgement"))
-        )
+        lost_ack = AsyncMock(side_effect=RuntimeError("Lost acknowledgement"))
+        patch.setattr(recovery, "_complete", lost_ack)
         await manager.dispatch_next()
+    lost_ack.assert_awaited_once()
     async with factory.begin() as session:
         job = await session.get(UtilityJob, job_id)
         assert job.state == JobState.FAILED
@@ -850,6 +1050,11 @@ async def test_verified_replacement_retires_obsolete_recovery_without_claiming_t
         path = Path(replacement.file_path)
         before = path.read_bytes(), path.stat().st_mtime_ns
         recovery = await prepare_direct_metadata_recovery(session, pending_id)
+        assert not recovery.preview.editor_available
+        with pytest.raises(ValueError, match=r"replacement|original managed"):
+            await prepare_direct_metadata_recovery(
+                session, pending_id, editor=IssueMetadataEditorReview()
+            )
     assert recovery.preview.superseded and recovery.preview.unchanged
     await run_direct_metadata_recovery(
         factory,

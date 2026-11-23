@@ -37,6 +37,11 @@ from pullbox.schemas.issue_file_metadata import (
     FileMetadataChange,
     FileMetadataConflict,
 )
+from pullbox.schemas.issue_metadata_editor import (
+    IssueMetadataEditorField,
+    IssueMetadataEditorReview,
+)
+from pullbox.services.archive_metadata_rendering import ArchiveMetadataRenderError
 from pullbox.services.direct_acquisition_state import (
     advance_acquisition_progress,
     transition_acquisition,
@@ -56,7 +61,7 @@ from pullbox.services.post_processing_operation_progress import (
     project_post_processing_operation_progress,
 )
 from pullbox.utilities.import_guards import ensure_no_active_import_file_mutation
-from pullbox.utilities.models import UtilityJob, UtilityJobItem
+from pullbox.utilities.models import UtilityJobItem
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -65,6 +70,7 @@ if TYPE_CHECKING:
 
     from pullbox.schemas.issue_file_metadata import FileMetadataChoices
     from pullbox.services.archive_metadata_binding import ArchiveMetadataTarget
+    from pullbox.services.issue_file_metadata import PreparedFileMetadata
     from pullbox.utilities.executors.archive_subprocess import ControlCheck, ProgressCallback
 
 
@@ -190,6 +196,9 @@ class DirectMetadataRecoveryPreview(BaseModel):
     restores_copy: bool = False
     superseded: bool = False
     replacement_required: bool = False
+    editor_fields: list[IssueMetadataEditorField] = Field(default_factory=list)
+    editor_changed: bool = False
+    editor_available: bool = False
 
 
 @dataclass(frozen=True)
@@ -214,7 +223,11 @@ class PreparedRecovery:
     owner: RecoveryOwner
     metadata_key: str
     preview: DirectMetadataRecoveryPreview
-    file_target: ArchiveMetadataTarget | None
+    file_plan: PreparedFileMetadata | None
+
+    @property
+    def file_target(self) -> ArchiveMetadataTarget | None:
+        return self.file_plan.target if self.file_plan else None
 
 
 async def record_incomplete_recovery(
@@ -367,6 +380,8 @@ async def prepare_direct_metadata_recovery(
     pending_id: int,
     *,
     choices: FileMetadataChoices | None = None,
+    editor: IssueMetadataEditorReview | None = None,
+    offer_field_repair: bool = False,
 ) -> PreparedRecovery:
     if not get_settings().metadata_paired_direct_writer_enabled:
         raise DirectMetadataRecoveryError(
@@ -376,10 +391,31 @@ async def prepare_direct_metadata_recovery(
     await ensure_no_active_import_file_mutation(session)
     await session.commit()
     owner = replace(owner, source_proof=await _check_source(owner))
-    file_target = None
+    prepared = None
+    eligible = not owner.superseded and (owner.file_path or "").lower().endswith((".cbz", ".zip"))
+    if editor is not None and not eligible:
+        raise DirectMetadataRecoveryError(
+            "Only the original managed CBZ or ZIP can be edited here. Preview recovery again."
+        )
     if owner.file_id is not None:
-        prepared = await prepare_file_metadata(session, owner.issue_id, choices=choices)
-        file_target = prepared.target
+        try:
+            prepared = await prepare_file_metadata(
+                session, owner.issue_id, choices=choices, editor=editor
+            )
+        except ArchiveMetadataRenderError as exc:
+            repairable = exc.code in {
+                "rating_override_changed",
+                "label_override_changed",
+                "publisher_required",
+            } or (exc.code == "unsupported_content" and exc.field in {"StoryArc", "StoryArcNumber"})
+            if not (
+                offer_field_repair and repairable and eligible and not choices and editor is None
+            ):
+                raise
+            editor = IssueMetadataEditorReview()
+            prepared = await prepare_file_metadata(session, owner.issue_id, editor=editor)
+            if prepared.preview.ready:
+                raise
         if prepared.target.binding.library_file_id != owner.file_id:
             raise DirectMetadataRecoveryError("The library file changed. Preview again.")
         try:
@@ -391,10 +427,15 @@ async def prepare_direct_metadata_recovery(
             )
         except (OSError, ValueError):
             owner = replace(owner, superseded=True)
+            if editor is not None:
+                raise DirectMetadataRecoveryError(
+                    "The managed copy changed. Recovery will not edit its replacement."
+                ) from None
         preview = DirectMetadataRecoveryPreview(
             issue_id=owner.issue_id,
             **prepared.preview.model_dump(exclude={"file_id"}),
             superseded=owner.superseded,
+            editor_available=eligible and not owner.superseded,
         )
         if owner.superseded and (not preview.ready or not preview.unchanged):
             raise DirectMetadataRecoveryError(
@@ -431,7 +472,7 @@ async def prepare_direct_metadata_recovery(
             sort_keys=True,
         ).encode()
     ).hexdigest()
-    return PreparedRecovery(owner, metadata_key, preview, file_target)
+    return PreparedRecovery(owner, metadata_key, preview, prepared)
 
 
 async def _complete(
@@ -524,6 +565,7 @@ async def run_direct_metadata_recovery(
     operation: UUID,
     *,
     choices: FileMetadataChoices,
+    editor: IssueMetadataEditorReview | None = None,
     limit: int,
     check_control: ControlCheck,
     progress: ProgressCallback,
@@ -540,7 +582,9 @@ async def run_direct_metadata_recovery(
             )
         ):
             return "already_completed"
-        prepared = await prepare_direct_metadata_recovery(reader, pending_id, choices=choices)
+        prepared = await prepare_direct_metadata_recovery(
+            reader, pending_id, choices=choices, editor=editor
+        )
     if not prepared.preview.ready or prepared.preview.review_key != review_key:
         raise DirectMetadataRecoveryError(
             "The file, metadata, or recovery state changed. Preview again before writing."
@@ -590,6 +634,20 @@ async def run_direct_metadata_recovery(
             await _complete(writer, owner, result.library_file, operation, review_key)
             await writer.commit()
         return "restored"
+    if editor and editor.edits and prepared.preview.unchanged:
+        from pullbox.services.issue_metadata_override_release import release_issue_overrides
+
+        # With no archive publication, commit override release and queue resolution together.
+        assert prepared.file_plan is not None
+        async with factory.begin() as writer:
+            result_code = await release_issue_overrides(
+                writer, prepared.file_plan, editor, operation, job_id
+            )
+            file = await writer.get(LibraryFile, owner.file_id)
+            if file is None:
+                raise DirectMetadataRecoveryError("The library binding changed before completion.")
+            await _complete(writer, owner, file, operation, review_key)
+        return result_code
     outcome = (
         "superseded"
         if owner.superseded
@@ -600,6 +658,7 @@ async def run_direct_metadata_recovery(
             operation,
             limit=limit,
             choices=choices,
+            editor=editor,
             check_control=control,
             progress=progress,
             job_id=job_id,
@@ -635,23 +694,19 @@ async def recover_direct_metadata_operation(
         load_archive_publication,
     )
     from pullbox.services.issue_file_metadata import recover_file_metadata
+    from pullbox.services.issue_file_metadata_recovery import read_metadata_job_binding
     from pullbox.services.native_file_metadata import recover_native_file_metadata
 
     async with factory() as session:
-        job = await session.get(UtilityJob, job_id)
         item = await session.get(UtilityJobItem, operation.hex)
-        if job is None or item is None or item.job_id != job_id:
+        if item is None or item.job_id != job_id:
             return False
-        config = json.loads(job.config)
         saved = json.loads(item.before_state or "{}").get("direct_metadata_recovery")
         if not saved:
             return False
         owner = TypeAdapter(RecoveryOwner).validate_python(saved["owner"])
-        if (
-            config.get("recovery_pending_id") != owner.pending_id
-            or config.get("issue_id") != owner.issue_id
-            or config.get("review_key") != saved["review_key"]
-        ):
+        binding = await read_metadata_job_binding(session, job_id, None)
+        if binding != (owner.issue_id, owner.pending_id, saved["review_key"]):
             raise DirectMetadataRecoveryError(
                 "The recovery job evidence changed. Review the queue entry again."
             )

@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import JSON, Text, case, cast, func, select, type_coerce
+from sqlalchemy.exc import DBAPIError
 
 from pullbox.models.archive_metadata_publication import ArchiveMetadataPublication, PublicationState
 from pullbox.services.archive_metadata_publication import load_archive_publication
@@ -21,6 +22,44 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 logger = structlog.get_logger(__name__)
+_INLINE_JOB_CONFIG_LIMIT = 65536
+
+
+async def read_metadata_job_binding(
+    session: AsyncSession, job_id: str, small_config: str | None
+) -> tuple[object, object, object]:
+    if small_config is not None:
+        payload = json.loads(small_config)
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid metadata job configuration")
+        return (
+            payload.get("issue_id"),
+            payload.get("recovery_pending_id"),
+            payload.get("review_key"),
+        )
+    # Large editor drafts are not restart evidence. Project just the binding for this one job.
+    document = type_coerce(cast(UtilityJob.config, JSON().with_variant(Text(), "sqlite")), JSON)
+    try:
+        row = (
+            await session.execute(
+                select(
+                    document["issue_id"], document["recovery_pending_id"], document["review_key"]
+                ).where(UtilityJob.id == job_id)
+            )
+        ).one_or_none()
+    except DBAPIError as exc:
+        raise ValueError("Cannot read the saved metadata job binding") from exc
+    if row is None or (
+        row[1] is not None
+        and (
+            type(row[0]) is not int
+            or type(row[1]) is not int
+            or not isinstance(row[2], str)
+            or len(row[2]) != 64
+        )
+    ):
+        raise ValueError("Invalid metadata recovery job binding")
+    return row[0], row[1], row[2]
 
 
 async def _complete_metadata_item(
@@ -66,7 +105,16 @@ async def _recover_native_metadata_jobs(factory: async_sessionmaker[AsyncSession
         async with factory() as session:
             rows = (
                 await session.execute(
-                    select(UtilityJobItem.id, UtilityJob.id, UtilityJob.config)
+                    select(
+                        UtilityJobItem.id,
+                        UtilityJob.id,
+                        case(
+                            (
+                                func.length(UtilityJob.config) <= _INLINE_JOB_CONFIG_LIMIT,
+                                UtilityJob.config,
+                            )
+                        ),
+                    )
                     .join(UtilityJob, UtilityJob.id == UtilityJobItem.job_id)
                     .where(
                         UtilityJobItem.id > cursor,
@@ -85,16 +133,14 @@ async def _recover_native_metadata_jobs(factory: async_sessionmaker[AsyncSession
         for item_id, job_id, config in rows:
             cursor = item_id
             try:
-                if len(config) > 65536:
-                    raise ValueError("Invalid metadata job configuration")
-                payload = json.loads(config)
-                if not isinstance(payload, dict):
-                    raise ValueError("Invalid metadata job configuration")
-                issue_id = payload.get("issue_id")
+                async with factory() as reader:
+                    issue_id, pending_id, _ = await read_metadata_job_binding(
+                        reader, job_id, config
+                    )
                 if type(issue_id) is not int or issue_id <= 0:
                     continue
                 operation = UUID(item_id)
-                if payload.get("recovery_pending_id") is not None:
+                if pending_id is not None:
                     from pullbox.services.direct_metadata_recovery import (
                         recover_direct_metadata_operation,
                     )
@@ -153,11 +199,10 @@ async def recover_file_metadata_jobs(factory: async_sessionmaker[AsyncSession]) 
                 if state is not PublicationState.FINALIZED:
                     continue
                 async with factory() as session:
-                    job = await session.get(UtilityJob, receipt.plan.metadata_job_id)
-                    is_recovery = (
-                        job is not None
-                        and json.loads(job.config).get("recovery_pending_id") is not None
+                    _, pending_id, _ = await read_metadata_job_binding(
+                        session, receipt.plan.metadata_job_id, None
                     )
+                    is_recovery = pending_id is not None
                 if is_recovery:
                     # A settled archive alone does not resolve its download recovery entry.
                     from pullbox.services.direct_metadata_recovery import (

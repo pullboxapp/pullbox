@@ -40,6 +40,7 @@ function issueFileMetadata(issueId) {
       this.jobGeneration += 1;
       this.generation += 1;
       endpoint = "/api/v1/intervention/" + pendingId + "/file-metadata";
+      this.editor = false; this.editorDrafts = {}; this.allFields = false; this.choicesDirty = false;
       this.preview = null; this.job = null; this.choices = {}; this.error = ""; this.resolved = false;
       this.trigger = document.activeElement;
       this.open = true; this.busy = true;
@@ -67,7 +68,11 @@ function issueFileMetadata(issueId) {
       this.choicesDirty = true;
     },
     canWrite: function () {
-      return !!this.preview && this.preview.ready !== false && !this.choicesDirty && (!this.editor || this.preview.editor_changed);
+      return !!this.preview && this.preview.ready !== false && !this.choicesDirty && (this.recovery || !this.editor || this.preview.editor_changed);
+    },
+    conflictChoices: function () {
+      var conflicts = this.preview ? this.preview.conflicts || [] : [];
+      return !this.editor ? conflicts : this.recovery ? conflicts.filter(row => row.key.startsWith("series.")) : [];
     },
     editorFields: function () {
       return (this.preview ? this.preview.editor_fields || [] : []).filter(field =>
@@ -117,7 +122,7 @@ function issueFileMetadata(issueId) {
       return edits;
     },
     reviewEndpoint: function () {
-      return this.editor ? endpoint.replace("/file-metadata", "/metadata-editor") : endpoint;
+      return this.editor && !this.recovery ? endpoint.replace("/file-metadata", "/metadata-editor") : endpoint;
     },
     replacementUrl: function (action) {
       return this.preview && Number.isSafeInteger(this.preview.issue_id)
@@ -145,7 +150,7 @@ function issueFileMetadata(issueId) {
       }
       finally { this.busy = false; }
     },
-    loadPreview: async function (reset = true) {
+    loadPreview: async function (reset = true, editRecovery = this.editor) {
       if (this.busy) return;
       clearTimeout(this.timer);
       this.jobGeneration += 1;
@@ -153,12 +158,20 @@ function issueFileMetadata(issueId) {
       this.busy = true; this.error = "";
       this.choicesDirty = true;
       var choices = reset ? {} : Object.assign({}, this.choices);
+      if (reset && this.recovery && editRecovery && !this.editor) {
+        Object.keys(this.choices).filter(key => key.startsWith("series.")).forEach(key => { choices[key] = this.choices[key]; });
+      }
       if (reset && !this.recovery) { this.job = null; this.preview = null; }
       try {
         var edits = reset ? {} : this.editorEdits();
-        var data = await this.request(this.reviewEndpoint() + "/preview", this.editor ? { edits: edits } : Object.keys(choices).length ? { choices: choices } : {});
+        var body = Object.keys(choices).length ? { choices: choices } : {};
+        if (this.recovery && editRecovery) body.editor = { edits: edits };
+        else if (this.recovery && reset) body.offer_field_repair = true;
+        else if (this.editor) body = { edits: edits };
+        var data = await this.request(this.reviewEndpoint() + "/preview", body);
         if (this.disposed || generation !== this.generation) return;
         this.preview = data; this.job = null;
+        if (this.recovery) this.editor = !!(data.editor_fields && data.editor_fields.length);
         if (this.editor && reset) {
           this.allFields = false; this.editorDrafts = {};
           (data.editor_fields || []).filter(field => field.editable).forEach(field => {
@@ -176,8 +189,9 @@ function issueFileMetadata(issueId) {
       this.busy = true; this.error = "";
       try {
         var approval = { review_key: this.preview.review_key };
-        if (this.editor) approval.edits = this.editorEdits();
-        else if (Object.keys(this.choices).length) approval.choices = Object.assign({}, this.choices);
+        if (this.editor && this.recovery) approval.editor = { edits: this.editorEdits() };
+        else if (this.editor) approval.edits = this.editorEdits();
+        if ((!this.editor || this.recovery) && Object.keys(this.choices).length) approval.choices = Object.assign({}, this.choices);
         var result = await this.request(this.reviewEndpoint() + "/write", approval);
         if (this.disposed) return;
         this.jobGeneration += 1;

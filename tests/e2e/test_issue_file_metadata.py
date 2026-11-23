@@ -209,8 +209,9 @@ def test_partial_recovery_dismiss_requires_confirmation_without_repairing(
 
 
 @pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 390), ("tron", 1280)])
+@pytest.mark.parametrize("editor", [False, True], ids=["classic", "issue-editor"])
 def test_recovery_review_scrolls_and_finishes_without_reacquisition(
-    authed_page, seeded_server, theme, width
+    authed_page, seeded_server, theme, width, editor
 ):
     page = authed_page
     page.set_viewport_size({"width": width, "height": 600})
@@ -219,7 +220,9 @@ def test_recovery_review_scrolls_and_finishes_without_reacquisition(
     page.route(endpoint + "/job", lambda route: route.fulfill(json=state))
 
     def preview(route):
-        selected = route.request.post_data_json.get("choices", {}).get("series.issue_count")
+        body = route.request.post_data_json
+        selected = body.get("choices", {}).get("series.issue_count")
+        editable = editor and "editor" in body
         route.fulfill(
             json={
                 "issue_id": 1,
@@ -227,6 +230,21 @@ def test_recovery_review_scrolls_and_finishes_without_reacquisition(
                 "review_key": "a" * 64,
                 "ready": bool(selected),
                 "unchanged": bool(selected),
+                "editor_available": editor,
+                "editor_fields": [
+                    {
+                        "key": "issue.title",
+                        "label": "Title",
+                        "current": "Original",
+                        "editable": True,
+                        "input_type": "text",
+                        "differs": False,
+                        "options": [{"source": "library", "value": "Original"}],
+                    }
+                ]
+                if editable
+                else [],
+                "editor_changed": bool(body.get("editor", {}).get("edits")),
                 "changes": [],
                 "conflicts": [
                     {
@@ -248,6 +266,11 @@ def test_recovery_review_scrolls_and_finishes_without_reacquisition(
         assert route.request.post_data_json == {
             "review_key": "a" * 64,
             "choices": {"series.issue_count": "library"},
+            **(
+                {"editor": {"edits": {"title": {"source": "custom", "value": "Reviewed"}}}}
+                if editor
+                else {}
+            ),
         }
         state.update(
             job={
@@ -272,6 +295,13 @@ def test_recovery_review_scrolls_and_finishes_without_reacquisition(
     dialog = page.get_by_role("dialog", name="Recover downloaded file", exact=True)
     expect(dialog).to_be_visible()
     expect(dialog.get_by_role("button", name="Finish recovery")).to_be_disabled()
+    if editor:
+        dialog.get_by_role("button", name="Edit issue fields", exact=True).click()
+        dialog.get_by_role("button", name="All fields", exact=True).click(timeout=3000)
+        dialog.get_by_role("checkbox", name="Update Title", exact=True).check()
+        dialog.get_by_role("button", name="Value source for Title", exact=True).click()
+        page.get_by_role("option", name="Enter correction", exact=True).click()
+        dialog.get_by_label("New Title", exact=True).fill("Reviewed")
     dialog.get_by_role("radio", name="Library 12").check()
     dialog.get_by_role("button", name="Update preview", exact=True).click()
     expect(dialog.get_by_role("button", name="Finish recovery")).to_be_enabled()
