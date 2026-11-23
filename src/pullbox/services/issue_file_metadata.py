@@ -117,6 +117,8 @@ def file_metadata_error(exc: BaseException) -> str:
             "AlternateNumber": "number in alternate series",
             "AlternateCount": "total in alternate series",
             "AlternativeNumber": "alternative issue number",
+            "CollectionTitle": "collection title",
+            "MangaVolume": "manga volume",
             "SeriesGroup": "series groups",
             "BlackAndWhite": "black and white",
             "Manga": "manga",

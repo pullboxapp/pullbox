@@ -9,10 +9,11 @@ from pullbox.core.archive_metadata import ArchiveMetadataFiles
 from pullbox.core.comicinfo_text import (
     COMICINFO_ONLY_TAGS,
     FLAG_CHOICES,
+    METRON_ONLY_TAGS,
     SINGLE_DOCUMENT,
     descriptive_text,
     embedded_comicinfo_value,
-    selectable_main_name,
+    selectable_single_line,
 )
 from pullbox.core.issue_community_rating import (
     RATING_HELP,
@@ -22,6 +23,7 @@ from pullbox.core.issue_community_rating import (
     shared_score,
 )
 from pullbox.core.issue_notes import UneditableNotesError, document_notes, safe_notes_prose
+from pullbox.core.metroninfo import MAX_METRONINFO_FIELD_LENGTH
 from pullbox.schemas.issue_metadata_editor import (
     EDITOR_XML_FIELDS,
     EditableIssueField,
@@ -44,7 +46,7 @@ from pullbox.services.archive_metadata_preservation import (
     ArchiveMetadataRenderError,
     editor_arc_value,
     embedded_labels,
-    metron_alternative_number,
+    metron_simple_text,
     preserved_roots,
 )
 from pullbox.services.archive_metadata_reconciliation import ArchiveMetadataReconciliation
@@ -66,6 +68,8 @@ EDITABLE_FIELDS = {
     "alternate_number": ("Number in alternate series", "text"),
     "alternate_count": ("Total in alternate series", "text"),
     "alternative_number": ("Alternative issue number", "text"),
+    "collection_title": ("Collection title", "text"),
+    "manga_volume": ("Manga volume", "text"),
     "black_and_white": ("Black and white", "text"),
     "manga": ("Manga", "text"),
     "notes": ("Notes", "textarea"),
@@ -81,6 +85,10 @@ EDITABLE_FIELDS = {
 }
 
 FIELD_HELP = {
+    "collection_title": "MetronInfo.xml only. The collection this book belongs to. "
+    "This does not rename the issue, its stories, or its tracked series.",
+    "manga_volume": "MetronInfo.xml only. A volume label for this book, such as 007-B. "
+    "This does not change the series volume, issue number, or reading direction.",
     "alternate_series": "ComicInfo.xml only. A second series or crossover for this book. "
     "Review its number and total separately; the tracked series stays the same.",
     "alternate_number": "ComicInfo.xml only. This book's position in the alternate series. "
@@ -140,7 +148,9 @@ def _selectable(field: str, value: object) -> bool:
         "alternate_number",
         "alternative_number",
     }:
-        return selectable_main_name(value)
+        return selectable_single_line(value)
+    if field in {"collection_title", "manga_volume"}:
+        return selectable_single_line(value, limit=MAX_METRONINFO_FIELD_LENGTH)
     if field == "alternate_count":
         return value is None or isinstance(value, int)
     if field in FLAG_CHOICES:
@@ -240,6 +250,11 @@ def _custom_value(field: str, text: str) -> object:
     try:
         return getattr(MetadataValues.model_validate({field: value}), field)
     except ValidationError:
+        if field in {"collection_title", "manga_volume"}:
+            raise IssueMetadataEditError(
+                f"Enter {EDITABLE_FIELDS[field][0].lower()} as one printable line "
+                f"of up to {MAX_METRONINFO_FIELD_LENGTH} characters."
+            ) from None
         if field == "series_groups":
             raise IssueMetadataEditError(
                 "Use series group names without comic identifiers."
@@ -295,9 +310,9 @@ def prepare_issue_editor(
                         f"{label} is read-only. {exc} Leave it unchanged or correct the source."
                     )
                     continue
-            elif field == "alternative_number":
+            elif field in METRON_ONLY_TAGS:
                 try:
-                    value = metron_alternative_number(mi)
+                    value = metron_simple_text(mi, METRON_ONLY_TAGS[field])
                 except ValueError as exc:
                     locked_reason = (
                         f"{label} is read-only. {exc} Leave it unchanged or correct the source."

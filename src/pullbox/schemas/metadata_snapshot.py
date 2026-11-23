@@ -6,7 +6,12 @@ from typing import Literal, Self
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from pullbox.core.comicinfo_text import ColorFlag, MangaFlag, descriptive_text, selectable_main_name
+from pullbox.core.comicinfo_text import (
+    ColorFlag,
+    MangaFlag,
+    descriptive_text,
+    selectable_single_line,
+)
 from pullbox.core.issue_community_rating import RATING_HELP, shared_score
 from pullbox.core.issue_notes import NOTES_LIMIT, safe_notes_prose
 from pullbox.core.issue_numbers import normalize_issue_number_text
@@ -16,6 +21,7 @@ from pullbox.core.metadata_identity import (
     MetadataEntityKind,
     MetadataSource,
 )
+from pullbox.core.metroninfo import MAX_METRONINFO_FIELD_LENGTH
 from pullbox.schemas.metadata_credits import MetadataCredits
 from pullbox.schemas.metadata_issue_arcs import IssueArcList
 from pullbox.schemas.metadata_labels import IssueLabels
@@ -83,6 +89,8 @@ class MetadataValues(BaseModel):
     alternate_series: str | None = Field(default=None, exclude_if=lambda v: v is None)
     alternate_number: str | None = Field(default=None, exclude_if=lambda v: v is None)
     alternative_number: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    collection_title: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    manga_volume: str | None = Field(default=None, exclude_if=lambda v: v is None)
     alternate_count: int | None = Field(
         default=None, ge=-1, le=2147483647, strict=True, exclude_if=lambda v: v is None
     )
@@ -107,9 +115,17 @@ class MetadataValues(BaseModel):
     @classmethod
     def single_name(cls, value: str | None) -> str | None:
         name = descriptive_text(value) if value is not None else None
-        if not selectable_main_name(name):
+        if not selectable_single_line(name):
             raise ValueError("Use one printable name of up to 255 characters.")
         return name
+
+    @field_validator("collection_title", "manga_volume")
+    @classmethod
+    def metron_edition_text(cls, value: str | None) -> str | None:
+        label = descriptive_text(value) if value is not None else None
+        if not selectable_single_line(label, limit=MAX_METRONINFO_FIELD_LENGTH):
+            raise ValueError("Use one printable line within the MetronInfo field limit.")
+        return label
 
     @field_validator("series_groups")
     @classmethod

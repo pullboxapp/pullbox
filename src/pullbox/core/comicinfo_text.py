@@ -44,9 +44,15 @@ COMICINFO_ONLY_TAGS: dict[ComicInfoField, str] = {
     "alternate_number": "AlternateNumber",
     "alternate_count": "AlternateCount",
 }
+type MetronTextField = Literal["alternative_number", "collection_title", "manga_volume"]
+METRON_ONLY_TAGS: dict[MetronTextField, str] = {
+    "alternative_number": "AlternativeNumber",
+    "collection_title": "CollectionTitle",
+    "manga_volume": "MangaVolume",
+}
 SINGLE_DOCUMENT: dict[str, str] = {
     **dict.fromkeys(COMICINFO_ONLY_TAGS, "ComicInfo.xml"),
-    "alternative_number": "MetronInfo.xml",
+    **dict.fromkeys(METRON_ONLY_TAGS, "MetronInfo.xml"),
 }
 TEXT_LIMIT = 20000
 _ISSUE_ID = re.compile(r"(?:4000-|cv_issue_id\s*:\s*)(\d+)", re.I)
@@ -69,9 +75,9 @@ def descriptive_text(raw: str, *, limit: int = TEXT_LIMIT) -> str | None:
     return raw.replace("\r\n", "\n").replace("\r", "\n").strip() or None
 
 
-def selectable_main_name(value: object) -> bool:
+def selectable_single_line(value: object, *, limit: int = 255) -> bool:
     return value is None or (
-        isinstance(value, str) and 0 < len(value) <= 255 and value.isprintable()
+        isinstance(value, str) and 0 < len(value) <= limit and value.isprintable()
     )
 
 

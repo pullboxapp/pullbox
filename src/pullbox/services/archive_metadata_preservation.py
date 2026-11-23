@@ -158,12 +158,12 @@ def _validate_comicinfo(root: ET.Element) -> None:
             raise ArchiveMetadataRenderError("unsupported_content", "ComicInfo")
 
 
-def metron_alternative_number(mi: ET.Element) -> str | None:
-    node = mi.find("AlternativeNumber")
+def metron_simple_text(mi: ET.Element, tag: str) -> str | None:
+    node = mi.find(tag)
     if node is None:
         return None
     if len(node) or node.attrib:
-        raise ValueError("The number contains an XML annotation.")
+        raise ValueError("This value contains an XML annotation.")
     return descriptive_text(node.text or "")
 
 

@@ -744,6 +744,7 @@ async def test_recovery_offers_editor_for_an_unrenderable_arc_list(identity_prob
                     "manga": {"source": "ComicInfo.xml"},
                     "main_character_or_team": {"source": "ComicInfo.xml"},
                     "alternate_number": {"source": "ComicInfo.xml"},
+                    "manga_volume": {"source": "custom", "value": "001.5"},
                     "story_arcs": {
                         "source": "custom",
                         "value": [{"name": "A", "position": None}, {"name": "B", "position": 2}],
@@ -783,7 +784,8 @@ async def test_recovery_offers_editor_for_an_unrenderable_arc_list(identity_prob
                 ET.fromstring(archive.read("ComicInfo.xml")).findtext("Manga")
                 == "YesAndRightToLeft"
             )
-            assert ET.fromstring(archive.read("MetronInfo.xml")).find("MangaVolume") is None
+            assert ET.fromstring(archive.read("MetronInfo.xml")).findtext("MangaVolume") == "001.5"
+            assert ET.fromstring(archive.read("ComicInfo.xml")).find("MangaVolume") is None
             assert (
                 ET.fromstring(archive.read("ComicInfo.xml")).findtext("MainCharacterOrTeam")
                 == "Robin"

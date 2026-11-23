@@ -32,7 +32,7 @@ MAX_METRONINFO_DEPTH = MAX_METADATA_XML_DEPTH
 MAX_METRONINFO_NODES = MAX_METADATA_XML_NODES
 MAX_METRONINFO_CREDITS = 128
 MAX_METRONINFO_ROLES = 32
-_MAX_FIELD_LENGTH = 4096
+MAX_METRONINFO_FIELD_LENGTH = 4096
 _CALENDAR_TIMEZONE = r"(?:Z|[+-](?:(?:0[0-9]|1[0-3]):[0-5][0-9]|14:00))?"
 _SCHEMA_HINT = "{http://www.w3.org/2001/XMLSchema-instance}noNamespaceSchemaLocation"
 _SOURCES = {
@@ -197,7 +197,7 @@ class _Reader:
         if node is None:
             return None
         value = (node.text or "").strip()
-        limit = 200000 if locator == "Summary" else _MAX_FIELD_LENGTH
+        limit = 200000 if locator == "Summary" else MAX_METRONINFO_FIELD_LENGTH
         if len(node) or len(value) > limit:
             self.diagnostic(MetronInfoDiagnosticCode.INVALID_FIELD, locator)
             return None
@@ -211,7 +211,7 @@ class _Reader:
         if node is None or name not in node.attrib:
             return None
         value = node.attrib[name]
-        if len(value) > _MAX_FIELD_LENGTH:
+        if len(value) > MAX_METRONINFO_FIELD_LENGTH:
             self.diagnostic(MetronInfoDiagnosticCode.INVALID_FIELD, f"{locator}/@{name}")
             return None
         self.seen[node].add(name)

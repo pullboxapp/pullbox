@@ -254,6 +254,7 @@ async def test_manual_editor_previews_and_applies_only_approved_edits(
                 "series_groups": {"source": "custom", "value": "Elseworlds\nGotham"},
                 "alternate_number": {"source": "custom", "value": "007-A"},
                 "alternative_number": {"source": "custom", "value": "105"},
+                "collection_title": {"source": "custom", "value": "Gotham Collection"},
             }
         },
     }
@@ -322,7 +323,8 @@ async def test_manual_editor_previews_and_applies_only_approved_edits(
                     ci.findtext("AlternateNumber") == "007-A"
                     and mi.findtext("AlternativeNumber") == "105"
                 )
-                assert mi.find("CollectionTitle") is None
+                assert mi.findtext("CollectionTitle") == "Gotham Collection"
+                assert ci.find("CollectionTitle") is None
                 assert archive.read("page-053.jpg") == b"page 53"
     assert source.read_bytes() == original
 
