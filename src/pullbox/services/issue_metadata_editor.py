@@ -2,7 +2,6 @@
 
 from datetime import UTC, date, datetime
 from typing import cast
-from xml.etree import ElementTree as ET
 
 from pydantic import ValidationError
 
@@ -17,11 +16,13 @@ from pullbox.schemas.metadata_snapshot import (
     FieldOrigin,
     MetadataSnapshot,
     MetadataValues,
+    SharedAgeRating,
     field_domain,
 )
 from pullbox.services.archive_metadata_binding import ArchiveMetadataBinding
 from pullbox.services.archive_metadata_preservation import (
     ArchiveMetadataRenderError,
+    preserved_roots,
     review_preserved_fields,
 )
 from pullbox.services.archive_metadata_reconciliation import ArchiveMetadataReconciliation
@@ -34,9 +35,9 @@ EDITABLE_FIELDS = {
     "store_date": ("Store date", "date"),
     "page_count": ("Catalog page count", "number"),
     "credits": ("Creator credits", "credits"),
+    "age_rating": ("Age rating", "text"),
 }
 SHARED_TAGS = {
-    "AgeRating": ("Age rating", "AgeRating"),
     "Genre": ("Genre", "Genres/Genre"),
     "Tags": ("Tags", "Tags/Tag"),
     "Characters": ("Characters", "Characters/Character"),
@@ -111,6 +112,7 @@ def prepare_issue_editor(
     origins = {origin.field: origin for origin in issue.origins}
     values = issue.values.model_dump()
     fields: list[IssueMetadataEditorField] = []
+    ci, mi = preserved_roots(files)
     for field, (label, input_type) in EDITABLE_FIELDS.items():
         current = getattr(issue_state.values, field)
         options: dict[str, object] = {"library": current}
@@ -118,7 +120,11 @@ def prepare_issue_editor(
             ("ComicInfo.xml", archive.comicinfo),
             ("MetronInfo.xml", archive.metroninfo),
         ):
-            value = getattr(document.issue, field)
+            value = (
+                (ci if source == "ComicInfo.xml" else mi).findtext("AgeRating")
+                if field == "age_rating"
+                else getattr(document.issue, field)
+            )
             if value is not None:
                 options[source] = value
         edit = review.edits.get(cast("EditableIssueField", field))
@@ -132,6 +138,15 @@ def prepare_issue_editor(
                 if previous is None or not previous.user_override:
                     raise IssueMetadataEditError(f"{label} has no manual override to remove.")
             elif edit.source in options:
+                if (
+                    field == "age_rating"
+                    and options[edit.source] is not None
+                    and options[edit.source] not in tuple(SharedAgeRating)
+                ):
+                    raise IssueMetadataEditError(
+                        "This rating has no exact equivalent in both formats. "
+                        "Choose a shared rating or clear it."
+                    )
                 if options[edit.source] in (None, "", ()) and any(
                     value not in (None, "", ()) for value in options.values()
                 ):
@@ -158,11 +173,24 @@ def prepare_issue_editor(
                 editable=True,
                 input_type=input_type,
                 options=[
-                    IssueMetadataEditorOption(source=source, value=display_editor_value(value))
+                    IssueMetadataEditorOption(
+                        source=source,
+                        value=display_editor_value(value),
+                        selectable=field != "age_rating"
+                        or value is None
+                        or value in tuple(SharedAgeRating),
+                    )
                     for source, value in options.items()
                 ],
+                allowed_values=tuple(SharedAgeRating) if field == "age_rating" else (),
                 overridden=bool(previous and previous.user_override),
-                differs=any(value != current for value in options.values()),
+                differs=any(value != current for value in options.values())
+                or (
+                    field == "age_rating"
+                    and current is not None
+                    and bool(previous and previous.user_override)
+                    and len(options) < 3
+                ),
                 selected=edit is not None,
                 origin=(
                     "Manual correction"
@@ -171,7 +199,12 @@ def prepare_issue_editor(
                     if previous and previous.source
                     else "Library"
                 ),
-                reason="Catalog page count does not change the number of comic pages."
+                reason=(
+                    "Only ratings with the same label in both formats are offered. "
+                    "Clear removes the rating; Unknown writes a rating of Unknown."
+                )
+                if field == "age_rating"
+                else "Catalog page count does not change the number of comic pages."
                 if field == "page_count"
                 else (
                     "One creator per line: Name | Role. "
@@ -228,17 +261,6 @@ def prepare_issue_editor(
                     reason="Identity is protected. Review provider links to change a match.",
                 )
             )
-    # The reconciliation parser has already validated bounded XML before this display-only read.
-    ci = (
-        ET.fromstring(files.comicinfo.payload)
-        if files.comicinfo.payload
-        else ET.Element("ComicInfo")
-    )
-    mi = (
-        ET.fromstring(files.metroninfo.payload)
-        if files.metroninfo.payload
-        else ET.Element("MetronInfo")
-    )
     shared_conflicts = {item.key for item in review_preserved_fields(files, {})}
     for tag, (label, mi_path) in SHARED_TAGS.items():
         left = ci.findtext(tag) or ""

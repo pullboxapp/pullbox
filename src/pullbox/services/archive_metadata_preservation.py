@@ -337,6 +337,23 @@ def _resolve_shared_fields(
                 set_text(ci, field, ", ".join(right))
     for field, path in _SCALAR_FIELDS:
         left_text, right_text = ci.findtext(field), mi.findtext(path)
+        if field == "AgeRating" and left_text and left_text not in _AGE_RATINGS and not right_text:
+            if "xml.AgeRating" in choices:
+                raise ArchiveMetadataRenderError("invalid_choice", field)
+            conflicts.append(
+                FileMetadataConflict(
+                    key="xml.AgeRating",
+                    label="Age rating",
+                    options=[
+                        FileMetadataOption(
+                            source="ComicInfo.xml", value=left_text, selectable=False
+                        )
+                    ],
+                    note="This ComicInfo rating cannot be copied to MetronInfo. Open Edit metadata "
+                    "on the issue and choose a shared rating or Clear value.",
+                )
+            )
+            continue
         if left_text and right_text and left_text != right_text:
             selected = review(field, left_text, right_text)
             if selected == "ComicInfo.xml":

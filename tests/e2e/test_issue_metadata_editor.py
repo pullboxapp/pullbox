@@ -48,6 +48,19 @@ def test_editor_select_preview_apply_and_validation_retention(
             "origin": "Manual correction",
         },
         {
+            "key": "issue.age_rating",
+            "label": "Age rating",
+            "current": "Everyone",
+            "editable": True,
+            "input_type": "text",
+            "options": [
+                {"source": "library", "value": "Everyone"},
+                {"source": "ComicInfo.xml", "value": "PG", "selectable": False},
+            ],
+            "allowed_values": ["Unknown", "Everyone", "Teen"],
+            "differs": False,
+        },
+        {
             "key": "series.title",
             "label": "Series title",
             "current": "Batman",
@@ -127,9 +140,21 @@ def test_editor_select_preview_apply_and_validation_retention(
     expect(dialog.get_by_role("alert")).to_contain_text("file changed")
     expect(dialog.get_by_label("New Title", exact=True)).to_have_value("Rejected")
     dialog.get_by_label("New Title", exact=True).fill("My corrected title")
+    dialog.get_by_label("Update Age rating", exact=True).check()
+    expect(
+        dialog.get_by_text("ComicInfo.xml: PG (no exact equivalent)", exact=True)
+    ).to_be_visible()
+    dialog.get_by_role("button", name="Value source for Age rating", exact=True).click()
+    page.get_by_role("option", name="Enter correction", exact=True).click()
+    dialog.get_by_role("button", name="New Age rating", exact=True).click()
+    page.get_by_role("option", name="Teen", exact=True).click()
     dialog.get_by_role("button", name="Update preview", exact=True).click()
     expect(dialog.get_by_role("button", name="Apply selected changes", exact=True)).to_be_enabled()
-    assert previews[-1] == {"edits": {"title": {"source": "custom", "value": "My corrected title"}}}
+    selected = {
+        "title": {"source": "custom", "value": "My corrected title"},
+        "age_rating": {"source": "custom", "value": "Teen"},
+    }
+    assert previews[-1] == {"edits": selected}
     assert_no_axe_violations(
         page, name=f"issue-editor-{theme}", include=['[aria-labelledby="file-metadata-title"]']
     )
@@ -142,7 +167,7 @@ def test_editor_select_preview_apply_and_validation_retention(
     expect(dialog.get_by_role("progressbar")).to_have_attribute("aria-valuenow", "42")
     assert writes == [
         {
-            "edits": {"title": {"source": "custom", "value": "My corrected title"}},
+            "edits": selected,
             "review_key": "a" * 64,
         }
     ]

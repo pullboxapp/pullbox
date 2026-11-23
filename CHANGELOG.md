@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Edit metadata** on a managed issue can now change or clear its age rating even when
+  the existing ratings agree. Preview the change to both XML documents before applying it.
+
 - [Start a verified SQLite migration on PostgreSQL](docs/sqlite-postgresql-migration.md#start-the-reviewed-postgresql-library).
   The intended container checks the restored library and generated IDs, waits for
   confirmation from the still-offline source host, then starts with the migrated accounts and files.

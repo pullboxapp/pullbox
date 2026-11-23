@@ -1,7 +1,7 @@
 """Editor corrections, clears and override resets survive the real refresh writer."""
 
 import os
-from datetime import date
+from datetime import UTC, date, datetime
 from uuid import uuid4
 from zipfile import ZipFile
 
@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy import select
 
 from pullbox.core.metadata_identity import IdentityNamespace, MetadataSource
-from pullbox.models import Issue, Series
+from pullbox.models import Issue, LibraryFile, Series
 from pullbox.schemas.issue_metadata_editor import IssueMetadataEditorReview
 from pullbox.schemas.metadata_credits import MetadataCredit
 from pullbox.schemas.metadata_sources import ProviderIssueRead
@@ -131,6 +131,71 @@ async def test_selected_dates_page_count_and_credits_preserve_series_and_pages(
             )
         with ZipFile(path) as archive:
             assert archive.read("page.jpg") == b"page bytes"
+
+
+async def test_saved_rating_survives_refresh_and_external_edits_need_new_approval(
+    identity_probe_db, tmp_path
+):
+    _, factory, _ = identity_probe_db
+    empty = IssueMetadataEditorReview()
+    async with prepared(factory, tmp_path) as (path, _, plan):
+        issue_id = plan.target.binding.metadata.issues[0].local_id
+        await edit(factory, issue_id, {"age_rating": {"source": "custom", "value": "Teen"}})
+        before = path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns
+        adapter = IssueAdapter(
+            ProviderIssueRead(
+                source=MetadataSource.METRON_API,
+                identity_namespace=IdentityNamespace.METRON,
+                external_id="42",
+                series_external_id="12",
+                issue_number_text="50-X",
+            )
+        )
+        async with factory() as session:
+            await refresh_issue_from_sources(
+                session, issue_id, gcd_api_enabled=False, registry=reader(adapter)
+            )
+            await session.commit()
+            report = (await prepare_file_metadata(session, issue_id, editor=empty)).preview
+        rating = next(f for f in report.editor_fields if f.key == "issue.age_rating")
+        assert rating.overridden and rating.current == "Teen" and not rating.differs
+        assert (path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns) == before
+
+        with ZipFile(path) as archive:
+            members = {n: archive.read(n) for n in archive.namelist()}
+        with ZipFile(path, "w") as archive:
+            for name, content in members.items():
+                archive.writestr(
+                    name,
+                    content.replace(b">Teen<", b">Everyone<") if name.endswith(".xml") else content,
+                )
+        async with factory.begin() as session:
+            row = await session.get(LibraryFile, plan.target.binding.library_file_id)
+            row.file_size = path.stat().st_size
+            row.file_modified_at = datetime.fromtimestamp(path.stat().st_mtime, UTC)
+        changed = path.read_bytes()
+        for edits in [
+            {},
+            {"title": {"source": "custom", "value": "Something else"}},
+            {"age_rating": {"source": "reset"}},
+        ]:
+            async with factory() as session:
+                report = (
+                    await prepare_file_metadata(
+                        session,
+                        issue_id,
+                        editor=IssueMetadataEditorReview.model_validate({"edits": edits}),
+                    )
+                ).preview
+            assert not report.ready and any(c.key == "xml.AgeRating" for c in report.conflicts)
+            assert path.read_bytes() == changed
+        await edit(factory, issue_id, {"age_rating": {"source": "ComicInfo.xml"}})
+        before = path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns
+        assert (
+            await edit(factory, issue_id, {"age_rating": {"source": "reset"}})
+            == "override_released"
+        )
+        assert (path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns) == before
 
 
 async def test_reset_job_replay_does_not_release_a_later_override(identity_probe_db, tmp_path):

@@ -39,7 +39,7 @@ async def test_editor_exposes_clean_empty_and_protected_fields_without_writing(
         assert fields["issue.description"]["current"] == ""
         assert not fields["issue.issue_number_text"]["editable"]
         assert not fields["series.title"]["editable"]
-        assert fields["xml.AgeRating"]["reason"]
+        assert fields["issue.age_rating"]["editable"]
         assert not response.json()["editor_changed"]
         assert (path.read_bytes(), path.stat()) == before
 
@@ -97,6 +97,99 @@ async def test_editor_custom_title_writes_both_xml_and_persists_override(
             assert any(o.field == "title" and o.user_override for o in snapshot.origins)
 
 
+async def test_editor_can_correct_agreeing_ratings_and_explicitly_clear_both(
+    authenticated_client, sec_db, tmp_path, monkeypatch
+):
+    import pullbox.api.v1.issue_metadata_links as api
+
+    manager = JobQueueManager(sec_db)
+    manager.register_executor(JobType.FILE_METADATA, FileMetadataExecutor)
+    monkeypatch.setattr(api, "_get_manager", lambda: manager)
+    monkeypatch.setattr(api, "_schedule_dispatch", lambda manager: None)
+    async with prepared(sec_db, tmp_path) as (path, _, plan):
+        issue_id = plan.target.binding.metadata.issues[0].local_id
+        endpoint = f"/api/v1/issues/{issue_id}/metadata-editor"
+
+        async def preview(edits):
+            response = await authenticated_client.post(
+                endpoint + "/preview", json={"edits": edits}, headers=csrf(authenticated_client)
+            )
+            assert response.status_code == 200, response.text
+            return response.json()
+
+        for old, new in [
+            (None, "Teen"),
+            ("Teen", "Everyone"),
+            ("Everyone", "Unknown"),
+            ("Unknown", None),
+        ]:
+            before = path.read_bytes()
+            edit = {"source": "custom", "value": new} if new else {"source": "clear"}
+            edits = {"age_rating": edit}
+            report = await preview(edits)
+            assert report["ready"] and report["editor_changed"]
+            assert {
+                c["document"]
+                for c in report["changes"]
+                if "AgeRating" in c["field"] and c["before"] == old and c["after"] == new
+            } == {"ComicInfo.xml", "MetronInfo.xml"}
+            assert path.read_bytes() == before
+            response = await authenticated_client.post(
+                endpoint + "/write",
+                json={"edits": edits, "review_key": report["review_key"]},
+                headers=csrf(authenticated_client),
+            )
+            assert response.status_code == 202, response.text
+            await manager.dispatch_next()
+            job = await authenticated_client.get(f"/api/v1/issues/{issue_id}/file-metadata/job")
+            assert job.json()["job"]["state"] == "COMPLETED", job.text
+            with ZipFile(path) as archive:
+                for document in ("ComicInfo.xml", "MetronInfo.xml"):
+                    assert ET.fromstring(archive.read(document)).findtext("AgeRating") == new
+                assert archive.read("page.jpg") == b"page bytes"
+            fields = {f["key"]: f for f in (await preview({}))["editor_fields"]}
+            assert fields["issue.age_rating"]["current"] == (new or "")
+            assert fields["issue.age_rating"]["overridden"]
+            assert not fields["issue.age_rating"]["differs"]
+
+
+@pytest.mark.parametrize("source,value", [("ComicInfo.xml", "PG"), ("MetronInfo.xml", "Explicit")])
+async def test_editor_opens_when_embedded_rating_has_no_exact_equivalent(
+    authenticated_client, sec_db, tmp_path, source, value
+):
+    async with prepared(sec_db, tmp_path) as (path, _, plan):
+        with ZipFile(path, "w") as archive:
+            archive.writestr("page.jpg", b"page bytes")
+            root = source.split(".")[0]
+            parent = "<Series><Name>Example</Name></Series>" if root == "MetronInfo" else ""
+            archive.writestr(
+                source,
+                f"<{root}>{parent}<Number>50-X</Number><AgeRating>{value}</AgeRating></{root}>",
+            )
+        async with sec_db.begin() as session:
+            row = await session.get(LibraryFile, plan.target.binding.library_file_id)
+            row.file_size = path.stat().st_size
+            row.file_modified_at = datetime.fromtimestamp(path.stat().st_mtime, UTC)
+        before = path.read_bytes()
+        issue_id = plan.target.binding.metadata.issues[0].local_id
+        endpoint = f"/api/v1/issues/{issue_id}/metadata-editor/preview"
+
+        async def preview(edits):
+            return await authenticated_client.post(
+                endpoint, json={"edits": edits}, headers=csrf(authenticated_client)
+            )
+
+        result = await preview({})
+        assert result.status_code == 200, result.text
+        assert not result.json()["ready"]
+        rating = next(f for f in result.json()["editor_fields"] if f["key"] == "issue.age_rating")
+        assert {"value": value, "source": source, "selectable": False} in rating["options"]
+        assert (await preview({"age_rating": {"source": source}})).status_code == 409
+        corrected = await preview({"age_rating": {"source": "custom", "value": "Teen"}})
+        assert corrected.status_code == 200 and corrected.json()["ready"], corrected.text
+        assert path.read_bytes() == before
+
+
 @pytest.mark.parametrize(
     "edits",
     [
@@ -105,6 +198,7 @@ async def test_editor_custom_title_writes_both_xml_and_persists_override(
         {"page_count": {"source": "custom", "value": "-1"}},
         {"cover_date": {"source": "custom", "value": "2026-02-30"}},
         {"title": {"source": "library", "value": "Client-injected value"}},
+        {"age_rating": {"source": "custom", "value": "PG-13"}},
     ],
 )
 async def test_editor_rejects_invalid_or_protected_edits(

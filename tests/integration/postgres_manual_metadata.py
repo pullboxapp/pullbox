@@ -47,6 +47,8 @@ def verify(sql, db, *, refreshed=False):
         sql(db, "SELECT snapshot_json FROM issue_metadata_baselines WHERE issue_id=10001")
     )
     assert snapshot["values"]["title"] == TITLE
+    assert snapshot["values"]["age_rating"] == "Teen"
+    assert any(o["field"] == "age_rating" and o["user_override"] for o in snapshot["origins"])
     assert any(o["field"] == "title" and o["user_override"] for o in snapshot["origins"])
     if refreshed:
         assert sql(db, "SELECT store_date FROM issues WHERE id=10001") == "2024-11-20"
@@ -89,11 +91,21 @@ async def exercise(page, library, sql, db):
     await dialog.get_by_role("button", name="Value source for Title").click()
     await page.get_by_role("option", name="Enter correction", exact=True).click()
     await dialog.get_by_label("New Title", exact=True).fill(TITLE)
+    await dialog.get_by_label("Update Age rating", exact=True).check()
+    await dialog.get_by_role("button", name="Value source for Age rating").click()
+    await page.get_by_role("option", name="Enter correction", exact=True).click()
+    await dialog.get_by_role("button", name="New Age rating", exact=True).click()
+    await page.get_by_role("option", name="Teen", exact=True).click()
     async with page.expect_response("**/issues/10001/metadata-editor/preview") as response:
         await dialog.get_by_role("button", name="Update preview").click()
     result = await response.value
     preview = await result.json()
     assert result.ok and preview["ready"], preview
+    assert {
+        c["document"]
+        for c in preview["changes"]
+        if "AgeRating" in c["field"] and c["after"] == "Teen"
+    } == {"ComicInfo.xml", "MetronInfo.xml"}
     assert signature() == before
     await dialog.get_by_role("button", name="Apply selected changes").click()
     await expect(dialog.get_by_text("Both metadata files are up to date.")).to_be_visible(
@@ -102,6 +114,8 @@ async def exercise(page, library, sql, db):
     verify(sql, db)
     with ZipFile(comic) as archive:
         assert fromstring(archive.read("ComicInfo.xml")).findtext("Title") == TITLE
+        for name in ("ComicInfo.xml", "MetronInfo.xml"):
+            assert fromstring(archive.read(name)).findtext("AgeRating") == "Teen"
         assert fromstring(archive.read("MetronInfo.xml")).findtext("Stories/Story") == TITLE
         assert {
             name: archive.read(name) for name in archive.namelist() if name.endswith(".png")

@@ -35,20 +35,28 @@ contains an actual XML change, the normal reviewed archive write still applies.
 | Store date | ISO date | No native equivalent | StoreDate | Editable; does not overwrite the cover date |
 | Catalog page count | Integer 0-1000000 | PageCount | PageCount | Editable, never changes physical pages |
 | Creator credits | Up to 128 normalized Name / Role entries | Role-specific elements | Credits | Editable; resource IDs/unsupported content block destructive changes |
+| Age rating | Unknown, Everyone, Teen, or explicit clear | AgeRating | AgeRating | Editable even when both old values agree; a manual correction is saved with the issue |
 | Issue number, native provider IDs | Identity | Number/Web | Number/IDs | Protected; use validated provider linking |
 | Cover artwork URL | Artwork | Existing renderer projection | Existing renderer projection | Protected; artwork workflow |
 | Series title, sort title, publisher, summary, dates, type, archive format, status, count, volume, language, artwork | Series-wide catalog values | Existing series projection | Existing series projection | Read-only; no changes to siblings |
-| Rating, genres, tags, characters, teams, locations, imprint, arcs/positions | Preserved XML-only values | Corresponding elements | Corresponding elements | Display both documents; existing Write file metadata resolves disagreements |
+| Genres, tags, characters, teams, locations, imprint, arcs/positions | Preserved XML-only values | Corresponding elements | Corresponding elements | Display both documents; existing Write file metadata resolves disagreements |
 
 Arbitrary extension nodes, resource identifiers and page annotations remain under
-the existing preservation contract, not editable raw XML. Full XML-only field
-editing, series/series.json editing, member-file propagation and bulk editing
-remain outstanding. This milestone does not claim all-schema editing completion.
+the existing preservation contract, not editable raw XML. See the separate
+[series editor](SERIES_METADATA_EDITOR.md) and [member-file propagation](SERIES_METADATA_PROPAGATION.md)
+workflows. Other XML-only fields and bulk editing remain outstanding.
+
+The age rating selector offers only identical labels from the
+[ComicInfo 2.0 schema](https://raw.githubusercontent.com/anansi-project/comicinfo/main/schema/v2.0/ComicInfo.xsd)
+and the bundled MetronInfo 1.1 schema. A format-specific label is shown as
+evidence, not translated into a guessed audience. Explicitly clearing a rating
+removes both elements; selecting Unknown writes both elements. No provider is
+queried for a rating. A provider refresh preserves a manual correction.
 
 ## Safety Boundary
 
 The editor currently requires one independently bound, managed CBZ/ZIP. Missing,
-referenced/read-only, import-owned and ambiguous files retain the existing
+referenced/read-only, actively importing and ambiguous files retain the existing
 writer's rejection. Native formats require the separate explicit conversion
 workflow. There is no implicit conversion, rename, move, download or sidecar write.
 

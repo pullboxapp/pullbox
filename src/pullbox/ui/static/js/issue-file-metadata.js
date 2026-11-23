@@ -74,7 +74,7 @@ function issueFileMetadata(issueId) {
         this.allFields || field.differs || (this.editorDrafts[field.key] && this.editorDrafts[field.key].selected));
     },
     editorOptions: function (field) {
-      var options = (field.options || []).map(option => ({ value: option.source, label: option.source === "library" ? "Keep library value" : option.source }));
+      var options = (field.options || []).filter(option => option.selectable !== false).map(option => ({ value: option.source, label: option.source === "library" ? "Keep library value" : option.source }));
       options.push({ value: "custom", label: "Enter correction" }, { value: "clear", label: "Clear value" });
       if (field.overridden) options.push({ value: "reset", label: "Remove manual override" });
       return options;

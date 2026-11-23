@@ -52,6 +52,7 @@ class _StagingRequest(BaseModel):
     pdf_quality: PdfQuality = "medium"
     metadata_state: SeriesRefreshState | None = None
     shared_choices: SharedXmlChoices | None = None
+    edit_age_rating: bool = Field(default=False, strict=True)
     propagation_fields: frozenset[str] | None = None
 
 
@@ -98,6 +99,7 @@ async def stage_cbz_metadata_interruptible(
     pdf_quality: PdfQuality = "medium",
     metadata_state: SeriesRefreshState | None = None,
     shared_choices: SharedXmlChoices | None = None,
+    edit_age_rating: bool = False,
     propagation_fields: frozenset[str] | None = None,
 ) -> AsyncIterator[StagedArchiveMetadata]:
     """Stage a verified pair, then yield to the independently authorized owner.
@@ -126,6 +128,7 @@ async def stage_cbz_metadata_interruptible(
         pdf_quality=pdf_quality,
         metadata_state=metadata_state,
         shared_choices=shared_choices,
+        edit_age_rating=edit_age_rating,
         propagation_fields=propagation_fields,
     )
     encoded = request.model_dump_json().encode("utf-8")
@@ -264,6 +267,7 @@ def worker_stage_metadata(payload: dict[str, Any]) -> dict[str, Any]:
             pdf_quality=request.pdf_quality,
             metadata_state=request.metadata_state,
             shared_choices=request.shared_choices,
+            edit_age_rating=request.edit_age_rating,
             propagation_fields=request.propagation_fields,
         )
         _check_fingerprint(request.source_path, request.source_fingerprint)

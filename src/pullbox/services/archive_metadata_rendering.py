@@ -70,6 +70,7 @@ def render_archive_metadata(
     previous_issue: MetadataSnapshot | None = None,
     replace_managed: bool = False,
     shared_choices: SharedXmlChoices | None = None,
+    edit_age_rating: bool = False,
     propagation_fields: frozenset[str] | None = None,
 ) -> RenderedArchiveMetadata:
     """Render both documents from bound snapshots; this is not write permission.
@@ -125,6 +126,16 @@ def render_archive_metadata(
     _render_core(series, issue, ci, mi)
     _render_ids(series, issue, ci, mi, primary)
     _render_credits(issue, archive, ci, mi)
+    if edit_age_rating:
+        if not any(o.field == "age_rating" and o.user_override for o in issue.origins):
+            raise ArchiveMetadataRenderError("invalid_choice", "AgeRating")
+        for root in (ci, mi):
+            set_text(root, "AgeRating", issue.values.age_rating)
+    elif any(o.field == "age_rating" and o.user_override for o in issue.origins) and any(
+        root.findtext("AgeRating") != issue.values.age_rating for root in (ci, mi)
+    ):
+        # A saved correction is not fresh approval to replace externally changed metadata.
+        raise ArchiveMetadataRenderError("rating_override_changed", "AgeRating")
     coordinate_preserved_fields(ci, mi, shared_choices)
     return _validated_pair(ci, mi)
 

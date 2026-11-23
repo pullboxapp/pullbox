@@ -1,6 +1,7 @@
 """Canonical descriptive values and their provenance, independent of output format."""
 
 from datetime import date
+from enum import StrEnum
 from typing import Literal, Self
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
@@ -16,6 +17,14 @@ from pullbox.schemas.metadata_credits import MetadataCredits
 from pullbox.schemas.metadata_sources import MetadataDomain
 
 type EmbeddedDocument = Literal["ComicInfo.xml", "MetronInfo.xml"]
+
+
+class SharedAgeRating(StrEnum):
+    """Exact labels shared by ComicInfo 2.0 and MetronInfo 1.1."""
+
+    UNKNOWN = "Unknown"
+    EVERYONE = "Everyone"
+    TEEN = "Teen"
 
 
 def field_domain(kind: MetadataEntityKind, field: str) -> MetadataDomain:
@@ -48,6 +57,7 @@ class MetadataValues(BaseModel):
     cover_date: date | None = None
     store_date: date | None = None
     page_count: int | None = Field(default=None, ge=0, le=1000000, strict=True)
+    age_rating: SharedAgeRating | None = Field(default=None, exclude_if=lambda v: v is None)
     image_url: str | None = Field(default=None, max_length=500)
     credits: MetadataCredits | None = None
 
