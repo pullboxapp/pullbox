@@ -2,7 +2,7 @@
 function issueFileMetadata(issueId) {
   var endpoint = issueId ? "/api/v1/issues/" + issueId + "/file-metadata" : "";
   return {
-    recovery: !issueId, resolved: false, editor: false, allFields: false, editorDrafts: {},
+    recovery: !issueId, resolved: false, editor: false, allFields: false, editorDrafts: {}, arcRowId: 0,
     open: false, busy: false, error: "", preview: null, job: null, choices: {}, choicesDirty: false,
     timer: null, disposed: false, trigger: null, generation: 0, jobGeneration: 0,
     init: function () { if (endpoint) this.loadJob(); },
@@ -80,10 +80,26 @@ function issueFileMetadata(issueId) {
       return options;
     },
     initialEditorValue: function (field) {
+      if (field.input_type === "arcs") {
+        return (field.arc_draft && field.arc_draft.length ? field.arc_draft : [{ name: "", position: null }])
+          .map(entry => this.arcRow(entry));
+      }
       if (!field.xml_conflict_key || (field.allowed_values && field.allowed_values.length) || field.current || field.overridden) return field.current || "";
       var files = field.options.filter(option => option.source !== "library");
       return files.length && files.every(option => option.selectable !== false && option.value === files[0].value)
         ? files[0].value : "";
+    },
+    arcRow: function (entry = {}) {
+      return { key: ++this.arcRowId, name: entry.name || "", position: entry.position == null ? "" : String(entry.position) };
+    },
+    arcValues: function (rows) {
+      if (!rows.length) throw new Error("Choose Clear value to remove all embedded arcs.");
+      return rows.map(row => {
+        if (!row.name.trim() || row.name.includes(",")) throw new Error("Each arc needs a name without commas.");
+        if (row.position !== "" && (!/^\d{1,10}$/.test(row.position) || Number(row.position) < 1))
+          throw new Error("Enter a positive whole arc position or leave it blank.");
+        return { name: row.name, position: row.position === "" ? null : Number(row.position) };
+      });
     },
     selectEditorFields: function (selected) {
       (this.preview.editor_fields || []).filter(field => field.editable).forEach(field => { this.editorDrafts[field.key].selected = selected; });
@@ -94,7 +110,9 @@ function issueFileMetadata(issueId) {
       Object.keys(this.editorDrafts).forEach(key => {
         var draft = this.editorDrafts[key];
         if (!draft.selected) return;
-        edits[key.slice(6)] = draft.source === "custom" ? { source: draft.source, value: draft.value } : { source: draft.source };
+        edits[key.slice(6)] = draft.source === "custom"
+          ? { source: draft.source, value: key === "issue.story_arcs" ? this.arcValues(draft.value) : draft.value }
+          : { source: draft.source };
       });
       return edits;
     },
@@ -135,9 +153,9 @@ function issueFileMetadata(issueId) {
       this.busy = true; this.error = "";
       this.choicesDirty = true;
       var choices = reset ? {} : Object.assign({}, this.choices);
-      var edits = reset ? {} : this.editorEdits();
       if (reset && !this.recovery) { this.job = null; this.preview = null; }
       try {
+        var edits = reset ? {} : this.editorEdits();
         var data = await this.request(this.reviewEndpoint() + "/preview", this.editor ? { edits: edits } : Object.keys(choices).length ? { choices: choices } : {});
         if (this.disposed || generation !== this.generation) return;
         this.preview = data; this.job = null;

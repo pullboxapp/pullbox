@@ -20,6 +20,7 @@ from pullbox.core.metadata_xml import MetadataXmlError, parse_metadata_xml
 from pullbox.core.metroninfo_schema import validate_metroninfo_xml
 from pullbox.schemas.issue_file_metadata import SharedXmlChoices
 from pullbox.schemas.issue_metadata_editor import EditorXmlField
+from pullbox.schemas.metadata_issue_arcs import comicinfo_arcs
 from pullbox.schemas.metadata_labels import LABEL_XML_PATHS
 from pullbox.schemas.metadata_snapshot import MetadataSnapshot, MetadataValues
 from pullbox.services.archive_metadata_preservation import (
@@ -27,7 +28,9 @@ from pullbox.services.archive_metadata_preservation import (
 )
 from pullbox.services.archive_metadata_preservation import (
     apply_issue_labels,
+    apply_reviewed_arcs,
     coordinate_preserved_fields,
+    editor_arc_value,
     embedded_labels,
     preserved_roots,
     set_reviewed_imprint,
@@ -158,6 +161,14 @@ def render_archive_metadata(
             embedded_labels(ci, ci_path) != values or embedded_labels(mi, mi_path) != values
         ):
             raise ArchiveMetadataRenderError("label_override_changed", ci_path)
+    arcs = issue.values.story_arcs or ()
+    if "story_arcs" in reviewed_xml_fields:
+        apply_reviewed_arcs(ci, mi, arcs)
+    elif "story_arcs" in protected and (
+        (editor_arc_value(ci, comicinfo=True) or ()) != comicinfo_arcs(arcs)
+        or (editor_arc_value(mi, comicinfo=False) or ()) != arcs
+    ):
+        raise ArchiveMetadataRenderError("label_override_changed", "StoryArc")
     coordinate_preserved_fields(ci, mi, shared_choices)
     return _validated_pair(ci, mi)
 

@@ -89,6 +89,8 @@ def file_metadata_error(exc: BaseException) -> str:
     code = getattr(exc, "code", "")
     if code in {"rating_override_changed", "label_override_changed"}:
         label = SHARED_FIELD_LABELS.get(getattr(exc, "field", ""), "metadata")
+        if getattr(exc, "field", "") == "StoryArc":
+            label = "embedded story arcs"
         return (
             f"The file no longer matches your saved {label}. Open Edit metadata on "
             f"the issue, select {label.capitalize()}, and preview the value to keep. "
@@ -373,7 +375,7 @@ def _prepare(
         series, issue, conflicts = review_metadata_fields(binding, archive, series, issue, choices)
     shared_choices = shared_xml_choices(choices)
     reviewed_xml_fields = editor.reviewed_xml_fields if editor else frozenset()
-    shared_conflicts = review_preserved_fields(files, shared_choices)
+    shared_conflicts = review_preserved_fields(files, shared_choices, editor=editor is not None)
     for editor_field, key in EDITOR_XML_FIELDS.items() if editor else ():
         if editor_field in reviewed_xml_fields:
             shared_conflicts = [c for c in shared_conflicts if c.key != key]
@@ -418,10 +420,17 @@ def _prepare(
         )
     except ArchiveMetadataRenderError as exc:
         # Only descriptive disagreements enter review; identity/schema guards still fail closed.
+        arc_issue = (
+            editor is not None
+            and "story_arcs" not in reviewed_xml_fields
+            and exc.field in {"StoryArc", "StoryArcNumber"}
+            and exc.code == "unsupported_content"
+        )
         if (
             ready
             or (
                 exc.code != "unreconciled_field"
+                and not arc_issue
                 and not (
                     editor
                     and (
@@ -434,7 +443,9 @@ def _prepare(
                 )
             )
             or not any(
-                item.key.split(".")[1] == exc.field for item in conflicts if item.selected is None
+                item.key.split(".")[1] == ("StoryArc" if arc_issue else exc.field)
+                for item in conflicts
+                if item.selected is None
             )
         ):
             raise

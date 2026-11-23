@@ -14,6 +14,7 @@ from pullbox.core.metadata_identity import (
     MetadataSource,
 )
 from pullbox.schemas.metadata_credits import MetadataCredits
+from pullbox.schemas.metadata_issue_arcs import IssueArcList
 from pullbox.schemas.metadata_labels import IssueLabels
 from pullbox.schemas.metadata_sources import MetadataDomain
 
@@ -69,6 +70,7 @@ class MetadataValues(BaseModel):
     page_count: int | None = Field(default=None, ge=0, le=1000000, strict=True)
     age_rating: SharedAgeRating | None = Field(default=None, exclude_if=lambda v: v is None)
     tags: IssueLabels | None = Field(default=None, exclude_if=lambda v: v is None)
+    story_arcs: IssueArcList | None = Field(default=None, exclude_if=lambda v: v is None)
     imprint: str | None = Field(default=None, max_length=255, exclude_if=lambda v: v is None)
     genres: IssueLabels | None = Field(default=None, exclude_if=lambda v: v is None)
     characters: IssueLabels | None = Field(default=None, exclude_if=lambda v: v is None)

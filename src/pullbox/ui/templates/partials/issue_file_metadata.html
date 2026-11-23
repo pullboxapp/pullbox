@@ -66,14 +66,30 @@
                         <p class="text-sm text-pb-text-sec" x-show="editorDrafts[field.key].source === 'reset'">Keep the current value now and allow future provider refreshes to update it.</p>
                         <p class="text-sm text-pb-warning" x-show="editorDrafts[field.key].source === 'reset' && !choicesDirty && preview && (preview.conflicts || []).some(c => c.key === field.key || c.key === field.xml_conflict_key)">This field has conflicting values. Choose which value to keep and apply it first, then remove the override.</p>
                         <div x-show="editorDrafts[field.key].source === 'custom'" class="space-y-2">
-                          <label class="field-label" :for="'editor-value-' + field.key" x-text="'New ' + field.label"></label>
+                          <label x-show="field.input_type !== 'arcs'" class="field-label" :for="'editor-value-' + field.key" x-text="'New ' + field.label"></label>
+                          <template x-if="field.input_type === 'arcs'">
+                            <div class="space-y-2">
+                              <template x-for="(entry, index) in editorDrafts[field.key].value" :key="entry.key">
+                                <div class="flex flex-wrap items-end gap-2">
+                                  <label class="field-label grow min-w-0">Arc name
+                                    <input class="input-pb w-full" type="text" maxlength="500" :aria-label="'Arc name ' + (index + 1)" x-model="entry.name" @input="choicesDirty = true" :disabled="busy">
+                                  </label>
+                                  <label class="field-label">Position (optional)
+                                    <input class="input-pb w-24" type="text" inputmode="numeric" maxlength="10" :aria-label="'Arc position ' + (index + 1)" x-model="entry.position" @input="choicesDirty = true" :disabled="busy">
+                                  </label>
+                                  <button type="button" class="btn-ghost btn-sm" :aria-label="'Remove arc ' + (index + 1)" :disabled="busy" @click="editorDrafts[field.key].value.splice(index, 1); choicesDirty = true">Remove</button>
+                                </div>
+                              </template>
+                              <button type="button" class="btn-ghost btn-sm" :disabled="busy || editorDrafts[field.key].value.length >= 128" @click="editorDrafts[field.key].value.push(arcRow()); choicesDirty = true">Add arc entry</button>
+                            </div>
+                          </template>
                           <template x-if="field.input_type === 'textarea' || field.input_type === 'credits'">
                             <textarea class="input-pb w-full min-h-24" :id="'editor-value-' + field.key" rows="4" x-model="editorDrafts[field.key].value" @input="choicesDirty = true" :disabled="busy"></textarea>
                           </template>
                           <template x-if="field.allowed_values && field.allowed_values.length">
                             <div>{{ dropdown_select(name="issue-editor-value", trigger_id_expression="'editor-value-' + field.key", local_model="editorDrafts[field.key].value", options_expression="field.allowed_values.map(value => ({value: value, label: value}))", local_on_change="choicesDirty = true", disabled_expression="busy") }}</div>
                           </template>
-                          <template x-if="!(field.allowed_values && field.allowed_values.length) && field.input_type !== 'textarea' && field.input_type !== 'credits'">
+                          <template x-if="!(field.allowed_values && field.allowed_values.length) && !['textarea', 'credits', 'arcs'].includes(field.input_type)">
                             <input class="input-pb w-full" :id="'editor-value-' + field.key" :type="field.input_type" x-model="editorDrafts[field.key].value" @input="choicesDirty = true" :disabled="busy">
                           </template>
                         </div>

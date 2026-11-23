@@ -13,6 +13,7 @@ from defusedxml.ElementTree import fromstring
 TITLE = "My Harbor Lights title"
 PUBLISHER = "Cutover Press"
 IMPRINT = "Harbor Noir"
+ARCS = [{"name": "The Storm", "position": 3}, {"name": "Harbor After Dark", "position": 1}]
 ISSUE_LISTS = {
     "Tags": ("Tags", "Tags/Tag", ["Harbor", "Coastal"]),
     "Genres": ("Genre", "Genres/Genre", ["Mystery", "Adventure"]),
@@ -62,6 +63,8 @@ def verify(sql, db, *, refreshed=False):
     assert snapshot["values"]["title"] == TITLE
     assert snapshot["values"]["age_rating"] == "Teen"
     assert snapshot["values"]["imprint"] == IMPRINT
+    assert snapshot["values"]["story_arcs"] == ARCS
+    assert any(o["field"] == "story_arcs" and o["user_override"] for o in snapshot["origins"])
     assert any(o["field"] == "imprint" and o["user_override"] for o in snapshot["origins"])
     for label, (_, _, names) in ISSUE_LISTS.items():
         assert snapshot["values"][label.lower()] == names
@@ -118,6 +121,14 @@ async def exercise(page, library, sql, db):
     await dialog.get_by_role("button", name="Value source for Imprint").click()
     await page.get_by_role("option", name="Enter correction", exact=True).click()
     await dialog.get_by_label("New Imprint", exact=True).fill(IMPRINT)
+    await dialog.get_by_label("Update Embedded story arcs", exact=True).check()
+    await dialog.get_by_role("button", name="Value source for Embedded story arcs").click()
+    await page.get_by_role("option", name="Enter correction", exact=True).click()
+    for index, entry in enumerate(ARCS, 1):
+        if index > 1:
+            await dialog.get_by_role("button", name="Add arc entry").click()
+        await dialog.get_by_label(f"Arc name {index}", exact=True).fill(entry["name"])
+        await dialog.get_by_label(f"Arc position {index}", exact=True).fill(str(entry["position"]))
     for label, (_, _, names) in ISSUE_LISTS.items():
         await dialog.get_by_label(f"Update {label}", exact=True).check()
         await dialog.get_by_role("button", name=f"Value source for {label}").click()
@@ -145,6 +156,12 @@ async def exercise(page, library, sql, db):
         mi = fromstring(archive.read("MetronInfo.xml"))
         assert ci.findtext("Publisher") == mi.findtext("Publisher/Name") == PUBLISHER
         assert ci.findtext("Imprint") == mi.findtext("Publisher/Imprint") == IMPRINT
+        assert ci.findtext("StoryArc") == "The Storm, Harbor After Dark"
+        assert ci.findtext("StoryArcNumber") == "3, 1"
+        assert [(a.findtext("Name"), a.findtext("Number")) for a in mi.findall("Arcs/Arc")] == [
+            ("The Storm", "3"),
+            ("Harbor After Dark", "1"),
+        ]
         for ci_path, mi_path, names in ISSUE_LISTS.values():
             assert ci.findtext(ci_path) == ", ".join(names)
             assert [n.text for n in mi.findall(mi_path)] == names

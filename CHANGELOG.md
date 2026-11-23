@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Edit a comic's embedded story arcs as name/position pairs without changing
+  tracked arc memberships or reading order. Unknown positions stay unknown.
 - Edit or clear a single issue's imprint without changing the series publisher
   or sibling comics. If the publisher is missing, the editor explains how to
   keep the imprint or explicitly clear it without inventing a publisher.

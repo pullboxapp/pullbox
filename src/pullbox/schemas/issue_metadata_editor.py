@@ -1,8 +1,10 @@
 """Bounded descriptive edits; identifiers and series-wide values are not editable."""
 
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from pullbox.schemas.metadata_issue_arcs import IssueArcEntry, IssueArcList
 
 type EditorConflictField = Literal[
     "xml.AgeRating",
@@ -12,6 +14,7 @@ type EditorConflictField = Literal[
     "xml.Characters",
     "xml.Teams",
     "xml.Locations",
+    "xml.StoryArc",
 ]
 
 type EditableIssueField = Literal[
@@ -28,9 +31,10 @@ type EditableIssueField = Literal[
     "characters",
     "teams",
     "locations",
+    "story_arcs",
 ]
 type EditorXmlField = Literal[
-    "age_rating", "imprint", "tags", "genres", "characters", "teams", "locations"
+    "age_rating", "imprint", "tags", "genres", "characters", "teams", "locations", "story_arcs"
 ]
 EDITOR_XML_FIELDS: dict[EditorXmlField, EditorConflictField] = {
     "age_rating": "xml.AgeRating",
@@ -40,6 +44,7 @@ EDITOR_XML_FIELDS: dict[EditorXmlField, EditorConflictField] = {
     "characters": "xml.Characters",
     "teams": "xml.Teams",
     "locations": "xml.Locations",
+    "story_arcs": "xml.StoryArc",
 }
 
 
@@ -47,7 +52,7 @@ class IssueMetadataEdit(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     source: Literal["library", "ComicInfo.xml", "MetronInfo.xml", "custom", "clear", "reset"]
-    value: str | None = Field(default=None, max_length=200000)
+    value: Annotated[str, Field(max_length=200000)] | IssueArcList | None = None
 
     @model_validator(mode="after")
     def explicit_custom_value(self) -> Self:
@@ -59,7 +64,14 @@ class IssueMetadataEdit(BaseModel):
 class IssueMetadataEditorReview(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    edits: dict[EditableIssueField, IssueMetadataEdit] = Field(default_factory=dict, max_length=13)
+    edits: dict[EditableIssueField, IssueMetadataEdit] = Field(default_factory=dict, max_length=14)
+
+    @model_validator(mode="after")
+    def matching_input_types(self) -> Self:
+        for field, edit in self.edits.items():
+            if edit.source == "custom" and (field == "story_arcs") != isinstance(edit.value, tuple):
+                raise ValueError("Enter arc names and optional positive positions as pairs")
+        return self
 
     @property
     def reviewed_xml_fields(self) -> frozenset[EditorXmlField]:
@@ -87,7 +99,8 @@ class IssueMetadataEditorField(BaseModel):
     proposed: str
     editable: bool = False
     reason: str = ""
-    input_type: Literal["text", "textarea", "date", "number", "credits"] = "text"
+    input_type: Literal["text", "textarea", "date", "number", "credits", "arcs"] = "text"
+    arc_draft: tuple[IssueArcEntry, ...] = ()
     allowed_values: tuple[str, ...] = ()
     options: list[IssueMetadataEditorOption] = Field(default_factory=list)
     overridden: bool = False

@@ -100,6 +100,17 @@ def test_editor_select_preview_apply_and_validation_retention(
             "differs": False,
             "selected": False,
         },
+        {
+            "key": "issue.story_arcs",
+            "label": "Embedded story arcs",
+            "editable": True,
+            "input_type": "arcs",
+            "xml_conflict_key": "xml.StoryArc",
+            "current": "",
+            "arc_draft": [{"name": "Old arc", "position": 2}, {"name": "Keep", "position": 5}],
+            "options": [{"source": "library", "value": ""}],
+            "differs": False,
+        },
     ]
 
     def preview(route):
@@ -189,6 +200,20 @@ def test_editor_select_preview_apply_and_validation_retention(
     imprint = dialog.get_by_label("New Imprint", exact=True)
     expect(imprint).to_have_value("Harbor Books")
     imprint.fill("Harbor Noir")
+    dialog.get_by_label("Update Embedded story arcs", exact=True).check()
+    dialog.get_by_role("button", name="Value source for Embedded story arcs").click()
+    page.get_by_role("option", name="Enter correction", exact=True).click()
+    expect(dialog.get_by_label("Arc name 1", exact=True)).to_have_value("Old arc")
+    dialog.get_by_role("button", name="Remove arc 1", exact=True).click()
+    expect(dialog.get_by_label("Arc name 1", exact=True)).to_have_value("Keep")
+    dialog.get_by_label("Arc position 1", exact=True).fill("6")
+    dialog.get_by_role("button", name="Add arc entry").click()
+    before_invalid = len(previews)
+    dialog.get_by_role("button", name="Update preview", exact=True).click()
+    expect(dialog.get_by_role("alert")).to_contain_text("Each arc needs a name")
+    assert len(previews) == before_invalid
+    expect(dialog.get_by_label("Arc position 1", exact=True)).to_have_value("6")
+    dialog.get_by_label("Arc name 2", exact=True).fill("New | Arc")
     dialog.get_by_role("button", name="Update preview", exact=True).click()
     expect(dialog.get_by_role("button", name="Apply selected changes", exact=True)).to_be_enabled()
     selected = {
@@ -196,6 +221,10 @@ def test_editor_select_preview_apply_and_validation_retention(
         "age_rating": {"source": "custom", "value": "Teen"},
         "tags": {"source": "custom", "value": "City\nHarbor"},
         "imprint": {"source": "custom", "value": "Harbor Noir"},
+        "story_arcs": {
+            "source": "custom",
+            "value": [{"name": "Keep", "position": 6}, {"name": "New | Arc", "position": None}],
+        },
     }
     assert previews[-1] == {"edits": selected}
     assert_no_axe_violations(

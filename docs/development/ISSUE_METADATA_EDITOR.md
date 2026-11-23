@@ -42,7 +42,13 @@ contains an actual XML change, the normal reviewed archive write still applies.
 | Cover artwork URL | Artwork | Existing renderer projection | Existing renderer projection | Protected; artwork workflow |
 | Series title, sort title, publisher, summary, dates, type, archive format, status, count, volume, language, artwork | Series-wide catalog values | Existing series projection | Existing series projection | Read-only; no changes to siblings |
 | Issue imprint | Single-line name, up to 255 characters | Imprint | Publisher/Imprint | Editable for this issue only. A nonempty imprint requires a named publisher; retain its ID only for the same imprint. |
-| Arcs/positions | Preserved XML-only values | Corresponding elements | Corresponding elements | Display both documents; existing Write file metadata resolves disagreements |
+| Embedded story arcs | Up to 128 unique arc names and optional positive positions | StoryArc and StoryArcNumber | Arcs/Arc/Name and Number | Edit names and positions together. Retained names keep their IDs. Does not create tracked arcs, change memberships, or reorder a reading list. |
+
+ComicInfo uses one comma-separated list of arc names and one of positions. If
+any position is unknown, Pullbox writes the names but omits the ComicInfo
+position list; MetronInfo retains each known position on the correct arc.
+Ambiguous or malformed source values cannot be chosen as corrections. Review
+the other XML source, enter explicit pairs, or choose **Clear value**.
 
 Arbitrary extension nodes, resource identifiers and page annotations remain under
 the existing preservation contract, not editable raw XML. See the separate

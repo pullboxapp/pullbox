@@ -14,6 +14,7 @@ from pullbox.schemas.issue_metadata_editor import (
     IssueMetadataEditorOption,
     IssueMetadataEditorReview,
 )
+from pullbox.schemas.metadata_issue_arcs import IssueArcEntry, comicinfo_arcs
 from pullbox.schemas.metadata_labels import LABEL_XML_PATHS, selectable_labels
 from pullbox.schemas.metadata_snapshot import (
     FieldOrigin,
@@ -26,9 +27,9 @@ from pullbox.schemas.metadata_snapshot import (
 from pullbox.services.archive_metadata_binding import ArchiveMetadataBinding
 from pullbox.services.archive_metadata_preservation import (
     ArchiveMetadataRenderError,
+    editor_arc_value,
     embedded_labels,
     preserved_roots,
-    review_preserved_fields,
 )
 from pullbox.services.archive_metadata_reconciliation import ArchiveMetadataReconciliation
 from pullbox.services.metadata_series_refresh_state import ISSUE_FIELDS, SERIES_FIELDS
@@ -42,14 +43,13 @@ EDITABLE_FIELDS = {
     "credits": ("Creator credits", "credits"),
     "age_rating": ("Age rating", "text"),
     "imprint": ("Imprint", "text"),
+    "story_arcs": ("Embedded story arcs", "arcs"),
     **{name: (name.capitalize(), "textarea") for name in LABEL_XML_PATHS},
-}
-SHARED_TAGS = {
-    "StoryArc": ("Story arc", "Arcs/Arc/Name"),
-    "StoryArcNumber": ("Story arc position", "Arcs/Arc/Number"),
 }
 
 FIELD_HELP = {
+    "story_arcs": "This edits the comic, not tracked arcs or their reading order. "
+    "Positions are optional. If any are blank, only MetronInfo can store the known positions.",
     **{
         name: "One entry per line. Existing names keep their Metron IDs; new or renamed entries "
         "get no ID."
@@ -72,10 +72,25 @@ def display_editor_value(value: object) -> str:
     if value is None:
         return ""
     if isinstance(value, tuple):
+        if value and isinstance(value[0], IssueArcEntry):
+            return "\n".join(
+                f"{e.name} (position {e.position})" if e.position is not None else e.name
+                for e in value
+            )
         if all(isinstance(item, str) for item in value):
             return "\n".join(value)
         return "\n".join(f"{item.name} | {item.role}" for item in value)
     return value.isoformat() if isinstance(value, date) else str(value)
+
+
+def _selectable(field: str, value: object) -> bool:
+    if field in LABEL_XML_PATHS:
+        return selectable_labels(value)
+    if field == "story_arcs":
+        return not isinstance(value, str)
+    if field == "imprint":
+        return selectable_imprint(value)
+    return field != "age_rating" or value is None or value in tuple(SharedAgeRating)
 
 
 def _custom_value(field: str, text: str) -> object:
@@ -156,6 +171,8 @@ def prepare_issue_editor(
                 value = root.findtext("AgeRating")
             elif field == "imprint":
                 value = root.findtext("Imprint" if root is ci else "Publisher/Imprint")
+            elif field == "story_arcs":
+                value = editor_arc_value(root, comicinfo=root is ci)
             else:
                 value = getattr(document.issue, field)
             if value is not None:
@@ -164,13 +181,22 @@ def prepare_issue_editor(
         previous = origins.get(field)
         if edit is not None:
             if edit.source == "custom":
-                values[field] = _custom_value(field, edit.value or "")
+                values[field] = (
+                    edit.value
+                    if isinstance(edit.value, tuple)
+                    else _custom_value(field, edit.value or "")
+                )
             elif edit.source == "clear":
                 values[field] = () if field == "credits" else None
             elif edit.source == "reset":
                 if previous is None or not previous.user_override:
                     raise IssueMetadataEditError(f"{label} has no manual override to remove.")
             elif edit.source in options:
+                if field == "story_arcs" and isinstance(options[edit.source], str):
+                    raise IssueMetadataEditError(
+                        "These arc names and positions cannot be paired safely. "
+                        "Enter corrections or choose Clear value."
+                    )
                 if field == "imprint" and not selectable_imprint(options[edit.source]):
                     raise IssueMetadataEditError(
                         "Enter an imprint of up to 255 printable characters, or choose Clear value."
@@ -206,6 +232,20 @@ def prepare_issue_editor(
                 provider_managed=edit.source == "reset",
             )
         proposed = MetadataValues.model_validate(values)
+        differs = any(value != current for value in options.values())
+        arc_draft: tuple[IssueArcEntry, ...] = ()
+        if field == "story_arcs":
+            left, right = options.get("ComicInfo.xml"), options.get("MetronInfo.xml")
+            expected = issue_state.values.story_arcs or ()
+            differs = (left or ()) != comicinfo_arcs(expected) or (right or ()) != expected
+            if expected or (previous and previous.user_override):
+                arc_draft = expected
+            elif isinstance(right, tuple) and (
+                left is None or left == right or left == comicinfo_arcs(right)
+            ):
+                arc_draft = right
+            elif isinstance(left, tuple) and right is None:
+                arc_draft = left
         fields.append(
             IssueMetadataEditorField(
                 key=f"issue.{field}",
@@ -215,25 +255,18 @@ def prepare_issue_editor(
                 proposed=display_editor_value(getattr(proposed, field)),
                 editable=True,
                 input_type=input_type,
+                arc_draft=arc_draft,
                 options=[
                     IssueMetadataEditorOption(
                         source=source,
                         value=display_editor_value(value),
-                        selectable=(
-                            selectable_labels(value)
-                            if field in LABEL_XML_PATHS
-                            else selectable_imprint(value)
-                            if field == "imprint"
-                            else field != "age_rating"
-                            or value is None
-                            or value in tuple(SharedAgeRating)
-                        ),
+                        selectable=_selectable(field, value),
                     )
                     for source, value in options.items()
                 ],
                 allowed_values=tuple(SharedAgeRating) if field == "age_rating" else (),
                 overridden=bool(previous and previous.user_override),
-                differs=any(value != current for value in options.values())
+                differs=differs
                 or (
                     field in EDITOR_XML_FIELDS
                     and current is not None
@@ -303,26 +336,4 @@ def prepare_issue_editor(
                     reason="Identity is protected. Review provider links to change a match.",
                 )
             )
-    shared_conflicts = {item.key for item in review_preserved_fields(files, {})}
-    for tag, (label, mi_path) in SHARED_TAGS.items():
-        left = ci.findtext(tag) or ""
-        right = ", ".join(node.text or "" for node in mi.findall(mi_path))
-        value = "\n".join(
-            f"{source}: {value}"
-            for source, value in (("ComicInfo.xml", left), ("MetronInfo.xml", right))
-            if value
-        )
-        fields.append(
-            IssueMetadataEditorField(
-                key=f"xml.{tag}",
-                label=label,
-                current=value,
-                proposed=value,
-                differs=f"xml.{tag}" in shared_conflicts,
-                reason=(
-                    "Preserved XML-only field. Manual editing of this field is not available "
-                    "in this milestone; existing conflicts use Write file metadata."
-                ),
-            )
-        )
     return series, issue, fields
