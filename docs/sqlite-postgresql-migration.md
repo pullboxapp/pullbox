@@ -547,7 +547,38 @@ file browser sees. Keep the source stopped and automatic restarts disabled.
 2. In the proposed Compose deployment, temporarily mount **only the restored
    SQLite backup file**, approval file and first-start token read-only. Keep
    the secret files owner-only and readable by the Pullbox user. Use the
-   proposed service's normal key, comic mounts and cover settings:
+   proposed service's normal key, comic mounts and cover settings.
+
+   For example, add these entries to the **target** service's existing
+   `volumes` list. Set each variable to the absolute path of an existing file
+   on the Docker host. Do not point the backup entry at the original SQLite
+   database or mount its parent directory.
+
+   ```yaml
+   volumes:
+     - type: bind
+       source: "${PULLBOX_RESTORED_SQLITE:?set the restored backup file path}"
+       target: /run/migration/pullbox-offline.db
+       read_only: true
+       bind:
+         create_host_path: false
+     - type: bind
+       source: "${PULLBOX_CUTOVER_APPROVAL:?set the approval file path}"
+       target: /run/secrets/pullbox-approval.json
+       read_only: true
+       bind:
+         create_host_path: false
+     - type: bind
+       source: "${PULLBOX_FIRST_START_TOKEN:?set the token file path}"
+       target: /run/secrets/pullbox-first-start
+       read_only: true
+       bind:
+         create_host_path: false
+   ```
+
+   A missing file should stop the container from starting, not create an empty
+   directory. Keep these mounts for both the check below and the one-time
+   startup. Remove them from Compose only after **Cutover committed**.
 
    ```sh
    docker compose run --rm --no-deps --entrypoint python pullbox -m pullbox.cli \
