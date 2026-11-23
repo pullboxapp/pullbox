@@ -4,7 +4,7 @@ from datetime import date
 from enum import StrEnum
 from typing import Literal, Self
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from pullbox.core.issue_numbers import normalize_issue_number_text
 from pullbox.core.metadata_identity import (
@@ -38,6 +38,15 @@ def field_domain(kind: MetadataEntityKind, field: str) -> MetadataDomain:
     return MetadataDomain.CORE
 
 
+def selectable_imprint(value: object) -> bool:
+    return value is None or (
+        isinstance(value, str)
+        and 0 < len(value) <= 255
+        and value.isprintable()
+        and value == value.strip()
+    )
+
+
 class MetadataValues(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -60,12 +69,20 @@ class MetadataValues(BaseModel):
     page_count: int | None = Field(default=None, ge=0, le=1000000, strict=True)
     age_rating: SharedAgeRating | None = Field(default=None, exclude_if=lambda v: v is None)
     tags: IssueLabels | None = Field(default=None, exclude_if=lambda v: v is None)
+    imprint: str | None = Field(default=None, max_length=255, exclude_if=lambda v: v is None)
     genres: IssueLabels | None = Field(default=None, exclude_if=lambda v: v is None)
     characters: IssueLabels | None = Field(default=None, exclude_if=lambda v: v is None)
     teams: IssueLabels | None = Field(default=None, exclude_if=lambda v: v is None)
     locations: IssueLabels | None = Field(default=None, exclude_if=lambda v: v is None)
     image_url: str | None = Field(default=None, max_length=500)
     credits: MetadataCredits | None = None
+
+    @field_validator("imprint")
+    @classmethod
+    def printable_imprint(cls, value: str | None) -> str | None:
+        if not selectable_imprint(value):
+            raise ValueError("Use a printable imprint name without surrounding whitespace")
+        return value
 
 
 class PassiveReleaseOrigin(BaseModel):

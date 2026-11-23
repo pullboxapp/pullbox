@@ -179,6 +179,24 @@ def embedded_labels(root: ET.Element, path: str) -> tuple[str, ...]:
     return tuple((n.text or "").strip() for n in root.findall(path))
 
 
+def set_reviewed_imprint(mi: ET.Element, value: str | None) -> None:
+    publisher = mi.find("Publisher")
+    if publisher is None:
+        if value:
+            raise ArchiveMetadataRenderError("publisher_required", "Imprint")
+        return
+    previous = publisher.find("Imprint")
+    if previous is not None:
+        if len(previous):
+            raise ArchiveMetadataRenderError("unsupported_content", "Imprint")
+        if value is not None and previous.text == value:
+            return
+        # The ID belongs to the old imprint, not to its replacement or its publisher.
+        publisher.remove(previous)
+    if value:
+        ET.SubElement(publisher, "Imprint").text = value
+
+
 def apply_issue_labels(
     ci: ET.Element, mi: ET.Element, ci_path: str, mi_path: str, values: tuple[str, ...]
 ) -> None:
@@ -400,6 +418,9 @@ def _resolve_shared_fields(
         if left_text and right_text and left_text != right_text:
             selected = review(field, left_text, right_text)
             if selected == "ComicInfo.xml":
+                if field == "Imprint":
+                    set_reviewed_imprint(mi, left_text)
+                    continue
                 parent = mi.find(path.rsplit("/", 1)[0]) if "/" in path else mi
                 node = mi.find(path)
                 assert parent is not None and node is not None

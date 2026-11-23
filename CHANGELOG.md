@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Edit or clear a single issue's imprint without changing the series publisher
+  or sibling comics. If the publisher is missing, the editor explains how to
+  keep the imprint or explicitly clear it without inventing a publisher.
 - Edit a managed issue's genres, characters, teams, locations, and tags in both
   metadata files from **Edit metadata**. Preview additions, removals, and
   reordering without losing the Metron IDs attached to names you keep.

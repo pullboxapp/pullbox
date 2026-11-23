@@ -5,7 +5,13 @@ from typing import Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 type EditorConflictField = Literal[
-    "xml.AgeRating", "xml.Tags", "xml.Genre", "xml.Characters", "xml.Teams", "xml.Locations"
+    "xml.AgeRating",
+    "xml.Imprint",
+    "xml.Tags",
+    "xml.Genre",
+    "xml.Characters",
+    "xml.Teams",
+    "xml.Locations",
 ]
 
 type EditableIssueField = Literal[
@@ -16,15 +22,19 @@ type EditableIssueField = Literal[
     "page_count",
     "credits",
     "age_rating",
+    "imprint",
     "tags",
     "genres",
     "characters",
     "teams",
     "locations",
 ]
-type EditorXmlField = Literal["age_rating", "tags", "genres", "characters", "teams", "locations"]
+type EditorXmlField = Literal[
+    "age_rating", "imprint", "tags", "genres", "characters", "teams", "locations"
+]
 EDITOR_XML_FIELDS: dict[EditorXmlField, EditorConflictField] = {
     "age_rating": "xml.AgeRating",
+    "imprint": "xml.Imprint",
     "tags": "xml.Tags",
     "genres": "xml.Genre",
     "characters": "xml.Characters",
@@ -49,7 +59,7 @@ class IssueMetadataEdit(BaseModel):
 class IssueMetadataEditorReview(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    edits: dict[EditableIssueField, IssueMetadataEdit] = Field(default_factory=dict, max_length=12)
+    edits: dict[EditableIssueField, IssueMetadataEdit] = Field(default_factory=dict, max_length=13)
 
     @property
     def reviewed_xml_fields(self) -> frozenset[EditorXmlField]:

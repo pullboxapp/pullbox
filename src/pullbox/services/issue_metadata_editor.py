@@ -21,6 +21,7 @@ from pullbox.schemas.metadata_snapshot import (
     MetadataValues,
     SharedAgeRating,
     field_domain,
+    selectable_imprint,
 )
 from pullbox.services.archive_metadata_binding import ArchiveMetadataBinding
 from pullbox.services.archive_metadata_preservation import (
@@ -40,10 +41,10 @@ EDITABLE_FIELDS = {
     "page_count": ("Catalog page count", "number"),
     "credits": ("Creator credits", "credits"),
     "age_rating": ("Age rating", "text"),
+    "imprint": ("Imprint", "text"),
     **{name: (name.capitalize(), "textarea") for name in LABEL_XML_PATHS},
 }
 SHARED_TAGS = {
-    "Imprint": ("Imprint", "Publisher/Imprint"),
     "StoryArc": ("Story arc", "Arcs/Arc/Name"),
     "StoryArcNumber": ("Story arc position", "Arcs/Arc/Number"),
 }
@@ -57,6 +58,8 @@ FIELD_HELP = {
     "age_rating": "Only ratings with the same label in both formats are offered. "
     "Clear removes the rating; Unknown writes a rating of Unknown.",
     "page_count": "Catalog page count does not change the number of comic pages.",
+    "imprint": "Changes this issue only. The series publisher stays the same. "
+    "A renamed imprint does not inherit the previous imprint's ID.",
     "credits": "One creator per line: Name | Role. Existing resource identifiers remain protected.",
 }
 
@@ -98,6 +101,10 @@ def _custom_value(field: str, text: str) -> object:
                 f"Enter up to 128 distinct {field}, one per line, with no commas "
                 "and no more than 255 characters per entry."
             )
+    elif field == "imprint" and not selectable_imprint(text):
+        raise IssueMetadataEditError(
+            "Enter up to 255 printable characters on one line, without surrounding spaces."
+        )
     elif field == "credits":
         credits = []
         for line in text.splitlines():
@@ -147,6 +154,8 @@ def prepare_issue_editor(
                 value = embedded_labels(root, ci_path if root is ci else mi_path) or None
             elif field == "age_rating":
                 value = root.findtext("AgeRating")
+            elif field == "imprint":
+                value = root.findtext("Imprint" if root is ci else "Publisher/Imprint")
             else:
                 value = getattr(document.issue, field)
             if value is not None:
@@ -162,6 +171,10 @@ def prepare_issue_editor(
                 if previous is None or not previous.user_override:
                     raise IssueMetadataEditError(f"{label} has no manual override to remove.")
             elif edit.source in options:
+                if field == "imprint" and not selectable_imprint(options[edit.source]):
+                    raise IssueMetadataEditError(
+                        "Enter an imprint of up to 255 printable characters, or choose Clear value."
+                    )
                 if field in LABEL_XML_PATHS and not selectable_labels(options[edit.source]):
                     raise IssueMetadataEditError(
                         f"These {field} cannot be written to both formats. "
@@ -209,6 +222,8 @@ def prepare_issue_editor(
                         selectable=(
                             selectable_labels(value)
                             if field in LABEL_XML_PATHS
+                            else selectable_imprint(value)
+                            if field == "imprint"
                             else field != "age_rating"
                             or value is None
                             or value in tuple(SharedAgeRating)
@@ -233,7 +248,12 @@ def prepare_issue_editor(
                     if previous and previous.source
                     else "Library"
                 ),
-                reason=FIELD_HELP.get(field, ""),
+                reason=(
+                    "Set the publisher in the series editor before adding or keeping an imprint. "
+                    "To remove an existing imprint from this issue, choose Clear value."
+                    if field == "imprint" and not series.values.publisher
+                    else FIELD_HELP.get(field, "")
+                ),
             )
         )
     issue = MetadataSnapshot.model_validate(

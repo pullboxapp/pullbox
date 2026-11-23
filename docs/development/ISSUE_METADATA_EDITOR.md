@@ -41,7 +41,8 @@ contains an actual XML change, the normal reviewed archive write still applies.
 | Issue number, native provider IDs | Identity | Number/Web | Number/IDs | Protected; use validated provider linking |
 | Cover artwork URL | Artwork | Existing renderer projection | Existing renderer projection | Protected; artwork workflow |
 | Series title, sort title, publisher, summary, dates, type, archive format, status, count, volume, language, artwork | Series-wide catalog values | Existing series projection | Existing series projection | Read-only; no changes to siblings |
-| Imprint, arcs/positions | Preserved XML-only values | Corresponding elements | Corresponding elements | Display both documents; existing Write file metadata resolves disagreements |
+| Issue imprint | Single-line name, up to 255 characters | Imprint | Publisher/Imprint | Editable for this issue only. A nonempty imprint requires a named publisher; retain its ID only for the same imprint. |
+| Arcs/positions | Preserved XML-only values | Corresponding elements | Corresponding elements | Display both documents; existing Write file metadata resolves disagreements |
 
 Arbitrary extension nodes, resource identifiers and page annotations remain under
 the existing preservation contract, not editable raw XML. See the separate

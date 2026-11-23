@@ -30,6 +30,7 @@ from pullbox.services.archive_metadata_preservation import (
     coordinate_preserved_fields,
     embedded_labels,
     preserved_roots,
+    set_reviewed_imprint,
     set_text,
 )
 from pullbox.services.archive_metadata_reconciliation import (
@@ -141,6 +142,14 @@ def render_archive_metadata(
     ):
         # A saved correction is not fresh approval to replace externally changed metadata.
         raise ArchiveMetadataRenderError("rating_override_changed", "AgeRating")
+    if "imprint" in reviewed_xml_fields:
+        set_reviewed_imprint(mi, issue.values.imprint)
+        set_text(ci, "Imprint", issue.values.imprint)
+    elif "imprint" in protected and (
+        ci.findtext("Imprint") != issue.values.imprint
+        or mi.findtext("Publisher/Imprint") != issue.values.imprint
+    ):
+        raise ArchiveMetadataRenderError("label_override_changed", "Imprint")
     for field, (ci_path, mi_path) in LABEL_XML_PATHS.items():
         values = getattr(issue.values, field) or ()
         if field in reviewed_xml_fields:

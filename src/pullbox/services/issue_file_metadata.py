@@ -151,8 +151,9 @@ def file_metadata_error(exc: BaseException) -> str:
         return "This comic archive cannot be read. Replace or repair it, then preview again."
     if code == "publisher_required":
         return (
-            "The file contains an imprint but the series has no publisher. "
-            "Set or verify the series publisher, then preview again. The file was left unchanged."
+            "An imprint needs a series publisher in MetronInfo.xml. Set or verify the publisher "
+            "in the series editor, or choose Clear value for Imprint in the issue editor. "
+            "Then update the preview. The file was left unchanged."
         )
     if getattr(exc, "field", "") == "credits":
         if code == "resource_metadata_change":
@@ -379,10 +380,13 @@ def _prepare(
             continue
         row = next(f for f in editor_fields if f.key == f"issue.{editor_field}")
         embedded = {o.source: o.value for o in row.options if o.source != "library"}
+        missing_publisher = (
+            editor_field == "imprint" and not series.values.publisher and any(embedded.values())
+        )
         incompatible = any(not o.selectable for o in row.options) and (
             embedded.get("ComicInfo.xml") != embedded.get("MetronInfo.xml")
         )
-        if ((row.overridden and row.differs) or incompatible) and not any(
+        if ((row.overridden and row.differs) or incompatible or missing_publisher) and not any(
             c.key == key for c in shared_conflicts
         ):
             shared_conflicts.append(
@@ -390,7 +394,9 @@ def _prepare(
                     key=key,
                     label=row.label,
                     options=[],
-                    note=f"Select {row.label} to choose the value to write to both documents.",
+                    note=row.reason
+                    if missing_publisher
+                    else f"Select {row.label} to choose the value to write to both documents.",
                 )
             )
     conflicts.extend(shared_conflicts)
@@ -417,7 +423,14 @@ def _prepare(
             or (
                 exc.code != "unreconciled_field"
                 and not (
-                    editor and exc.code in {"rating_override_changed", "label_override_changed"}
+                    editor
+                    and (
+                        exc.code in {"rating_override_changed", "label_override_changed"}
+                        or (
+                            exc.code == "publisher_required"
+                            and "imprint" not in reviewed_xml_fields
+                        )
+                    )
                 )
             )
             or not any(

@@ -11,6 +11,8 @@ from zipfile import ZipFile
 from defusedxml.ElementTree import fromstring
 
 TITLE = "My Harbor Lights title"
+PUBLISHER = "Cutover Press"
+IMPRINT = "Harbor Noir"
 ISSUE_LISTS = {
     "Tags": ("Tags", "Tags/Tag", ["Harbor", "Coastal"]),
     "Genres": ("Genre", "Genres/Genre", ["Mystery", "Adventure"]),
@@ -21,6 +23,10 @@ ISSUE_LISTS = {
 
 
 def seed(source, imports):
+    publisher = source.execute(
+        "INSERT INTO publishers(name) VALUES(?) RETURNING id", (PUBLISHER,)
+    ).fetchone()[0]
+    source.execute("UPDATE series SET publisher_id=? WHERE id=1000", (publisher,))
     source.execute(
         "INSERT INTO series_external_identities(series_id,identity_namespace,external_id,"
         "verification_state,evidence_kind) "
@@ -55,6 +61,8 @@ def verify(sql, db, *, refreshed=False):
     )
     assert snapshot["values"]["title"] == TITLE
     assert snapshot["values"]["age_rating"] == "Teen"
+    assert snapshot["values"]["imprint"] == IMPRINT
+    assert any(o["field"] == "imprint" and o["user_override"] for o in snapshot["origins"])
     for label, (_, _, names) in ISSUE_LISTS.items():
         assert snapshot["values"][label.lower()] == names
         assert any(o["field"] == label.lower() and o["user_override"] for o in snapshot["origins"])
@@ -106,6 +114,10 @@ async def exercise(page, library, sql, db):
     await page.get_by_role("option", name="Enter correction", exact=True).click()
     await dialog.get_by_role("button", name="New Age rating", exact=True).click()
     await page.get_by_role("option", name="Teen", exact=True).click()
+    await dialog.get_by_label("Update Imprint", exact=True).check()
+    await dialog.get_by_role("button", name="Value source for Imprint").click()
+    await page.get_by_role("option", name="Enter correction", exact=True).click()
+    await dialog.get_by_label("New Imprint", exact=True).fill(IMPRINT)
     for label, (_, _, names) in ISSUE_LISTS.items():
         await dialog.get_by_label(f"Update {label}", exact=True).check()
         await dialog.get_by_role("button", name=f"Value source for {label}").click()
@@ -131,6 +143,8 @@ async def exercise(page, library, sql, db):
         assert fromstring(archive.read("ComicInfo.xml")).findtext("Title") == TITLE
         ci = fromstring(archive.read("ComicInfo.xml"))
         mi = fromstring(archive.read("MetronInfo.xml"))
+        assert ci.findtext("Publisher") == mi.findtext("Publisher/Name") == PUBLISHER
+        assert ci.findtext("Imprint") == mi.findtext("Publisher/Imprint") == IMPRINT
         for ci_path, mi_path, names in ISSUE_LISTS.values():
             assert ci.findtext(ci_path) == ", ".join(names)
             assert [n.text for n in mi.findall(mi_path)] == names
