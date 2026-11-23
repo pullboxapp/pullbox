@@ -73,6 +73,7 @@ class SeriesMetadataEditorField(BaseModel):
     key: str
     label: str
     current: str
+    current_source_label: str | None = None
     proposed: str
     editable: bool = True
     input_type: str = "text"

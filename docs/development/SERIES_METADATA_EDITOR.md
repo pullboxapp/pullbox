@@ -18,6 +18,13 @@ explicit choice, including for reference-only libraries. Preview lists actual
 sidecar destinations and blocked locations. No remote provider is queried, and
 the editor does not claim to have fetched new source values.
 
+**Saved source** beside a library value identifies where that particular value
+came from, not every provider linked to the series. It can name a provider,
+cached LOCG release data, embedded XML, or a value calculated by Pullbox (such
+as issue count). Manual corrections keep their own label. Empty fields and
+values without a recorded source do not get a source label. Previewing a new
+value does not change the source shown for the currently saved value.
+
 Manual corrections and intentional clears survive provider refresh. Removing an
 override keeps the current value until configured refresh supplies a replacement.
 Missing source values cannot silently erase data. Required values cannot be

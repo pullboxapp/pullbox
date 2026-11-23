@@ -22,8 +22,10 @@ from pullbox.models.metadata_source import MetadataSourceConfig
 from pullbox.models.publisher import Publisher
 from pullbox.models.whats_new import WhatsNewReleaseCache
 from pullbox.schemas.metadata_snapshot import MetadataSnapshot
+from pullbox.schemas.series_metadata_editor import SeriesMetadataEditorReview
 from pullbox.services.metadata_baselines import load_metadata_baseline
 from pullbox.services.metadata_series_refresh import SeriesRefreshError, refresh_series_from_sources
+from pullbox.services.series_metadata_editor import prepare_series_editor
 from pullbox.services.whats_new_cache_service import WhatsNewCacheService
 from tests.integration.metadata_identity.test_series_adoption import (
     configured_sources,  # noqa: F401
@@ -128,6 +130,14 @@ async def test_refresh_fills_confirmed_series_gaps_and_records_passive_origin(id
         )
         await session.commit()
     async with factory() as session:
+        preview = (
+            await prepare_series_editor(
+                session, series_id, SeriesMetadataEditorReview(mode="library_only")
+            )
+        ).preview
+        for field in ("publisher", "year_start", "volume"):
+            row = next(item for item in preview.editor_fields if item.key == f"series.{field}")
+            assert row.current_source_label == "LOCG release context"
         result = await refresh_series_from_sources(
             session, series_id, registry=refresh_registry(RefreshAdapter(data, session=session))
         )

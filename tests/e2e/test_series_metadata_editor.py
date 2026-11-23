@@ -33,7 +33,7 @@ def _field(key, label, current, **kwargs):
 def editor_api(authed_page):
     page = authed_page
     fields = [
-        _field("title", "Title", "Batman", can_clear=False),
+        _field("title", "Title", "Batman", can_clear=False, current_source_label="Metron"),
         _field("sort_title", "Sort title", "Batman", overridden=True, can_clear=False),
         _field("description", "Description", "Keep this", input_type="textarea", overridden=True),
         _field("year_start", "Start year", "2016", input_type="number"),
@@ -223,6 +223,12 @@ def test_editor_preview_exact_inputs_typed_controls_and_themes(
         dialog.get_by_label("Library and eligible series.json files", exact=True)
     ).to_be_checked()
     dialog.get_by_role("button", name="All fields", exact=True).click()
+    title = dialog.get_by_role("group", name="Title", exact=True)
+    expect(title.get_by_text("Saved source: Metron", exact=True)).to_be_visible()
+    expect(title.get_by_label("Update Title")).not_to_be_checked()
+    expect(dialog.get_by_role("group", name="Sort title", exact=True)).not_to_contain_text(
+        "Saved source:"
+    )
     expect(dialog.get_by_text("Issue inventory is protected.")).to_be_visible()
     expect(dialog.get_by_label("Update Issue count", exact=True)).to_have_count(0)
     dialog.get_by_role("button", name="Select all eligible", exact=True).click()

@@ -100,6 +100,9 @@ async def test_empty_library_source_cannot_pin_an_absent_series_value(managed_se
     async with factory() as session:
         result = await prepare_series_editor(session, series_id, review)
         assert not result.preview.editor_changed and not result.preview.ready
+        title = next(field for field in result.preview.editor_fields if field.key == "series.title")
+        assert title.current and title.current_source_label is None
+        assert len(result.state.series.identities) == 3
         assert not any(
             o.field == "description" and o.user_override for o in result.snapshot.origins
         )

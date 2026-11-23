@@ -31,6 +31,7 @@ from pullbox.services.archive_metadata_preservation import (
     preserved_roots,
 )
 from pullbox.services.archive_metadata_reconciliation import ArchiveMetadataReconciliation
+from pullbox.services.metadata_editor_origins import saved_field_sources
 from pullbox.services.metadata_series_refresh_state import (
     ISSUE_FIELDS,
     SERIES_FIELDS,
@@ -158,6 +159,7 @@ def prepare_issue_editor(
 ]:
     """Never use client-supplied source values or adopt unselected descriptive changes."""
     series_state, issue_state = metadata.series, metadata.issues[0]
+    issue_sources = saved_field_sources(issue_state)
     series = assembled_series.model_copy(update={"values": series_state.values})
     issue = assembled_issue.model_copy(update={"values": issue_state.values})
     origins = {origin.field: origin for origin in issue.origins}
@@ -265,6 +267,7 @@ def prepare_issue_editor(
                 xml_conflict_key=EDITOR_XML_FIELDS.get(cast("EditorXmlField", field)),
                 label=label,
                 current=display_editor_value(current),
+                current_source_label=issue_sources.get(field),
                 proposed=display_editor_value(getattr(proposed, field)),
                 editable=True,
                 input_type=input_type,
@@ -314,9 +317,14 @@ def prepare_issue_editor(
             ),
         }
     )
-    for kind, state, applicable in (
-        ("series", series_state, SERIES_FIELDS | {"archive_format"}),
-        ("issue", issue_state, ISSUE_FIELDS),
+    for kind, state, applicable, labels in (
+        (
+            "series",
+            series_state,
+            SERIES_FIELDS | {"archive_format"},
+            saved_field_sources(series_state),
+        ),
+        ("issue", issue_state, ISSUE_FIELDS, issue_sources),
     ):
         for field in MetadataValues.model_fields:
             if field not in applicable or (kind == "issue" and field in EDITABLE_FIELDS):
@@ -327,6 +335,7 @@ def prepare_issue_editor(
                     key=f"{kind}.{field}",
                     label=f"{kind.title()} {field.replace('_', ' ')}",
                     current=value,
+                    current_source_label=labels.get(field),
                     proposed=value,
                     reason=(
                         "Series-wide field: use the series workflow; "

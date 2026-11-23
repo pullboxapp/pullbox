@@ -17,6 +17,7 @@ from pullbox.services.issue_file_metadata import prepare_file_metadata, write_fi
 from pullbox.services.metadata_issue_refresh import refresh_issue_from_sources
 from pullbox.utilities.executors.file_metadata import FileMetadataExecutor
 from pullbox.utilities.models import JobState, JobType, UtilityJob, UtilityJobItem
+from tests.integration.metadata_identity.test_archive_metadata_finalization import finish, published
 from tests.integration.metadata_identity.test_archive_metadata_publication import prepared
 from tests.integration.metadata_identity.test_issue_refresh import IssueAdapter, reader
 from tests.integration.metadata_identity.test_series_adoption import (
@@ -103,6 +104,16 @@ async def test_editor_refresh_respects_only_explicit_field_actions(
             assert issue.description == {"custom": "My summary", "clear": None}.get(
                 action, "Provider summary"
             )
+            preview = (
+                await prepare_file_metadata(session, issue_id, editor=IssueMetadataEditorReview())
+            ).preview
+            summary = next(
+                field for field in preview.editor_fields if field.key == "issue.description"
+            )
+            assert summary.current_source_label == (
+                None if action in {"custom", "clear"} else "Metron"
+            )
+            assert summary.overridden is (action in {"custom", "clear"})
         assert path.read_bytes() == after_edit
         if action in {"unchanged", "legacy_blank"}:
             return
@@ -122,6 +133,47 @@ async def test_editor_refresh_respects_only_explicit_field_actions(
         async with factory() as session:
             assert (await session.get(Issue, issue_id)).description == "Provider summary"
         assert path.read_bytes() == after_edit
+
+
+async def test_new_xml_evidence_is_not_the_origin_of_a_saved_library_value(
+    identity_probe_db, tmp_path
+):
+    _, factory, _ = identity_probe_db
+    xml = "<ComicInfo><Number>50-X</Number><Summary>Only in the file</Summary></ComicInfo>"
+    async with prepared(factory, tmp_path, comicinfo=xml) as (path, _, plan):
+        issue_id = plan.target.binding.metadata.issues[0].local_id
+        before = path.read_bytes(), path.stat().st_mtime_ns
+        review = IssueMetadataEditorReview.model_validate(
+            {"edits": {"description": {"source": "ComicInfo.xml"}}}
+        )
+        async with factory() as session:
+            preview = (await prepare_file_metadata(session, issue_id, editor=review)).preview
+            summary = next(
+                field for field in preview.editor_fields if field.key == "issue.description"
+            )
+            assert summary.current == "" and summary.proposed == "Only in the file"
+            assert summary.current_source_label is None
+            assert (await session.get(Issue, issue_id)).description is None
+        assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+
+        receipt, inspection = await published(factory, plan)
+        await finish(factory, receipt, inspection)
+        after = path.read_bytes(), path.stat().st_mtime_ns
+        async with factory() as session:
+            preview = (
+                await prepare_file_metadata(session, issue_id, editor=IssueMetadataEditorReview())
+            ).preview
+            summary = next(
+                field for field in preview.editor_fields if field.key == "issue.description"
+            )
+            assert summary.current == "Only in the file"
+            assert summary.current_source_label == "ComicInfo.xml"
+            assert {option.source for option in summary.options} == {
+                "library",
+                "ComicInfo.xml",
+                "MetronInfo.xml",
+            }
+        assert (path.read_bytes(), path.stat().st_mtime_ns) == after
 
 
 async def test_selected_dates_page_count_and_credits_preserve_series_and_pages(

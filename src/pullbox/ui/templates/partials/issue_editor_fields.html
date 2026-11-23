@@ -19,8 +19,9 @@
 <template x-for="field in editorFields()" :key="field.key">
   <fieldset class="rounded-lg border border-pb-border p-3 space-y-2 min-w-0">
     <legend class="text-sm font-semibold text-pb-text px-1" x-text="field.label"></legend>
-    <p class="text-xs text-pb-text-sec" x-show="field.origin" x-text="field.origin"></p>
+    <p class="text-xs text-pb-text-sec" x-show="field.overridden">Manual correction</p>
     <p class="text-sm text-pb-text whitespace-pre-wrap break-words max-h-32 overflow-y-auto" x-text="(field.key.startsWith('xml.') ? 'Embedded: ' : 'Library: ') + (field.current || 'Not set')"></p>
+    <p class="text-xs text-pb-text-sec" x-show="field.current_source_label" x-text="field.current_source_label ? 'Saved source: ' + field.current_source_label : ''"></p>
     <p class="text-sm text-pb-text whitespace-pre-wrap break-words max-h-32 overflow-y-auto" x-show="field.selected && !choicesDirty" x-text="'Approved preview: ' + (field.proposed || 'Cleared')"></p>
     <p class="text-xs text-pb-text-sec" x-show="field.reason" x-text="field.reason"></p>
     <template x-if="field.editable && editorDrafts[field.key]">

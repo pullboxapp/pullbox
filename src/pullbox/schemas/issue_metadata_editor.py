@@ -96,6 +96,7 @@ class IssueMetadataEditorField(BaseModel):
     key: str
     label: str
     current: str
+    current_source_label: str | None = None
     proposed: str
     editable: bool = False
     reason: str = ""

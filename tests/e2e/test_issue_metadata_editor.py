@@ -32,7 +32,8 @@ def test_editor_select_preview_apply_and_validation_retention(
             "overridden": False,
             "differs": False,
             "selected": False,
-            "origin": "Library",
+            "origin": "metron_api",
+            "current_source_label": "Metron",
         },
         {
             "key": "issue.description",
@@ -167,6 +168,10 @@ def test_editor_select_preview_apply_and_validation_retention(
     expect(dialog).to_be_visible()
     expect(dialog.get_by_text("No differences to review.")).to_be_visible()
     dialog.get_by_role("button", name="All fields", exact=True).click()
+    expect(dialog.get_by_text("Saved source: Metron", exact=True)).to_be_visible()
+    expect(dialog.get_by_text("metron_api", exact=True)).not_to_be_visible()
+    summary = dialog.get_by_role("group", name="Summary", exact=True)
+    expect(summary.get_by_text("Manual correction", exact=True)).to_be_visible()
     expect(dialog.get_by_text("Series-wide field is protected.")).to_be_visible()
     dialog.get_by_role("button", name="Select all eligible", exact=True).click()
     expect(dialog.get_by_label("Update Title", exact=True)).to_be_checked()

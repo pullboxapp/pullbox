@@ -12,6 +12,11 @@ or enter corrections, then **Update preview** and **Apply selected changes**.
 Preview does not query providers or write files. The existing background progress
 and cancellation controls apply after approval.
 
+**Saved source** identifies the origin recorded for the current library value.
+For example, a cover date can come from GCD Local and a store date from LOCG
+release context. A manual correction keeps its own label. A value found in
+the incoming comic is a choice, not proof of where the library value came from.
+
 With fields checked, **Use ComicInfo.xml** or **Use MetronInfo.xml** chooses
 that document for the checked fields where it has a usable value. Missing or
 incompatible values leave the existing draft choice intact. The shortcut does

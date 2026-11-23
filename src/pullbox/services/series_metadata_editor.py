@@ -39,6 +39,7 @@ from pullbox.services.library_mutation_coordination import (
 )
 from pullbox.services.metadata_assembly import assemble_metadata
 from pullbox.services.metadata_baselines import MetadataBaselineWrite, save_metadata_baselines
+from pullbox.services.metadata_editor_origins import saved_field_sources
 from pullbox.services.metadata_entity_values import apply_series_metadata_values
 from pullbox.services.metadata_series_refresh_state import (
     SeriesRefreshState,
@@ -319,6 +320,7 @@ async def prepare_series_editor(
     original = targets
     values = snapshot.values.model_dump()
     origins = {origin.field: origin for origin in snapshot.origins}
+    field_sources = saved_field_sources(state.series)
     fields = []
     for field, (label, input_type) in FIELDS.items():
         current = getattr(state.series.values, field)
@@ -371,6 +373,7 @@ async def prepare_series_editor(
                 key=f"series.{field}",
                 label=label,
                 current=_display(current),
+                current_source_label=field_sources.get(field),
                 proposed=_display(values[field]),
                 input_type=input_type,
                 overridden=bool(previous and previous.user_override),
@@ -424,6 +427,7 @@ async def prepare_series_editor(
             key=f"series.{field}",
             label=label,
             current=_display(value),
+            current_source_label=field_sources.get(field),
             proposed=_display(value),
             editable=False,
             can_clear=False,
