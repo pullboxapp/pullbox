@@ -59,6 +59,7 @@ before moving it aside. The selected source file is never the replacement target
 | --- | --- | --- | --- | --- |
 | Issue title | Bounded text | Title | Stories/Story | Editable |
 | Summary | Bounded text | Summary | Summary | Editable |
+| Review, scan information | Separate multiline text fields, up to 20,000 characters each | Review, ScanInformation | No native equivalent | Choose a library or ComicInfo value, enter text, or explicitly clear. Neither field changes the summary, Notes, or MetronInfo. |
 | Notes | Plain text, up to 4096 characters including protected markers | Notes | Notes | Choose the prose from either file, enter text, or clear it. Each document keeps its own trailing identity markers. |
 | Cover date | ISO date | Year/Month/Day | CoverDate | Editable, distinct from store date |
 | Store date | ISO date | No native equivalent | StoreDate | Editable; does not overwrite the cover date |
@@ -102,7 +103,7 @@ does not authorize dropping preserved data or writing to a new field on import.
 
 | Source fields | Remaining decision or workflow |
 | --- | --- |
-| ComicInfo Review, ScanInformation, MainCharacterOrTeam, SeriesGroup, BlackAndWhite, Manga | Format-specific descriptive fields. Review and scan information are not Summary or Notes; the Manga flag can also specify reading direction. |
+| ComicInfo MainCharacterOrTeam, SeriesGroup, BlackAndWhite, Manga | Format-specific fields; the Manga flag can also specify reading direction. |
 | ComicInfo AlternateSeries, AlternateNumber, AlternateCount; Metron AlternativeNumber, MangaVolume, CollectionTitle | Alternate numbering, collections, and manga volumes are not the tracked issue number or its parent series. Do not rematch or renumber from these fields. |
 | Metron Universes, Reprints, multiple Stories, Prices | Structured entries need controls that preserve resource IDs, universe designations and price currencies where present. A list of stories is not a single issue title. |
 | ComicInfo Web, GTIN; Metron URLs, GTIN | Distinguish descriptive links from provider identity evidence; keep primary URLs, ISBNs and UPCs distinct. |
@@ -129,6 +130,13 @@ without one, and ambiguous duplicate IDs are never reassigned. A saved list
 override does not authorize overwriting later external changes.
 
 ## Safety Boundary
+
+Review and scan information are optional. Import does not automatically adopt them.
+Oversized text and text containing a recognized comic identifier stay read-only;
+other fields can still be edited. A reviewed change cannot alter the identifiers
+used to match nested comics, even when an identifier spans neighboring XML fields.
+If an externally edited or removed value disagrees with a saved correction,
+preview asks which ComicInfo value to keep rather than silently restoring it.
 
 The issue-page editor requires one independently bound, managed CBZ/ZIP. Missing,
 referenced/read-only, actively importing and ambiguous files retain the existing

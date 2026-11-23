@@ -3,7 +3,6 @@
 import copy
 import hashlib
 import io
-import re
 import stat
 import tempfile
 import time
@@ -21,6 +20,7 @@ from defusedxml.common import DefusedXmlException
 
 from pullbox.core.archive_format import ARCHIVE_SUFFIXES
 from pullbox.core.comicinfo import parse_comicinfo
+from pullbox.core.comicinfo_text import comicinfo_text_ids
 from pullbox.core.file_safety import DANGEROUS_EXTENSIONS, FileSafetyError
 from pullbox.core.metadata_archive_source import MetadataArchiveSource, open_metadata_archive
 from pullbox.core.page_sources.base import canonical_page_names
@@ -144,12 +144,11 @@ def _reconcile_xml(outer: bytes | None, inner: bytes | None) -> bytes | None:
         if left and right and _identity_value(tag, left) != _identity_value(tag, right):
             raise NestedComicError("metadata_conflict")
     # An exact provider identifier disagreement cannot be settled by title similarity.
-    for pattern in (
-        r"(?:4000-|cv_issue_id\s*:\s*)(\d+)",
-        r"(?:4050-|cv_vol_id\s*:\s*)(\d+)",
+    for left_ids, right_ids in zip(
+        comicinfo_text_ids(" ".join(outer_root.itertext())),
+        comicinfo_text_ids(" ".join(inner_root.itertext())),
+        strict=True,
     ):
-        left_ids = set(re.findall(pattern, " ".join(outer_root.itertext()), re.IGNORECASE))
-        right_ids = set(re.findall(pattern, " ".join(inner_root.itertext()), re.IGNORECASE))
         if (
             len(left_ids) > 1
             or len(right_ids) > 1

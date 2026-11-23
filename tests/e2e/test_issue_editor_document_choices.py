@@ -23,13 +23,14 @@ def test_use_document_for_checked_fields_only(authed_page, seeded_server, docume
             "options": [
                 {"source": "library", "value": library},
                 {"source": "ComicInfo.xml", **ci},
-                {"source": "MetronInfo.xml", **mi},
+                *([{"source": "MetronInfo.xml", **mi}] if mi is not None else []),
             ],
         }
 
     fields = [
         field("title", "Title", "Library", {"value": "Printed"}, {"value": "Digital"}),
         field("page_count", "Page count", "", {"value": "0"}, {"value": "28"}),
+        field("review", "Review", "My review", {"value": "Printed review"}, None),
         field(
             "age_rating",
             "Age rating",
@@ -83,7 +84,7 @@ def test_use_document_for_checked_fields_only(authed_page, seeded_server, docume
     dialog = page.get_by_role("dialog", name="Edit issue metadata")
     shortcut = dialog.get_by_role("button", name="Use " + document, exact=True)
     expect(shortcut).to_be_hidden()
-    for label in ("Title", "Page count", "Age rating"):
+    for label in ("Title", "Page count", "Age rating", "Review"):
         dialog.get_by_role("checkbox", name="Update " + label, exact=True).check()
     dialog.get_by_role("button", name="Value source for Age rating").click()
     page.get_by_role("option", name="Clear value", exact=True).click()
@@ -94,7 +95,10 @@ def test_use_document_for_checked_fields_only(authed_page, seeded_server, docume
     before = list(previews)
     expect(shortcut).to_be_enabled()
     shortcut.click()
-    expect(dialog.get_by_text(f"2 of 3 checked fields use {document}.", exact=True)).to_be_visible()
+    eligible = 3 if document == "ComicInfo.xml" else 2
+    expect(
+        dialog.get_by_text(f"{eligible} of 4 checked fields use {document}.", exact=True)
+    ).to_be_visible()
     expect(apply).to_be_disabled()
     expect(dialog.get_by_role("checkbox", name="Update Summary")).not_to_be_checked()
     expect(dialog.get_by_role("checkbox", name="Update Issue number")).to_have_count(0)
@@ -108,6 +112,7 @@ def test_use_document_for_checked_fields_only(authed_page, seeded_server, docume
         "title": {"source": document},
         "page_count": {"source": document},
         "age_rating": {"source": "clear"},
+        "review": {"source": "ComicInfo.xml" if document == "ComicInfo.xml" else "library"},
     }
     expect(shortcut).to_be_disabled()
     dialog.get_by_role("button", name="Close", exact=True).click()

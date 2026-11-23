@@ -21,6 +21,7 @@ from pullbox.core.archive_metadata import (
     MetadataFile,
     read_archive_metadata,
 )
+from pullbox.core.comicinfo_text import COMICINFO_TEXT_TAGS
 from pullbox.models import LibraryFile
 from pullbox.models.archive_metadata_publication import PublicationState
 from pullbox.models.library_conversion import LibraryConversion
@@ -98,15 +99,23 @@ def file_metadata_error(exc: BaseException) -> str:
     if isinstance(exc, IssueMetadataEditError):
         return str(exc)
     code = getattr(exc, "code", "")
+    if code == "comicinfo_text_identity_change":
+        return (
+            "This edit would change a comic identifier spanning neighboring ComicInfo.xml "
+            "fields. Leave the affected field unchanged or correct the source, then preview again."
+        )
     if code == "unsafe_note_edit":
         return (
             "Notes cannot be safely written with this file's protected identity evidence. "
             "Shorten the note or correct the source, then preview again. No file was changed."
         )
     if code in {"rating_override_changed", "label_override_changed"}:
-        label = SHARED_FIELD_LABELS.get(getattr(exc, "field", ""), "metadata")
-        if getattr(exc, "field", "") == "StoryArc":
-            label = "embedded story arcs"
+        field = getattr(exc, "field", "")
+        label = {
+            "Review": "review",
+            "ScanInformation": "scan information",
+            "StoryArc": "embedded story arcs",
+        }.get(field, SHARED_FIELD_LABELS.get(field, "metadata"))
         return (
             f"The file no longer matches your saved {label}. Open Edit metadata on "
             f"the issue, select {label.capitalize()}, and preview the value to keep. "
@@ -429,6 +438,8 @@ def review_metadata_pair(
                     options=[],
                     note=row.reason
                     if missing_publisher or not row.editable
+                    else f"Select {row.label} to choose the value to write to ComicInfo.xml."
+                    if editor_field in COMICINFO_TEXT_TAGS
                     else f"Select {row.label} to choose the value to write to both documents.",
                 )
             )

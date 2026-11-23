@@ -10,6 +10,7 @@ from pullbox.core.archive_metadata_fields import (
 )
 from pullbox.core.archive_metadata_fields import COMICINFO_ROLES, comicinfo_credits
 from pullbox.core.archive_metadata_fields import archive_format_label as _format_text
+from pullbox.core.comicinfo_text import COMICINFO_TEXT_TAGS, comicinfo_text_ids, descriptive_text
 from pullbox.core.issue_community_rating import annotated_rating, embedded_score
 from pullbox.core.issue_notes import UneditableNotesError, document_notes
 from pullbox.core.issue_numbers import normalize_issue_number_text
@@ -139,6 +140,8 @@ def render_archive_metadata(
     protected = {o.field for o in issue.origins if o.user_override}
     if not reviewed_xml_fields <= protected:
         raise ArchiveMetadataRenderError("invalid_choice")
+    if protected.intersection(COMICINFO_TEXT_TAGS):
+        _render_comicinfo_text(ci, issue.values, protected, reviewed_xml_fields)
     if "community_rating" in protected:
         _render_community_rating(
             ci, mi, issue.values.community_rating, "community_rating" in reviewed_xml_fields
@@ -194,6 +197,39 @@ def render_archive_metadata(
         raise ArchiveMetadataRenderError("label_override_changed", "StoryArc")
     coordinate_preserved_fields(ci, mi, shared_choices)
     return _validated_pair(ci, mi)
+
+
+def _render_comicinfo_text(
+    ci: ET.Element, values: MetadataValues, protected: set[str], reviewed: frozenset[EditorXmlField]
+) -> None:
+    def document_ids() -> tuple[set[str], set[str]]:
+        # Wrapper matching reads all text together, so an ID may span neighboring elements.
+        # The nested reader ignores comments and processing instructions.
+        root = ci
+        if any(not isinstance(node.tag, str) for node in ci.iter()):
+            try:
+                root = parse_metadata_xml(ET.tostring(ci, encoding="utf-8"), root_name="ComicInfo")
+            except MetadataXmlError as exc:
+                raise ArchiveMetadataRenderError("invalid_output") from exc
+        return comicinfo_text_ids(" ".join(root.itertext()))
+
+    for field, tag in COMICINFO_TEXT_TAGS.items():
+        if field not in protected:
+            continue
+        try:
+            raw = ci.findtext(tag)
+            existing = descriptive_text(raw or "")
+        except ValueError as exc:
+            raise ArchiveMetadataRenderError("label_override_changed", tag) from exc
+        desired = getattr(values, field)
+        if existing == desired and not (field in reviewed and desired is None and raw is not None):
+            continue
+        if field not in reviewed:
+            raise ArchiveMetadataRenderError("label_override_changed", tag)
+        before = document_ids()
+        set_text(ci, tag, desired)
+        if before != document_ids():
+            raise ArchiveMetadataRenderError("comicinfo_text_identity_change", tag)
 
 
 def _render_community_rating(

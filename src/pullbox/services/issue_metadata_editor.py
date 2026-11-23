@@ -6,6 +6,7 @@ from typing import cast
 from pydantic import ValidationError
 
 from pullbox.core.archive_metadata import ArchiveMetadataFiles
+from pullbox.core.comicinfo_text import COMICINFO_TEXT_TAGS, descriptive_text
 from pullbox.core.issue_community_rating import (
     RATING_HELP,
     RATING_LOCKED,
@@ -49,6 +50,8 @@ from pullbox.services.metadata_series_refresh_state import (
 EDITABLE_FIELDS = {
     "title": ("Title", "text"),
     "description": ("Summary", "textarea"),
+    "review": ("Review", "textarea"),
+    "scan_information": ("Scan information", "textarea"),
     "notes": ("Notes", "textarea"),
     "cover_date": ("Cover date", "date"),
     "store_date": ("Store date", "date"),
@@ -62,6 +65,8 @@ EDITABLE_FIELDS = {
 }
 
 FIELD_HELP = {
+    "review": "ComicInfo.xml only. This is the reader's review, not the issue summary.",
+    "scan_information": "ComicInfo.xml only. Scanner credits and scan details do not change Notes.",
     "notes": "Only the note text changes. Identity markers stay in their original XML document.",
     "story_arcs": "This edits the comic, not tracked arcs or their reading order. "
     "Positions are optional. If any are blank, only MetronInfo can store the known positions.",
@@ -140,6 +145,11 @@ def _custom_value(field: str, text: str) -> object:
                 "Enter Notes as plain text of up to 4096 characters, without identity markers "
                 "or legacy retailer references."
             )
+    elif field in COMICINFO_TEXT_TAGS:
+        try:
+            value = descriptive_text(text)
+        except ValueError as exc:
+            raise IssueMetadataEditError(f"{EDITABLE_FIELDS[field][0]}: {exc}") from None
     elif field == "community_rating":
         if shared_score(text) is None:
             raise IssueMetadataEditError(RATING_HELP)
@@ -212,7 +222,17 @@ def prepare_issue_editor(
             ("MetronInfo.xml", archive.metroninfo, mi),
         ):
             value: object
-            if field == "notes":
+            if field in COMICINFO_TEXT_TAGS:
+                if root is mi:
+                    continue
+                try:
+                    value = descriptive_text(ci.findtext(COMICINFO_TEXT_TAGS[field], ""))
+                except ValueError as exc:
+                    locked_reason = (
+                        f"{label} is read-only. {exc} Leave it unchanged or correct the source."
+                    )
+                    continue
+            elif field == "notes":
                 try:
                     value = document_notes(root).prose
                 except UneditableNotesError as exc:
@@ -237,6 +257,8 @@ def prepare_issue_editor(
         edit = review.edits.get(key)
         if edit and locked_reason:
             raise IssueMetadataEditError(locked_reason)
+        if edit and field in COMICINFO_TEXT_TAGS and edit.source == "MetronInfo.xml":
+            raise IssueMetadataEditError(f"{label} is stored in ComicInfo.xml only.")
         # Older select-all clients sent "keep library" even when no source had a value.
         if edit and edit.source == "library" and all(v in (None, "", ()) for v in options.values()):
             del effective[key]
@@ -338,12 +360,17 @@ def prepare_issue_editor(
                 allowed_values=tuple(SharedAgeRating) if field == "age_rating" else (),
                 overridden=bool(previous and previous.user_override),
                 differs=differs
-                or bool(field == "notes" and locked_reason and previous and previous.user_override)
+                or bool(
+                    (field == "notes" or field in COMICINFO_TEXT_TAGS)
+                    and locked_reason
+                    and previous
+                    and previous.user_override
+                )
                 or (
                     field in EDITOR_XML_FIELDS
                     and current is not None
                     and bool(previous and previous.user_override)
-                    and len(options) < 3
+                    and len(options) < (2 if field in COMICINFO_TEXT_TAGS else 3)
                 ),
                 selected=key in review.edits,
                 origin=(
