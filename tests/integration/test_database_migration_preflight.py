@@ -152,6 +152,42 @@ def test_blocks_unsafe_or_incomplete_backups(backup, tmp_path, change, reason, m
         assert not backup.exists()
 
 
+@pytest.mark.parametrize(
+    ("states", "reviews", "other"),
+    [
+        (["REVIEW", "REVIEW"], 2, False),
+        (["REVIEW", "IMPORTING", "COMPLETED"], 1, True),
+        (["ROLLING_BACK"], 0, True),
+        (["COMPLETED"], 0, False),
+    ],
+)
+def test_preflight_distinguishes_step_three_from_running_work(
+    backup, monkeypatch, capsys, states, reviews, other
+):
+    with closing(sqlite3.connect(backup)) as db, db:
+        db.executemany(
+            "INSERT INTO import_jobs(source_path,source_type,status,scan_total_files,"
+            "scan_total_dirs,series_found,series_duplicate,series_matched,series_no_match,"
+            "series_new,series_imported,series_failed,search_on_add,cv_match_threshold,"
+            "auto_accept_high_confidence,skip_no_match,source_layout_snapshot) "
+            "VALUES('/private/mylar.db','MYLAR3',?,2,1,1,1,0,0,0,0,0,false,0.8,false,false,'{}')",
+            [(state,) for state in states],
+        )
+    before = backup.read_bytes()
+    code, report = run_cli(monkeypatch, capsys, backup)
+    assert report["source_checks_passed"] is (not reviews and not other), report["blockers"]
+    assert code == int(bool(reviews or other))
+    message = report["blockers"].get("import_jobs", "")
+    if reviews:
+        assert f"{reviews} awaiting Step 3" in message and "Open review" in message
+        assert "Follow-up" in message
+    else:
+        assert "Open review" not in message
+    assert ("outstanding imports and rollbacks" in message) is other
+    assert "/private/mylar.db" not in json.dumps(report)
+    assert backup.read_bytes() == before
+
+
 def test_refuses_configured_database_even_through_a_hardlink(backup, tmp_path, monkeypatch, capsys):
     link = tmp_path / "not-a-backup.db"
     os.link(backup, link)

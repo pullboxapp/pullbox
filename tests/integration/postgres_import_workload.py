@@ -159,7 +159,7 @@ assert json.loads(body)['requires_import_retry']
 """
 
 
-def verify(sql, db, library, imports, expected):
+def verify(sql, db, library, imports, expected, *, mylar_neighbor=False):
     for _ in range(50):
         state = sql(db, "SELECT status FROM import_jobs WHERE id=7")
         if state == "COMPLETED":
@@ -188,6 +188,11 @@ def verify(sql, db, library, imports, expected):
         OWNED,
         relative,
         Path("one.cbz"),
+        *(
+            [Path("Cutover Shelf 1 (2024)/Cutover Shelf 1 (2024) #002.cbz")]
+            if mylar_neighbor
+            else []
+        ),
     }
     # Embedded metadata can legitimately change during ingest; the actual pages must survive.
     with (

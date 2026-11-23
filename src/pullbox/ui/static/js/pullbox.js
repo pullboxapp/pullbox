@@ -18196,6 +18196,7 @@ function orphanedRecoveryModal(config) {
           return;
         }
 
+        if (cfg.mylarConflictsOnly) return;
         var native = self.nativeSelections[fileId];
         if (cfg.nativeRecovery && native) {
           decisions.push({
@@ -18231,7 +18232,10 @@ function orphanedRecoveryModal(config) {
       var assignCount = decisions.filter(function (decision) {
         return decision.action === "assign";
       }).length;
-      if (assignCount === 0 && !hasExistingImported && !cfg.nativeRecovery) {
+      if (cfg.mylarConflictsOnly && decisions.length === 0) {
+        return { error: "Select at least one conflicting file to skip." };
+      }
+      if (assignCount === 0 && !hasExistingImported && !cfg.nativeRecovery && !cfg.mylarConflictsOnly) {
         return {
           error: "Assign at least one file before completing recovery.",
         };

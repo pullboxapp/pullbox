@@ -184,6 +184,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Completed Mylar imports now show individual identity conflicts in Follow-up
+  for existing series. You can open the recorded issue or skip selected
+  references without changing neighboring comics.
+
 - Scheduled task results now persist on PostgreSQL, so the last run and its
   outcome remain available after restarting Pullbox.
 

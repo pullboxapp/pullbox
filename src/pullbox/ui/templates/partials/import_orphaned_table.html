@@ -64,8 +64,9 @@
           {% set native_existing = item.status.value == 'duplicate' and item.cv_match_method in ['metron_id', 'gcd_id', 'library_review'] %}
           {% set issue_recovery_only = (item.status.value == 'imported' or native_existing) and (item.files_no_match or 0) > 0 %}
           {% set known_series_no_match = item.status.value == 'no_match' and (item.cv_id or item.user_selected_cv_id or item.series_id) and (item.files_no_match or 0) > 0 %}
-          {% set direct_issue_recovery = issue_recovery_only or known_series_no_match %}
-          {% set visible_file_count = item.files_no_match if direct_issue_recovery else item.file_count %}
+          {% set mylar_conflicts = item.status.value == 'duplicate' and item.cv_match_method == 'mylar3_cv_id' %}
+          {% set direct_issue_recovery = issue_recovery_only or known_series_no_match or mylar_conflicts %}
+          {% set visible_file_count = item.files_no_match if direct_issue_recovery and not mylar_conflicts else item.file_count %}
           <tr id="orphan-row-{{ item.id }}" data-testid="import-orphaned-row-{{ item.id }}">
             <td>
               <div class="min-w-0">
@@ -94,7 +95,7 @@
               {% if item.status.value == 'skipped' %}
                 <span class="pill pill-neutral inline-flex min-h-8 items-center justify-center whitespace-normal text-center leading-tight">Dismissed</span>
               {% elif direct_issue_recovery %}
-        <span class="pill pill-info inline-flex min-h-8 items-center justify-center whitespace-normal text-center leading-tight">Needs an issue match</span>
+        <span class="pill pill-info inline-flex min-h-8 items-center justify-center whitespace-normal text-center leading-tight">{{ 'Conflicting identities' if mylar_conflicts else 'Needs an issue match' }}</span>
               {% elif item.status.value == 'recovery_pending' %}
         <span class="pill pill-info inline-flex min-h-8 items-center justify-center whitespace-normal text-center leading-tight">Review suggestions</span>
               {% else %}
@@ -111,8 +112,8 @@
                     @click="openRecovery({{ item.id }})"
                     data-tip="Resolve files"
                     data-tip-pos="left"
-        aria-label="Resolve unresolved files for {{ display_title }}"
-      ><span>Match issues</span>
+        aria-label="{{ 'Review conflicts' if mylar_conflicts else 'Resolve unresolved files' }} for {{ display_title }}"
+      ><span>{{ 'Review conflicts' if mylar_conflicts else 'Match issues' }}</span>
                     <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                       <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5L21 12l-7.5 7.5M3 12h17.25"/>
                     </svg>

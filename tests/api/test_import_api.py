@@ -2713,9 +2713,11 @@ class TestOrphanedEndpoints:
         assert resp.status_code == 422
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("mylar_conflict", [True, False])
     async def test_get_orphan_recovery_payload(
         self,
         client: AsyncClient,
+        mylar_conflict: bool,
     ) -> None:
         """GET /import/orphaned/{id}/recovery returns the guided recovery payload."""
         imported_series = ImportedSeries(
@@ -2790,13 +2792,31 @@ class TestOrphanedEndpoints:
             }
             mock_build.return_value = mock_svc
 
+            if mylar_conflict:
+                mock_svc.get_orphan_recovery_context.return_value.update(
+                    mylar_conflicts_only=True, issue_options=[]
+                )
+                mock_svc.get_orphan_recovery_context.return_value["files"][0].update(
+                    recorded_issue_id=42,
+                    suggested_issue_cv_id=None,
+                    suggested_issue_label=None,
+                    provider_issues=[{"provider": "metron", "library_issue_id": 73}],
+                )
             resp = await client.get("/api/v1/import/orphaned/7/recovery")
 
         assert resp.status_code == 200
         data = resp.json()
         assert data["imported_series"]["status"] == "recovery_pending"
-        assert data["issue_options"][0]["issue_cv_id"] == 501
-        assert data["files"][0]["suggested_issue_cv_id"] == 501
+        assert data["mylar_conflicts_only"] is mylar_conflict
+        if mylar_conflict:
+            assert not data["issue_options"] and data["files"][0]["suggested_issue_cv_id"] is None
+            assert data["files"][0]["recorded_issue_id"] == 42
+            assert data["files"][0]["provider_issues"] == [
+                {"provider": "metron", "library_issue_id": 73}
+            ]
+        else:
+            assert data["issue_options"][0]["issue_cv_id"] == 501
+            assert data["files"][0]["suggested_issue_cv_id"] == 501
         assert data["requires_library_root"] is True
 
     @pytest.mark.asyncio

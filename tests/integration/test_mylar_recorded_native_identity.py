@@ -7,12 +7,47 @@ from sqlalchemy import select
 
 from pullbox.core.metadata_identity import IdentityEvidenceKind, IdentityNamespace
 from pullbox.core.metadata_identity_state import IdentityVerificationState
-from pullbox.models.import_job import ImportedFile, ImportedFileStatus, ImportedSeries
+from pullbox.models.import_job import (
+    ImportedFile,
+    ImportedFileStatus,
+    ImportedSeries,
+    ImportJobStatus,
+)
 from pullbox.models.library import LibraryFile
 from pullbox.models.metadata_identity import IssueExternalIdentity, SeriesExternalIdentity
 from pullbox.schemas.import_job import ConfirmImportRequest
 from tests.integration.test_metron_folder_import import _archive
 from tests.integration.test_mylar_native_extras import seed_mylar_native_extra
+
+
+@pytest.mark.parametrize("namespace", ["metron", "gcd"])
+async def test_completed_mylar_conflict_links_only_current_verified_issue(
+    db_session, tmp_path, namespace
+):
+    job, service, _, native, _, recorded, _, extra = await seed_mylar_native_extra(
+        db_session, tmp_path, namespace
+    )
+    tracked = extra.parent / "Old Harbor 001.cbz"
+    _archive(tracked, primary=namespace, number="1")
+    await service.start_scan(db_session, job.id)
+    file = await db_session.scalar(
+        select(ImportedFile).where(ImportedFile.file_path == str(tracked))
+    )
+    group = file.import_series_id
+    job.status = ImportJobStatus.COMPLETED
+    await db_session.commit()
+    context = await service.get_orphan_recovery_context(db_session, group)
+    [row] = context["files"]
+    assert row["recorded_issue_id"] == recorded.id
+    assert row["provider_issues"] == [{"provider": namespace, "library_issue_id": native.id}]
+    link = await db_session.scalar(
+        select(IssueExternalIdentity).where(IssueExternalIdentity.issue_id == native.id)
+    )
+    link.verification_state = IdentityVerificationState.STALE
+    await db_session.commit()
+    context = await service.get_orphan_recovery_context(db_session, group)
+    assert context["files"][0]["provider_issues"] == []
+    assert context["files"][0]["recorded_issue_id"] == recorded.id
 
 
 @pytest.mark.parametrize("namespace", ["metron", "gcd"])

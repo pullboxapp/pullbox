@@ -216,6 +216,92 @@ def test_source_failure_is_not_an_issue_recovery_decision() -> None:
     assert requires_orphan_issue_decision(ImportedFile(status=ImportedFileStatus.NO_MATCH)) is True
 
 
+async def test_mylar_followup_only_skips_selected_unresolved_conflicts(db_session):
+    service = _make_service()
+    job = await _create_job_row(db_session)
+    job.source_type = ImportSourceType.MYLAR3
+    await _create_series_with_issue(
+        db_session, series_id=24, issue_id=22, title="Comics", issue_number=1
+    )
+    item = await _create_imported_series(
+        db_session, job, name="Comics", status=ImportSeriesStatus.DUPLICATE
+    )
+    item.series_id, item.cv_id, item.cv_match_method = 24, 43, "mylar3_cv_id"
+
+    def row(name, status, conflict):
+        return ImportedFile(
+            import_job_id=job.id,
+            import_series_id=item.id,
+            file_path=f"/imports/{name}.cbz",
+            file_name=f"{name}.cbz",
+            status=status,
+            file_size=15,
+            file_format="cbz",
+            diagnostics={"conflict_type": "mylar_native_identity_conflict"} if conflict else {},
+        )
+
+    first, second, imported, unrelated = (
+        row("first", ImportedFileStatus.NO_MATCH, True),
+        row("second", ImportedFileStatus.NO_MATCH, True),
+        row("owned", ImportedFileStatus.IMPORTED, True),
+        row("unmatched", ImportedFileStatus.NO_MATCH, False),
+    )
+    db_session.add_all([first, second, imported, unrelated])
+    await db_session.commit()
+    first_id, second_id, owned_id, unrelated_id, group = (
+        first.id,
+        second.id,
+        imported.id,
+        unrelated.id,
+        item.id,
+    )
+
+    def skip(*ids):
+        return RecoverOrphanRequest(
+            decisions=[OrphanRecoveryDecision(imported_file_id=i, action="skip") for i in ids]
+        )
+
+    await service.recover_orphan(db_session, group, skip(first_id))
+    await db_session.rollback()
+    await db_session.refresh(first)
+    assert first.status is ImportedFileStatus.NO_MATCH
+    await db_session.refresh(job)
+    for request in [
+        skip(),
+        skip(first_id, first_id),
+        skip(first_id, owned_id),
+        skip(first_id, unrelated_id),
+        RecoverOrphanRequest(
+            decisions=[
+                OrphanRecoveryDecision(imported_file_id=first_id, action="assign", issue_cv_id=44)
+            ]
+        ),
+    ]:
+        with pytest.raises(ValidationError):
+            await service.recover_orphan(db_session, group, request)
+        await db_session.refresh(first)
+        assert first.status is ImportedFileStatus.NO_MATCH
+    with pytest.raises(ValidationError, match="already identified"):
+        await service.assign_cv_to_orphan(db_session, group, 44)
+    with pytest.raises(ValidationError, match="skip only"):
+        await service.dismiss_orphan(db_session, group)
+    result = await service.recover_orphan(db_session, group, skip(first_id))
+    assert result["files_remaining"] == 1 and result["skipped_count"] == 1
+    with pytest.raises(ValidationError):
+        await service.recover_orphan(db_session, group, skip(second_id, first_id))
+    await service.recover_orphan(db_session, group, skip(second_id))
+    assert await service.get_orphaned_count(db_session, job_id=job.id) == 0
+    for file, expected in (
+        (first, ImportedFileStatus.SKIPPED),
+        (second, ImportedFileStatus.SKIPPED),
+        (imported, ImportedFileStatus.IMPORTED),
+        (unrelated, ImportedFileStatus.NO_MATCH),
+    ):
+        await db_session.refresh(file)
+        assert file.status is expected
+    assert item.status is ImportSeriesStatus.DUPLICATE
+
+
 def test_summarize_orphan_recovery_marks_imported_when_no_files_remaining() -> None:
     from pullbox.services.import_orphans import summarize_orphan_recovery_result
 

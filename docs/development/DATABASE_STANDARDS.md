@@ -978,6 +978,11 @@ read-only inbox mount; the PostgreSQL app sees the same originals. In Follow-up,
 verified Metron and GCD links recover issue 13a, while an unverified issue stays
 unmatched. Rollback must remove the managed copy, restore the prior issue status,
 and leave both originals untouched.
+The SQLite source also completes a mapped Mylar import with two conflicting
+references and a valid neighboring issue. After migration, Chromium opens the
+recorded issue and skips one conflict at a time; the neighboring comic and all
+source files must remain unchanged. An import still waiting at Step 3 is a
+preflight blocker, not a resumable PostgreSQL test case.
 
 Story Arc reader bookmarks are unique per user and arc. A bookmark
 stores the stable membership and the issue the user actually read, not a page

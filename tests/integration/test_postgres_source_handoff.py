@@ -410,7 +410,7 @@ async def test_recheck_original_source_and_reviewed_target(
                 assert sql(db, "SELECT status FROM issues WHERE id=83") == "OWNED"
                 assert sql(db, "SELECT status FROM import_files WHERE id=2") == "FAILED"
                 if expected:
-                    workload.verify(sql, db, copied, imports, expected)
+                    workload.verify(sql, db, copied, imports, expected, mylar_neighbor=browser)
                 if cases:
                     address = docker("port", postgres, "8585/tcp", check=True).stdout.strip()
                     assert address.startswith("127.0.0.1:")
@@ -458,7 +458,9 @@ async def test_recheck_original_source_and_reviewed_target(
                     )
                 stages.targets._migrate(restore_url, "upgrade", "head")
                 if expected:
-                    workload.verify(sql, restored, copied, imports, expected)
+                    workload.verify(
+                        sql, restored, copied, imports, expected, mylar_neighbor=browser
+                    )
                 if cases:
                     assert sql(restored, stat_query) == last_run
                 assert (

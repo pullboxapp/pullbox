@@ -906,6 +906,13 @@ class OrphanRecoveryIssueOption(BaseModel):
     already_imported: bool = False
 
 
+class OrphanRecoveryProviderIssue(BaseModel):
+    """A currently verified local issue offered for inspection, not assignment."""
+
+    provider: Literal["metron", "gcd"]
+    library_issue_id: int
+
+
 class OrphanRecoveryFileRead(BaseModel):
     """One imported file row shown in the orphan recovery UI."""
 
@@ -922,6 +929,8 @@ class OrphanRecoveryFileRead(BaseModel):
     suggested_issue_cv_id: int | None = None
     suggested_issue_label: str | None = None
     decision_locked: bool = False
+    recorded_issue_id: int | None = None
+    provider_issues: list[OrphanRecoveryProviderIssue] = Field(default_factory=list)
     diagnostics: dict[str, object] = Field(default_factory=dict)
 
 
@@ -930,6 +939,7 @@ class OrphanRecoveryResponse(BaseModel):
 
     imported_series: ImportedSeriesRead
     native_recovery: bool = False
+    mylar_conflicts_only: bool = False
     issue_options: list[OrphanRecoveryIssueOption] = Field(default_factory=list)
     files: list[OrphanRecoveryFileRead] = Field(default_factory=list)
     requires_library_root: bool = False

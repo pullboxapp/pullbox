@@ -101,6 +101,18 @@ and [pg_restore reference](https://www.postgresql.org/docs/16/app-pgrestore.html
    complete by hand. For an older schema, upgrade a separately restored copy
    first; keep the original backup intact.
 
+An import waiting at Step 3 still blocks migration even if no files are being
+written. In the original SQLite instance, go to **Import > History > Open review**.
+For a Mylar issue with conflicting embedded metadata, correct the source or linked
+identity and use **Recheck source**, or use **Skip this file** to leave it out.
+You can also import just the ready files and leave unresolved files in **Follow-up**.
+Wait for the import to finish and take a fresh backup. A completed import does
+not block migration simply because it has follow-up items. After migration, use
+**Follow-up > Review conflicts** for unresolved Mylar identity conflicts in an
+existing series. Open the recorded issue to import a corrected copy, or skip
+individual references. Other unresolved files and previously imported comics
+are left alone.
+
 The report checks the supported schema revision and layout, SQLite integrity,
 foreign keys, and outstanding work such as an unfinished import rollback or
 file write. Saved search results that never started a download are counted as

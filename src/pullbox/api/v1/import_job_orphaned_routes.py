@@ -120,6 +120,7 @@ async def get_orphan_recovery(
     return OrphanRecoveryResponse(
         imported_series=ImportedSeriesRead.model_validate(payload["imported_series"]),
         native_recovery=bool(payload.get("native_recovery", False)),
+        mylar_conflicts_only=bool(payload.get("mylar_conflicts_only", False)),
         issue_options=payload["issue_options"],
         files=payload["files"],
         requires_library_root=bool(payload["requires_library_root"]),

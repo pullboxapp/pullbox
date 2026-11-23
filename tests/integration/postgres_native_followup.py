@@ -24,6 +24,7 @@ from pullbox.services.import_policy_snapshot import apply_ingest_policy_to_impor
 
 
 def make_sources(imports):
+    from scripts.mylar3_import_fixture import create_minimal_cbz, create_mylar3_db
     from tests.integration.test_metron_folder_import import _archive
 
     originals = {}
@@ -37,7 +38,74 @@ def make_sources(imports):
             unknown,
             _archive(unknown, number="14", issue_id="999999", primary=label),
         )
+    root = imports / "saved-mylar"
+    folder = root / "Cutover Shelf 1 (2024)"
+    wrong, ready, later = [folder / f"Cutover Shelf 1 00{n}.cbz" for n in (1, 2, 3)]
+    _archive(wrong, number="1", primary="Metron")
+    _archive(later, number="3", primary="GCD")
+    create_minimal_cbz(ready)
+    database = root / "mylar.db"
+    create_mylar3_db(
+        database,
+        series=[
+            dict(
+                ComicID="92000",
+                ComicName="Cutover Shelf 1",
+                ComicYear="2024",
+                ComicLocation=f"/old-lib/{folder.name}",
+                Total=3,
+            )
+        ],
+        issues=[
+            dict(ComicID="92000", IssueID=str(92000 + n), Issue_Number=str(n), Location=path.name)
+            for n, path in enumerate((wrong, ready, later), 1)
+        ],
+    )
+    originals["mylar"] = {p: p.read_bytes() for p in (database, wrong, ready, later)}
     return originals
+
+
+async def _finish_mylar(session, service):
+    from pullbox.models.series import Series
+    from pullbox.schemas.import_job import ConfirmImportRequest
+
+    (await session.get(Series, 1001)).comicvine_id = 92000
+    for issue_id, cv in ((10016, 92001), (10017, 92002), (10018, 92003)):
+        (await session.get(Issue, issue_id)).comicvine_id = cv
+    job = ImportJob(
+        source_type=ImportSourceType.MYLAR3,
+        source_path="/imports/saved-mylar/mylar.db",
+        mylar3_path_map={"/old-lib": "/imports/saved-mylar"},
+        mylar3_path_map_confirmed=True,
+        target_library_root_id=77,
+    )
+    apply_ingest_policy_to_import_job(job, await load_library_ingest_policy(session))
+    session.add(job)
+    await session.commit()
+    await service.start_scan(session, job.id)
+    wrong, ready, later = (
+        await session.scalars(
+            select(ImportedFile)
+            .where(ImportedFile.import_job_id == job.id)
+            .order_by(ImportedFile.file_name)
+        )
+    ).all()
+    assert job.status is ImportJobStatus.REVIEW
+    assert wrong.status is ImportedFileStatus.NO_MATCH and wrong.matched_issue_id is None
+    assert wrong.diagnostics["conflict_type"] == "mylar_native_identity_conflict"
+    assert ready.matched_issue_id == 10017
+    await service.update_file_selection(session, job.id, ready.id, include_in_import=True)
+    await service.confirm_import(
+        session, job.id, ConfirmImportRequest(series_ids=[ready.import_series_id])
+    )
+    await service.run_import(session, job.id)
+    await session.commit()
+    for obj in (job, wrong, ready):
+        await session.refresh(obj)
+    assert job.status is ImportJobStatus.COMPLETED
+    assert ready.status is ImportedFileStatus.IMPORTED, ready.error_message
+    assert wrong.status is ImportedFileStatus.NO_MATCH and not wrong.include_in_import
+    return (job.id, wrong.id, ready.id, later.id, wrong.import_series_id)
 
 
 async def scan():
@@ -105,13 +173,16 @@ async def scan():
                         by_name["Harbor Lights 014 (2024).cbz"],
                     )
                 )
+            mylar = await _finish_mylar(session, service)
     finally:
         await engine.dispose()
-    return cases
+    return {"folder": cases, "mylar": mylar}
 
 
 async def exercise(origin, cases, originals, library, db, sql):
     from playwright.async_api import async_playwright, expect
+
+    from tests.e2e.accessibility import AXE_SCRIPT, WCAG_AA_TAGS
 
     def posted_to(suffix):
         return lambda response: response.request.method == "POST" and response.url.endswith(suffix)
@@ -127,7 +198,7 @@ async def exercise(origin, cases, originals, library, db, sql):
             await expect(page.get_by_role("complementary", name="Sidebar")).to_be_visible()
             await page.get_by_test_id("usage-stats-modal-disable").click()
             await expect(page.get_by_test_id("usage-stats-modal")).to_be_hidden()
-            for ns, job, issue, file, unverified in cases:
+            for ns, job, issue, file, unverified in cases["folder"]:
                 comic, original, unknown, untouched = originals[ns]
                 await page.goto(f"/import?tab=follow-up&job_id={job}")
                 await page.get_by_test_id("import-cleanup-apply-recheck_deferred_files").click()
@@ -169,6 +240,66 @@ async def exercise(origin, cases, originals, library, db, sql):
                 assert unknown.read_bytes() == untouched
                 assert sql(db, f"SELECT count(*) FROM library_files WHERE issue_id={issue}") == "0"
                 assert sql(db, f"SELECT status FROM issues WHERE id={issue}") == "SKIPPED"
+            job, wrong, ready, later, group = cases["mylar"]
+            await page.goto(f"/import?tab=follow-up&job_id={job}")
+            row = page.get_by_test_id(f"import-orphaned-row-{group}")
+            await expect(row).to_contain_text("Cutover Shelf 1")
+            await row.get_by_test_id(f"import-orphaned-recover-{group}").click()
+            dialog = page.get_by_test_id("import-orphaned-recovery-modal")
+            await expect(dialog).to_contain_text("Cutover Shelf 1 001.cbz")
+            disputed = page.get_by_test_id(f"orphaned-recovery-file-{wrong}")
+            await expect(disputed).not_to_contain_text("Suggested #1")
+            await expect(disputed.get_by_role("link", name="Open Metron issue")).to_have_attribute(
+                "href", "/issues/10012"
+            )
+            await expect(dialog.get_by_role("link", name="Open GCD issue")).to_have_attribute(
+                "href", "/issues/10012"
+            )
+            await page.evaluate(AXE_SCRIPT.read_text())
+            violations = await page.evaluate(
+                """async tags => (await axe.run(
+                '[data-testid="import-orphaned-recovery-modal"]',
+                {runOnly: {type: 'tag', values: tags}})).violations.map(v => v.id)""",
+                WCAG_AA_TAGS,
+            )
+            assert not violations, violations
+            await expect(
+                disputed.get_by_role("link", name="Open recorded issue")
+            ).to_have_attribute("href", "/issues/10016")
+            async with page.expect_popup() as popup:
+                await disputed.get_by_role("link", name="Open recorded issue").click()
+            recorded = await popup.value
+            await expect(recorded.get_by_test_id("issue-action-import")).to_be_visible()
+            await recorded.close()
+            await expect(dialog).not_to_contain_text("Cutover Shelf 1 002.cbz")
+            neighbor = library / "Cutover Shelf 1 (2024)/Cutover Shelf 1 (2024) #002.cbz"
+            before = neighbor.read_bytes(), neighbor.stat().st_mtime_ns
+            assert (
+                sql(
+                    db,
+                    f"SELECT status, diagnostics->>'conflict_type' FROM import_files "
+                    f"WHERE id={wrong} AND matched_issue_id IS NULL",
+                )
+                == "NO_MATCH|mylar_native_identity_conflict"
+            )
+            await disputed.get_by_test_id(f"orphaned-recovery-skip-{wrong}").click()
+            await dialog.get_by_test_id("orphaned-recovery-save").click()
+            await expect(dialog.get_by_test_id(f"orphaned-recovery-file-{wrong}")).to_have_count(
+                0, timeout=20000
+            )
+            await expect(dialog.get_by_test_id(f"orphaned-recovery-file-{later}")).to_be_visible()
+            assert sql(db, f"SELECT status FROM import_files WHERE id={wrong}") == "SKIPPED"
+            assert sql(db, f"SELECT status FROM import_files WHERE id={later}") == "NO_MATCH"
+            await dialog.get_by_test_id(f"orphaned-recovery-skip-{later}").click()
+            await dialog.get_by_test_id("orphaned-recovery-save").click()
+            await expect(row).to_have_count(0, timeout=20000)
+            assert sql(db, f"SELECT status FROM import_files WHERE id={later}") == "SKIPPED"
+            assert sql(db, f"SELECT status FROM import_files WHERE id={ready}") == "IMPORTED"
+            assert sql(db, f"SELECT status FROM import_series WHERE id={group}") == "DUPLICATE"
+            assert (neighbor.read_bytes(), neighbor.stat().st_mtime_ns) == before
+            assert sql(db, "SELECT count(*) FROM library_files WHERE issue_id=10016") == "0"
+            assert sql(db, "SELECT count(*) FROM library_files WHERE issue_id=10017") == "1"
+            assert all(path.read_bytes() == before for path, before in originals["mylar"].items())
         finally:
             await browser.close()
 

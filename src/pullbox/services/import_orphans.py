@@ -19,6 +19,7 @@ from pullbox.models.import_job import (
     ImportJob,
     ImportJobStatus,
     ImportSeriesStatus,
+    ImportSourceType,
 )
 from pullbox.models.issue import Issue, IssueType
 from pullbox.models.series import Series
@@ -34,6 +35,7 @@ from pullbox.services.import_file_resolution import load_issue_lookup_for_series
 from pullbox.services.import_file_selection import set_review_file_selection
 from pullbox.services.import_job_actions import build_series_created_action_payload
 from pullbox.services.import_job_execution_items import ensure_target_issue_summary_for_import_file
+from pullbox.services.import_mylar_followup import conflict_file, mylar_duplicate, skip_conflicts
 from pullbox.services.import_retry_helpers import require_retained_import_destination
 from pullbox.services.import_review_recheck import prepare_retryable_failed_sources_for_retry
 from pullbox.services.import_terminal_recovery import allows_terminal_import_recovery
@@ -327,20 +329,31 @@ async def _prepare_terminal_follow_up(
 
 def _active_issue_recovery_clause() -> ColumnElement[bool]:
     """Return the query clause for issue-only follow-up under imported series."""
-    return and_(
-        or_(
-            ImportedSeries.status == ImportSeriesStatus.IMPORTED,
-            and_(
-                ImportedSeries.status == ImportSeriesStatus.DUPLICATE,
-                ImportedSeries.cv_match_method.in_(["metron_id", "gcd_id", "library_review"]),
+    return or_(
+        and_(
+            or_(
+                ImportedSeries.status == ImportSeriesStatus.IMPORTED,
+                and_(
+                    ImportedSeries.status == ImportSeriesStatus.DUPLICATE,
+                    ImportedSeries.cv_match_method.in_(["metron_id", "gcd_id", "library_review"]),
+                ),
             ),
+            sa_select(ImportedFile.id)
+            .where(
+                ImportedFile.import_series_id == ImportedSeries.id,
+                ImportedFile.status == ImportedFileStatus.NO_MATCH,
+            )
+            .exists(),
         ),
-        sa_select(ImportedFile.id)
-        .where(
-            ImportedFile.import_series_id == ImportedSeries.id,
-            ImportedFile.status == ImportedFileStatus.NO_MATCH,
-        )
-        .exists(),
+        and_(
+            ImportJob.source_type == ImportSourceType.MYLAR3,
+            ImportedSeries.status == ImportSeriesStatus.DUPLICATE,
+            ImportedSeries.cv_match_method == "mylar3_cv_id",
+            ImportedSeries.series_id.is_not(None),
+            sa_select(ImportedFile.id)
+            .where(ImportedFile.import_series_id == ImportedSeries.id, conflict_file())
+            .exists(),
+        ),
     )
 
 
@@ -460,6 +473,31 @@ async def recover_orphan(
     actor_id: int | None = None,
 ) -> dict[str, Any]:
     """Create/reuse the local series and import selected files for delayed recovery."""
+    if mylar_duplicate(job, item):
+        skipped = await skip_conflicts(session, job, item, request)
+        await recompute_file_counters(session, job, series_ids=[item.id])
+        await log_event(
+            session,
+            job.id,
+            "INFO",
+            "mylar_conflicting_files_skipped",
+            imported_series_id=item.id,
+            skipped_count=skipped,
+        )
+        remaining = await session.scalar(
+            sa_select(sa_func.count())
+            .select_from(ImportedFile)
+            .where(ImportedFile.import_series_id == item.id, conflict_file())
+        )
+        return {
+            "imported_series_id": item.id,
+            "series_id": item.series_id,
+            "status": item.status,
+            "imported_count": 0,
+            "failed_count": 0,
+            "skipped_count": skipped,
+            "files_remaining": remaining,
+        }
     require_retained_import_destination(job)
     job_id = job.id
     item_id = item.id

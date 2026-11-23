@@ -6,6 +6,7 @@
   x-data="orphanedRecoveryModal({
     importedSeriesId: {{ imported_series.id }},
     nativeRecovery: {{ (native_recovery|default(false))|tojson }},
+    mylarConflictsOnly: {{ (mylar_conflicts_only|default(false))|tojson }},
     csrfToken: {{ csrf_token|tojson|forceescape }},
     requiresLibraryRoot: {{ requires_library_root|tojson }},
     selectedLibraryRootId: {{ selected_library_root_id|tojson|forceescape }},
@@ -38,7 +39,9 @@
       <div class="space-y-1">
         <p class="text-[11px] font-medium uppercase tracking-[0.14em] text-pb-brand">Recover files</p>
         <h3 id="orphaned-recovery-title-{{ imported_series.id }}" class="text-base font-semibold text-pb-text">{{ imported_series.cv_title or imported_series.raw_series_name }}</h3>
-        {% if imported_series.status.value == 'imported' %}
+        {% if mylar_conflicts_only %}
+          <p class="text-xs leading-5 text-pb-text-dim">Mylar and the file identify different issues. If Mylar is right, open the recorded issue and use Import File with a corrected copy. If the comic belongs elsewhere, import it from that issue instead. Skip the old reference when you're done; this does not change either comic.</p>
+        {% elif imported_series.status.value == 'imported' %}
           <p class="text-xs leading-5 text-pb-text-dim">This series is already in the library. Finish the leftover file decisions here by assigning each file to an issue or skipping it for now.</p>
         {% else %}
           <p class="text-xs leading-5 text-pb-text-dim">Map each file to an issue or skip it for now. This deferred item will stay in Follow-up until the recovery work is actually finished.</p>
@@ -68,13 +71,13 @@
             <p class="mt-1 text-sm font-semibold text-pb-text">{{ imported_series.cv_publisher or imported_series.raw_publisher or '—' }}</p>
           </div>
           <div class="rounded-lg border border-pb-border bg-pb-card px-3 py-3">
-            <p class="text-[10px] font-medium uppercase tracking-[0.12em] text-pb-text-dim">Files left</p>
+            <p class="text-[10px] font-medium uppercase tracking-[0.12em] text-pb-text-dim">{{ 'Conflicts left' if mylar_conflicts_only else 'Files left' }}</p>
             <p class="mt-1 text-sm font-semibold text-pb-text">{{ files_remaining }}</p>
           </div>
-          <div class="rounded-lg border border-pb-border bg-pb-card px-3 py-3">
+          {% if not mylar_conflicts_only %}<div class="rounded-lg border border-pb-border bg-pb-card px-3 py-3">
             <p class="text-[10px] font-medium uppercase tracking-[0.12em] text-pb-text-dim">Files complete</p>
             <p class="mt-1 text-sm font-semibold text-pb-text">{{ files_completed }}</p>
-          </div>
+          </div>{% endif %}
         </div>
 
         {% if requires_library_root and not selected_library_root_id %}
@@ -138,7 +141,7 @@
           <div class="table-toolbar">
             <div class="table-toolbar-title-block">
               <h4 class="table-toolbar-title">Recover files</h4>
-              <p class="table-toolbar-copy">Each remaining file needs an issue assignment or an explicit skip decision.</p>
+              <p class="table-toolbar-copy">{{ 'Unselected conflicts stay in Follow-up.' if mylar_conflicts_only else 'Each remaining file needs an issue assignment or an explicit skip decision.' }}</p>
             </div>
           </div>
           <div class="max-h-[28rem] overflow-auto">
@@ -177,13 +180,13 @@
                             <span class="pill pill-neutral">Parsed #{{ file.parsed_issue_number|issue_num }}</span>
                           {% endif %}
                           {% if file.comicvine_issue_id %}
-                            <span class="pill pill-info">ComicInfo CV {{ file.comicvine_issue_id }}</span>
+                            <span class="pill pill-info">{{ 'Mylar CV' if mylar_conflicts_only else 'ComicInfo CV' }} {{ file.comicvine_issue_id }}</span>
                           {% endif %}
                           {% if file.suggested_issue_label and not file.decision_locked %}
                             <span class="pill pill-success">Suggested {{ file.suggested_issue_label }}</span>
                           {% endif %}
                         </div>
-                        {% if file.error_message %}
+                        {% if file.error_message and not mylar_conflicts_only %}
                           <p class="mt-2 text-xs text-pb-danger">{{ file.error_message }}</p>
                         {% endif %}
                       </div>
@@ -206,6 +209,15 @@
                             Skipped during recovery
                           {% endif %}
                         </span>
+                      {% elif mylar_conflicts_only %}
+                        {% if file.recorded_issue_id %}
+                        <a class="btn-ghost btn-sm" href="/issues/{{ file.recorded_issue_id }}" target="_blank" rel="noopener noreferrer">Open recorded issue</a>
+                        {% else %}
+                        <a class="btn-ghost btn-sm" href="/series/{{ imported_series.series_id }}" target="_blank" rel="noopener noreferrer">Open series</a>
+                        {% endif %}
+                        {% for link in file.provider_issues %}
+                        <a class="btn-ghost btn-sm" href="/issues/{{ link.library_issue_id }}" target="_blank" rel="noopener noreferrer">Open {{ 'Metron' if link.provider == 'metron' else 'GCD' }} issue</a>
+                        {% endfor %}
                       {% elif native_recovery %}
                         <button type="button" class="btn-ghost btn-sm"
                           id="orphaned-recovery-issue-trigger-{{ file.imported_file_id }}"

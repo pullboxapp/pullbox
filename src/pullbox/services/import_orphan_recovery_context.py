@@ -19,6 +19,11 @@ from pullbox.models.import_job import (
 )
 from pullbox.models.issue import Issue
 from pullbox.models.library import LibraryRoot
+from pullbox.services.import_mylar_followup import conflict_file, mylar_duplicate, review_rows
+from pullbox.services.import_mylar_native_identity import (
+    load_mylar_native_owners,
+    recorded_native_refs,
+)
 from pullbox.services.import_orphans import is_active_orphan_row, requires_orphan_issue_decision
 
 if TYPE_CHECKING:
@@ -54,6 +59,14 @@ async def load_orphan_recovery_item(
                 )
             )
         )
+    if mylar_duplicate(job, item):
+        has_live_issue_recovery = bool(
+            await session.scalar(
+                select(ImportedFile.id)
+                .where(ImportedFile.import_series_id == item.id, conflict_file())
+                .limit(1)
+            )
+        )
     if not is_active_orphan_row(item) and not has_live_issue_recovery:
         raise ValidationError("This import group is not in the active unmatched queue.")
     return job, item
@@ -69,6 +82,39 @@ async def build_orphan_recovery_context(
     """Build the delayed unmatched-recovery context for one orphaned series row."""
     if item.cv_id is None and item.series_id is None:
         raise ValidationError("Choose a ComicVine match before starting recovery.")
+
+    if mylar_duplicate(job, item):
+        conflicts = await review_rows(session, item)
+        disputed_files = [file for file, _ in conflicts]
+        owners = await load_mylar_native_owners(session, disputed_files)
+        files_view, remaining, completed = _build_recovery_file_rows(disputed_files, [])
+        for view, (file, issue_id) in zip(files_view, conflicts, strict=True):
+            view["recorded_issue_id"] = issue_id
+            linked_issues = sorted(
+                {
+                    (ref[0], owner.issue_id)
+                    for ref in recorded_native_refs(file)
+                    if ref[1] == "issue"
+                    and (owner := owners.get(ref)) is not None
+                    and owner.issue_id is not None
+                    and owner.issue_id != issue_id
+                }
+            )
+            view["provider_issues"] = [
+                {"provider": provider, "library_issue_id": linked_id}
+                for provider, linked_id in linked_issues
+            ]
+        return {
+            "imported_series": item,
+            "mylar_conflicts_only": True,
+            "issue_options": [],
+            "files": files_view,
+            "requires_library_root": False,
+            "selected_library_root_id": job.target_library_root_id,
+            "available_library_roots": [],
+            "files_remaining": remaining,
+            "files_completed": completed,
+        }
 
     files_result = await session.execute(
         select(ImportedFile)

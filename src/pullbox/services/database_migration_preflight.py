@@ -240,6 +240,18 @@ def inspect_snapshot_connection(db: sqlite3.Connection, report: PreflightReport)
     for name, (predicate, action) in _WORK.items():
         count = db.execute(str(inventory[name].where(predicate))).fetchone()[0]
         if count:
+            if name == "import_jobs":
+                reviews = db.execute(
+                    "SELECT count(*) FROM import_jobs WHERE upper(status)='REVIEW' "
+                    "AND story_arc_rollback_waiting_work_id IS NULL"
+                ).fetchone()[0]
+                if reviews:
+                    guidance = (
+                        f"{reviews} awaiting Step 3. In the original SQLite instance, go to "
+                        "Import > History and choose Open review. Resolve decisions or import "
+                        "the ready files; deferred files stay in Follow-up after completion."
+                    )
+                    action = f"{guidance} {action}" if reviews < count else guidance
             report.blockers[name] = f"{count} outstanding. {action} Then take a fresh backup."
 
 
