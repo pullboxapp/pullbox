@@ -84,6 +84,14 @@ if TYPE_CHECKING:
     from pullbox.utilities.executors.archive_subprocess import ControlCheck, ProgressCallback
 
 
+def repairable_metadata_field_error(exc: ArchiveMetadataRenderError) -> bool:
+    return exc.code in {
+        "rating_override_changed",
+        "label_override_changed",
+        "publisher_required",
+    } or (exc.code == "unsupported_content" and exc.field in {"StoryArc", "StoryArcNumber"})
+
+
 def file_metadata_error(exc: BaseException) -> str:
     from pullbox.services.issue_metadata_editor import IssueMetadataEditError
 

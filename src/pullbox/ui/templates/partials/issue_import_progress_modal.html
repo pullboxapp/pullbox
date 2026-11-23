@@ -60,14 +60,25 @@
 
         <div x-show="importState === 'metadata_review'" x-cloak class="space-y-3">
           <p class="text-sm font-semibold text-pb-text" x-text="importMessage"></p>
-          <p class="text-sm text-pb-text-sec">Choose the values for the managed copy. The source file and library catalog metadata stay unchanged.</p>
-          <template x-for="conflict in (importMetadataPreview ? importMetadataPreview.conflicts : [])" :key="conflict.key">
+          <p class="text-sm text-pb-text-sec" x-show="!importFields">Choose the values for the managed copy. The source file and library catalog metadata stay unchanged.</p>
+          <button type="button" class="btn-ghost btn-sm" x-show="importMetadataPreview && importMetadataPreview.editor_available && !importFields" @click="beginImportEditor()" :disabled="importing">Edit issue fields</button>
+          <template x-if="importFields && importFields.preview">
+            <div x-data="importFields" class="space-y-3">
+              <p class="text-sm text-pb-text-sec">Corrections update this issue and both XML documents in the library copy. Keep the library value for series fields, or change it in the <a class="text-pb-interactive underline" href="/series/{{ issue.series_id }}" target="_blank" rel="noopener">series editor</a>. The selected source file stays unchanged.</p>
+              {% include "partials/issue_editor_fields.html" %}
+              <details x-show="preview && preview.ready && !choicesDirty && (preview.changes || []).length">
+                <summary class="cursor-pointer text-sm text-pb-text">Changes to the XML documents</summary>
+                {% include "partials/issue_metadata_xml_changes.html" %}
+              </details>
+            </div>
+          </template>
+          <template x-for="conflict in (importMetadataPreview ? importMetadataPreview.conflicts.filter(row => !importFields || row.key.startsWith('series.')) : [])" :key="conflict.key">
             <fieldset class="rounded-lg border border-pb-border p-3 space-y-2">
               <legend class="text-sm font-semibold text-pb-text px-1" x-text="conflict.label"></legend>
               <p class="text-sm text-pb-text-sec" x-show="conflict.note" x-text="conflict.note"></p>
               <template x-for="option in conflict.options" :key="option.source">
                 <label class="flex items-start gap-3 rounded-lg border border-pb-border p-3 text-pb-text" :class="option.selectable ? 'cursor-pointer hover:bg-pb-interactive-dim' : 'text-pb-text-sec'">
-                  <input type="radio" class="checkbox-pb !rounded-full shrink-0 mt-1" :name="'import-metadata-' + conflict.key" :value="option.source" :aria-label="option.source + ': ' + option.value" x-model="importMetadataChoices[conflict.key]" :disabled="importing || !option.selectable">
+                  <input type="radio" class="checkbox-pb !rounded-full shrink-0 mt-1" :name="'import-metadata-' + conflict.key" :value="option.source" :aria-label="option.source + ': ' + option.value" x-model="importMetadataChoices[conflict.key]" @change="if (importFields) importFields.choicesDirty = true" :disabled="importing || !option.selectable">
                   <span class="min-w-0 space-y-1"><span class="block text-xs font-semibold" x-text="option.source === 'library' ? 'Library' : option.source"></span><span class="block text-sm whitespace-pre-wrap break-words max-h-40 overflow-y-auto" x-text="option.value"></span></span>
                 </label>
               </template>
@@ -145,6 +156,7 @@
         <span x-show="!cancellingImport" x-text="['failed', 'safety_blocked', 'cancelled', 'metadata_review'].includes(importState) ? 'Close' : 'Cancel import'">Cancel import</span>
         <span x-show="cancellingImport">Cancelling…</span>
       </button>
+      <button type="button" class="btn-ghost btn-sm" x-show="importState === 'metadata_review' && importFields" x-cloak :disabled="importing" @click="submitImport(false, 'update')">Update preview</button>
       <button type="button" class="btn-primary btn-sm" x-show="importState === 'metadata_review'" x-cloak :disabled="!canImportReviewedMetadata()" @click="submitImport(true)">Import reviewed file</button>
     </div>
   </div>

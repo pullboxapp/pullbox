@@ -51,7 +51,11 @@ from pullbox.services.direct_acquisition_state import (
 )
 from pullbox.services.direct_download_history_adapter import sync_direct_download_history
 from pullbox.services.direct_metadata_file_proof import verify_file_proof
-from pullbox.services.issue_file_metadata import prepare_file_metadata, write_file_metadata
+from pullbox.services.issue_file_metadata import (
+    prepare_file_metadata,
+    repairable_metadata_field_error,
+    write_file_metadata,
+)
 from pullbox.services.issue_import_service import (
     execute_manual_issue_import,
     prepare_manual_issue_import,
@@ -377,14 +381,6 @@ async def _check_source(owner: RecoveryOwner) -> dict[str, int | str] | None:
         ) from exc
 
 
-def _repairable_field_error(exc: ArchiveMetadataRenderError) -> bool:
-    return exc.code in {
-        "rating_override_changed",
-        "label_override_changed",
-        "publisher_required",
-    } or (exc.code == "unsupported_content" and exc.field in {"StoryArc", "StoryArcNumber"})
-
-
 async def prepare_direct_metadata_recovery(
     session: AsyncSession,
     pending_id: int,
@@ -423,7 +419,7 @@ async def prepare_direct_metadata_recovery(
                 session, owner.issue_id, choices=choices, editor=editor
             )
         except ArchiveMetadataRenderError as exc:
-            if not (can_offer_repair and _repairable_field_error(exc)):
+            if not (can_offer_repair and repairable_metadata_field_error(exc)):
                 raise
             editor = IssueMetadataEditorReview()
             prepared = await prepare_file_metadata(session, owner.issue_id, editor=editor)
@@ -472,7 +468,7 @@ async def prepare_direct_metadata_recovery(
                 plan, owner.source, choices or {}, editor=editor
             )
         except ArchiveMetadataRenderError as exc:
-            if not (can_offer_repair and _repairable_field_error(exc)):
+            if not (can_offer_repair and repairable_metadata_field_error(exc)):
                 raise
             editor = IssueMetadataEditorReview()
             reviewed = await preview_manual_import_metadata(plan, owner.source, {}, editor=editor)

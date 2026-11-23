@@ -25,6 +25,19 @@ history stay untouched. The utility item records that result in the same databas
 transaction so a restarted worker cannot release a newer override. If the preview
 contains an actual XML change, the normal reviewed archive write still applies.
 
+### Manual Import
+
+When **Import File** finds a descriptive disagreement, the default choices
+still apply only to the new file. Choose **Edit issue fields** to save
+corrections to that issue as well. In editor mode only the current library
+value is selectable for series conflicts. Change shared catalog values through
+the series editor, not by editing a single issue.
+**Update preview** is read-only. **Import reviewed file** starts the normal
+background import; for an owned issue, **Replace File** is a separate decision.
+Declining it keeps the review open. A changed source, binding, or reviewed
+replacement invalidates approval. Pullbox checks the replacement's content digest
+before moving it aside. The selected source file is never the replacement target.
+
 ## Current Field Inventory
 
 | Field | Type / validation | ComicInfo | MetronInfo | Behavior |

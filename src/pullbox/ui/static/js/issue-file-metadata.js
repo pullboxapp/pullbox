@@ -1,8 +1,68 @@
 /* Preview and approve one managed comic; native conversion is explicit. */
+function issueEditorDraftState(fieldIdPrefix) {
+  return {
+    fieldIdPrefix: fieldIdPrefix, allFields: false, editorDrafts: {}, arcRowId: 0, choicesDirty: false,
+    initializeFields: function (data) {
+      this.allFields = false; this.editorDrafts = {};
+      (data.editor_fields || []).filter(field => field.editable).forEach(field => {
+        this.editorDrafts[field.key] = { selected: false, source: "library", value: this.initialEditorValue(field) };
+      });
+    },
+    editorFields: function () {
+      return (this.preview ? this.preview.editor_fields || [] : []).filter(field =>
+        this.allFields || field.differs || (this.editorDrafts[field.key] && this.editorDrafts[field.key].selected));
+    },
+    editorOptions: function (field) {
+      var options = (field.options || []).filter(option => option.selectable !== false).map(option => ({ value: option.source, label: option.source === "library" ? "Keep library value" : option.source }));
+      options.push({ value: "custom", label: "Enter correction" }, { value: "clear", label: "Clear value" });
+      if (field.overridden) options.push({ value: "reset", label: "Remove manual override" });
+      return options;
+    },
+    initialEditorValue: function (field) {
+      if (field.input_type === "arcs") {
+        return (field.arc_draft && field.arc_draft.length ? field.arc_draft : [{ name: "", position: null }])
+          .map(entry => this.arcRow(entry));
+      }
+      if (!field.xml_conflict_key || (field.allowed_values && field.allowed_values.length) || field.current || field.overridden) return field.current || "";
+      var files = field.options.filter(option => option.source !== "library");
+      return files.length && files.every(option => option.selectable !== false && option.value === files[0].value)
+        ? files[0].value : "";
+    },
+    arcRow: function (entry = {}) {
+      return { key: ++this.arcRowId, name: entry.name || "", position: entry.position == null ? "" : String(entry.position) };
+    },
+    arcValues: function (rows) {
+      if (!rows.length) throw new Error("Choose Clear value to remove all embedded arcs.");
+      return rows.map(row => {
+        if (!row.name.trim() || row.name.includes(",")) throw new Error("Each arc needs a name without commas.");
+        if (row.position !== "" && (!/^\d{1,10}$/.test(row.position) || Number(row.position) < 1))
+          throw new Error("Enter a positive whole arc position or leave it blank.");
+        return { name: row.name, position: row.position === "" ? null : Number(row.position) };
+      });
+    },
+    selectEditorFields: function (selected) {
+      (this.preview.editor_fields || []).filter(field => field.editable).forEach(field => { this.editorDrafts[field.key].selected = selected; });
+      this.choicesDirty = true;
+    },
+    editorEdits: function () {
+      var edits = {};
+      Object.keys(this.editorDrafts).forEach(key => {
+        var draft = this.editorDrafts[key];
+        if (!draft.selected) return;
+        edits[key.slice(6)] = draft.source === "custom"
+          ? { source: draft.source, value: key === "issue.story_arcs" ? this.arcValues(draft.value) : draft.value }
+          : { source: draft.source };
+      });
+      return edits;
+    },
+  };
+}
+
 function issueFileMetadata(issueId) {
   var endpoint = issueId ? "/api/v1/issues/" + issueId + "/file-metadata" : "";
   return {
-    recovery: !issueId, resolved: false, editor: false, allFields: false, editorDrafts: {}, arcRowId: 0,
+    ...issueEditorDraftState("editor-"),
+    recovery: !issueId, resolved: false, editor: false,
     open: false, busy: false, error: "", preview: null, job: null, choices: {}, choicesDirty: false,
     timer: null, disposed: false, trigger: null, generation: 0, jobGeneration: 0,
     init: function () { if (endpoint) this.loadJob(); },
@@ -74,53 +134,6 @@ function issueFileMetadata(issueId) {
       var conflicts = this.preview ? this.preview.conflicts || [] : [];
       return !this.editor ? conflicts : this.recovery ? conflicts.filter(row => row.key.startsWith("series.")) : [];
     },
-    editorFields: function () {
-      return (this.preview ? this.preview.editor_fields || [] : []).filter(field =>
-        this.allFields || field.differs || (this.editorDrafts[field.key] && this.editorDrafts[field.key].selected));
-    },
-    editorOptions: function (field) {
-      var options = (field.options || []).filter(option => option.selectable !== false).map(option => ({ value: option.source, label: option.source === "library" ? "Keep library value" : option.source }));
-      options.push({ value: "custom", label: "Enter correction" }, { value: "clear", label: "Clear value" });
-      if (field.overridden) options.push({ value: "reset", label: "Remove manual override" });
-      return options;
-    },
-    initialEditorValue: function (field) {
-      if (field.input_type === "arcs") {
-        return (field.arc_draft && field.arc_draft.length ? field.arc_draft : [{ name: "", position: null }])
-          .map(entry => this.arcRow(entry));
-      }
-      if (!field.xml_conflict_key || (field.allowed_values && field.allowed_values.length) || field.current || field.overridden) return field.current || "";
-      var files = field.options.filter(option => option.source !== "library");
-      return files.length && files.every(option => option.selectable !== false && option.value === files[0].value)
-        ? files[0].value : "";
-    },
-    arcRow: function (entry = {}) {
-      return { key: ++this.arcRowId, name: entry.name || "", position: entry.position == null ? "" : String(entry.position) };
-    },
-    arcValues: function (rows) {
-      if (!rows.length) throw new Error("Choose Clear value to remove all embedded arcs.");
-      return rows.map(row => {
-        if (!row.name.trim() || row.name.includes(",")) throw new Error("Each arc needs a name without commas.");
-        if (row.position !== "" && (!/^\d{1,10}$/.test(row.position) || Number(row.position) < 1))
-          throw new Error("Enter a positive whole arc position or leave it blank.");
-        return { name: row.name, position: row.position === "" ? null : Number(row.position) };
-      });
-    },
-    selectEditorFields: function (selected) {
-      (this.preview.editor_fields || []).filter(field => field.editable).forEach(field => { this.editorDrafts[field.key].selected = selected; });
-      this.choicesDirty = true;
-    },
-    editorEdits: function () {
-      var edits = {};
-      Object.keys(this.editorDrafts).forEach(key => {
-        var draft = this.editorDrafts[key];
-        if (!draft.selected) return;
-        edits[key.slice(6)] = draft.source === "custom"
-          ? { source: draft.source, value: key === "issue.story_arcs" ? this.arcValues(draft.value) : draft.value }
-          : { source: draft.source };
-      });
-      return edits;
-    },
     reviewEndpoint: function () {
       return this.editor && !this.recovery ? endpoint.replace("/file-metadata", "/metadata-editor") : endpoint;
     },
@@ -173,10 +186,7 @@ function issueFileMetadata(issueId) {
         this.preview = data; this.job = null;
         if (this.recovery) this.editor = !!(data.editor_fields && data.editor_fields.length);
         if (this.editor && reset) {
-          this.allFields = false; this.editorDrafts = {};
-          (data.editor_fields || []).filter(field => field.editable).forEach(field => {
-            this.editorDrafts[field.key] = { selected: false, source: "library", value: this.initialEditorValue(field) };
-          });
+          this.initializeFields(data);
         }
         this.choices = {};
         (data.conflicts || []).forEach(conflict => { if (conflict.selected) this.choices[conflict.key] = conflict.selected; });

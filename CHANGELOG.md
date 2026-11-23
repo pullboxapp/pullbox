@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- When **Import File** finds a metadata disagreement, choose **Edit issue fields**
+  to correct issue values, preview both XML documents, and import the reviewed
+  copy. The selected source stays unchanged. Replacing an owned copy requires
+  separate confirmation.
 - In Intervention → Recovery, use **Edit issue fields** to correct a verified
   managed CBZ or ZIP and finish recovery with one approval. Pullbox preserves
   the retained download and will not use this action to edit a replacement copy.

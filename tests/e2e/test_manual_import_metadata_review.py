@@ -40,6 +40,107 @@ def enable_manual_metadata(seeded_server, monkeypatch):
         _run_async_blocking(configure(previous))
 
 
+@pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 390), ("tron", 1280)])
+def test_manual_editor_requires_updated_preview_and_replacement_consent(
+    authed_page, seeded_server, theme, width
+):
+    page = authed_page
+    page.set_viewport_size({"width": width, "height": 780})
+    endpoint = "**/api/v1/issues/2/import-file"
+    starts = []
+
+    def preview(route):
+        body = route.request.post_data_json
+        editor = body.get("editor")
+        title = (editor or {}).get("edits", {}).get("title", {}).get("value")
+        route.fulfill(
+            json={
+                "ready": bool(title),
+                "review_key": ("b" if title else "a") * 64,
+                "context_key": "c" * 64,
+                "editor_available": True,
+                "existing_file_id": 18,
+                "changes": [
+                    {
+                        "document": "ComicInfo.xml",
+                        "field": "Title",
+                        "before": "Original",
+                        "after": title,
+                    }
+                ]
+                if title
+                else [],
+                "conflicts": []
+                if editor is not None
+                else [{"key": "issue.title", "label": "Issue title", "options": []}],
+                "editor_fields": [
+                    {
+                        "key": "issue.title",
+                        "label": "Title",
+                        "current": "Original",
+                        "editable": True,
+                        "differs": True,
+                        "input_type": "text",
+                        "selected": bool(title),
+                        "proposed": title,
+                        "options": [{"source": "library", "value": "Original"}],
+                    }
+                ]
+                if editor is not None
+                else [],
+            }
+        )
+
+    def start(route):
+        starts.append(route.request.post_data_json)
+        route.fulfill(status=202, json={"issue_id": 2, "state": "running", "message": "Importing"})
+
+    page.route(endpoint + "/metadata-preview", preview)
+    page.route(endpoint + "/start", start)
+    page.route(
+        endpoint + "/progress",
+        lambda route: route.fulfill(
+            json={"issue_id": 2, "state": "running", "current_file_progress_pct": 40}
+        ),
+    )
+    page.goto(f"{seeded_server}/issues/2")
+    page.evaluate("theme => applyTheme(theme)", theme)
+    page.evaluate(
+        """() => Alpine.$data(document.querySelector('[data-testid="issue-detail-page"]')).applyImportFileSelection({path:'/imports/manual-editor.cbz',name:'manual-editor.cbz',size:100})"""
+    )
+    dialog = page.get_by_test_id("issue-import-modal")
+    dialog.get_by_role("button", name="Edit issue fields").click()
+    dialog.get_by_role("checkbox", name="Update Title", exact=True).check()
+    dialog.get_by_role("button", name="Value source for Title", exact=True).click()
+    page.get_by_role("option", name="Enter correction", exact=True).click()
+    dialog.get_by_label("New Title", exact=True).fill("My correction")
+    submit = dialog.get_by_role("button", name="Import reviewed file")
+    expect(submit).to_be_disabled()
+    dialog.get_by_role("button", name="Update preview").click()
+    expect(dialog.get_by_text("Approved preview: My correction", exact=True)).to_be_visible()
+    expect(submit).to_be_enabled()
+    dialog.get_by_text("Changes to the XML documents").click()
+    expect(dialog.get_by_text("Proposed: My correction", exact=True)).to_be_visible()
+    assert not starts
+    assert_no_axe_violations(
+        page, name=f"manual-import-editor-{theme}", include=['[data-testid="issue-import-modal"]']
+    )
+    submit.click()
+    confirm = page.get_by_role("dialog", name="Replace Issue File")
+    confirm.get_by_role("button", name="Cancel").click()
+    expect(submit).to_be_enabled()
+    assert not starts
+    submit.click()
+    page.get_by_role("button", name="Replace File", exact=True).click()
+    expect(dialog.get_by_role("progressbar")).to_have_attribute("aria-valuenow", "40")
+    assert starts[0]["metadata_approval"] == {
+        "review_key": "b" * 64,
+        "choices": {},
+        "replace_file_id": 18,
+        "editor": {"edits": {"title": {"source": "custom", "value": "My correction"}}},
+    }
+
+
 @pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 390), ("dark", 1280)])
 def test_manual_import_reviews_fields_before_start(
     authed_page, seeded_server, theme, width, tmp_path

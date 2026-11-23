@@ -45,6 +45,8 @@ async def apply_bound_archive_metadata(
     binding: ArchiveMetadataBinding,
     series_snapshot: MetadataSnapshot,
     issue_snapshot: MetadataSnapshot,
+    *,
+    issue_only: bool = False,
 ) -> None:
     """Apply a proven publication's descriptive values without changing identities/counts."""
     bound = binding.metadata
@@ -56,21 +58,22 @@ async def apply_bound_archive_metadata(
         or issue_snapshot.values.issue_number_text != bound.issues[0].values.issue_number_text
     ):
         raise ArchivePublicationError("invalid_plan")
+    entities = [(bound.issues[0], issue_snapshot)]
     async with metadata_write_scope(session):
-        series = await session.get(Series, bound.series.local_id)
+        if not issue_only:
+            entities.insert(0, (bound.series, series_snapshot))
+            series = await session.get(Series, bound.series.local_id)
+            assert series is not None
+            await apply_series_metadata_values(session, series, series_snapshot.values)
         issue = await session.get(Issue, bound.issues[0].local_id)
-        assert series is not None and issue is not None
-        await apply_series_metadata_values(session, series, series_snapshot.values)
+        assert issue is not None
         apply_issue_metadata_values(issue, issue_snapshot.values)
         await write_issue_credits(session, {issue.id: issue_snapshot.values.credits})
         await save_metadata_baselines(
             session,
             [
                 MetadataBaselineWrite(entity.local_id, snapshot, entity.baseline_revision)
-                for entity, snapshot in (
-                    (bound.series, series_snapshot),
-                    (bound.issues[0], issue_snapshot),
-                )
+                for entity, snapshot in entities
                 if entity.baseline != snapshot
             ],
         )

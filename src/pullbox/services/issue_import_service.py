@@ -27,9 +27,13 @@ from pullbox.core.library_root_resolution import preferred_managed_root_id
 from pullbox.models.issue import Issue
 from pullbox.models.library import LibraryFile, MatchConfidence
 from pullbox.models.series import Series
+from pullbox.schemas.issue import ManualMetadataApproval
 from pullbox.services.archive_metadata_binding import ArchiveMetadataBindingError
 from pullbox.services.issue_file_service import resolve_configured_utility_trash_dir
-from pullbox.services.manual_import_metadata_review import preview_manual_import_metadata
+from pullbox.services.manual_import_metadata_review import (
+    preview_manual_import_metadata,
+    preview_manual_source_metadata,
+)
 from pullbox.services.manual_paired_metadata import (
     materialize_manual_metadata,
     read_manual_metadata_plan,
@@ -214,6 +218,10 @@ async def execute_manual_issue_import(
         raise ManualIssueImportError(
             status_code=409, detail="A current restoration preview is required."
         )
+    manual_approval = (
+        metadata_approval if isinstance(metadata_approval, ManualMetadataApproval) else None
+    )
+    editor = manual_approval.editor if manual_approval is not None else recovery_editor
     # Paired metadata imports always copy to the library, even under a Move policy.
     if not paired and prepared.ingest_policy.post_processing_method == "move":
         await asyncio.to_thread(_check_move_source, prepared.source_path)
@@ -264,8 +272,13 @@ async def execute_manual_issue_import(
         )
         if metadata_approval is not None:
             try:
-                reviewed = await preview_manual_import_metadata(
-                    plan, prepared.source_path, metadata_approval.choices, editor=recovery_editor
+                prepare_review = (
+                    preview_manual_source_metadata
+                    if manual_approval is not None
+                    else preview_manual_import_metadata
+                )
+                reviewed = await prepare_review(
+                    plan, prepared.source_path, metadata_approval.choices, editor=editor
                 )
                 if (
                     not reviewed.preview.ready
@@ -377,6 +390,13 @@ async def execute_manual_issue_import(
         )
 
     existing_library_file = getattr(prepared.issue, "__dict__", {}).get("library_file")
+    if manual_approval is not None and editor is not None:
+        current_file_id = existing_library_file.id if existing_library_file is not None else None
+        if manual_approval.replace_file_id != current_file_id:
+            raise ManualIssueImportError(
+                status_code=409,
+                detail="Review and confirm the current file replacement before importing.",
+            )
     if restore_only and existing_library_file is not None:
         raise ManualIssueImportError(
             status_code=409, detail="A library copy already exists. Preview recovery again."
@@ -397,7 +417,8 @@ async def execute_manual_issue_import(
         converter=converter,
         comicinfo_progress_callback=comicinfo_progress_callback,
         comicinfo_materializer=materialize_cbz_with_progress,
-        strict_import_target=restore_only,
+        strict_import_target=restore_only or (editor is not None and existing_library_file is None),
+        reviewed_replacement_signature=reviewed.replacement_signature if reviewed else None,
         replace_existing_library_file=not restore_only and existing_library_file is not None,
         replacement_trash_dir=await resolve_configured_utility_trash_dir(session)
         if existing_library_file is not None
@@ -406,7 +427,12 @@ async def execute_manual_issue_import(
     if paired:
         library_file.has_comicinfo = True
 
-    if recovery_editor is not None and reviewed is not None and plan is not None:
+    if (
+        editor is not None
+        and (manual_approval is None or editor.edits)
+        and reviewed is not None
+        and plan is not None
+    ):
         from pullbox.services.archive_metadata_binding import (
             lock_archive_metadata_binding,
             read_archive_metadata_binding,
@@ -425,7 +451,13 @@ async def execute_manual_issue_import(
                 status_code=409,
                 detail="Issue metadata changed after preview. Review the library copy.",
             )
-        await apply_bound_archive_metadata(session, binding, reviewed.series, reviewed.issue)
+        await apply_bound_archive_metadata(
+            session,
+            binding,
+            reviewed.series,
+            reviewed.issue,
+            issue_only=manual_approval is not None,
+        )
 
     return ManualIssueImportResult(
         issue_id=prepared.issue_id,

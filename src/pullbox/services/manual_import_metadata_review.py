@@ -7,9 +7,10 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, Field, TypeAdapter
 
 from pullbox.core.archive import ArchiveError
 from pullbox.core.archive_metadata import (
@@ -18,10 +19,17 @@ from pullbox.core.archive_metadata import (
     MetadataFile,
     read_archive_metadata,
 )
-from pullbox.core.library_file_ownership import build_file_identity_signature
+from pullbox.core.library_file_ownership import (
+    build_file_identity_signature,
+    build_managed_placement_signature,
+)
 from pullbox.schemas.issue_file_metadata import (  # noqa: TC001 - Pydantic field
+    FileMetadataChange,
     FileMetadataConflict,
     SharedXmlChoices,
+)
+from pullbox.schemas.issue_metadata_editor import (
+    IssueMetadataEditorField,  # noqa: TC001 - Pydantic field
 )
 from pullbox.services.archive_metadata_binding import (
     assemble_archive_metadata_state,
@@ -33,13 +41,10 @@ from pullbox.services.archive_metadata_rendering import (
 )
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from pullbox.core.metadata_identity import ExternalIdentityRef
-    from pullbox.schemas.issue_file_metadata import FileMetadataChange, FileMetadataChoices
+    from pullbox.schemas.issue_file_metadata import FileMetadataChoices
     from pullbox.schemas.issue_metadata_editor import (
         EditorXmlField,
-        IssueMetadataEditorField,
         IssueMetadataEditorReview,
     )
     from pullbox.schemas.metadata_snapshot import MetadataSnapshot
@@ -54,6 +59,13 @@ class ManualImportMetadataPreview(BaseModel):
     conflicts: list[FileMetadataConflict]
 
 
+class ManualSourcePreview(ManualImportMetadataPreview):
+    editor_available: bool = True
+    editor_fields: list[IssueMetadataEditorField] = Field(default_factory=list)
+    changes: list[FileMetadataChange] = Field(default_factory=list)
+    existing_file_id: int | None = None
+
+
 @dataclass(frozen=True)
 class ReviewedManualMetadata:
     series: MetadataSnapshot
@@ -63,8 +75,35 @@ class ReviewedManualMetadata:
     shared_choices: SharedXmlChoices | None = None
     reviewed_xml_fields: frozenset[EditorXmlField] = frozenset()
     approved_pair: RenderedArchiveMetadata | None = None
+    replacement_signature: dict[str, int | str] | None = None
     editor_fields: list[IssueMetadataEditorField] = field(default_factory=list)
     changes: list[FileMetadataChange] = field(default_factory=list)
+
+
+async def preview_manual_source_metadata(
+    plan: ManualMetadataPlan,
+    source: Path,
+    choices: FileMetadataChoices,
+    *,
+    editor: IssueMetadataEditorReview | None = None,
+) -> ReviewedManualMetadata:
+    """Issue corrections cannot create a private alternative to the series catalog."""
+    from pullbox.services.issue_metadata_editor import IssueMetadataEditError
+
+    note = "Keep the library value here. To change it for the series, use the series editor."
+    if editor is not None and any(
+        key.startswith("series.") and value != "library" for key, value in choices.items()
+    ):
+        raise IssueMetadataEditError(note)
+    reviewed = await preview_manual_import_metadata(plan, source, choices, editor=editor)
+    if editor is not None:
+        for conflict in reviewed.preview.conflicts:
+            if conflict.key.startswith("series."):
+                conflict.note = note
+                for option in conflict.options:
+                    if option.source != "library":
+                        option.selectable = False
+    return reviewed
 
 
 async def preview_manual_import_metadata(
@@ -124,6 +163,18 @@ def _preview(
         {"path": str(source), "fingerprint": fingerprint}, sort_keys=True
     ).encode()
     evidence += (files.comicinfo.payload or b"") + (files.metroninfo.payload or b"")
+    replacement_signature = None
+    if editor is not None and plan.existing_file is not None:
+        target = Path(plan.existing_file[1])
+        if target.is_symlink() or not target.is_file() or source.samefile(target):
+            from pullbox.services.issue_metadata_editor import IssueMetadataEditError
+
+            raise IssueMetadataEditError(
+                "Choose a separate source file to replace an existing, available managed copy. "
+                "To edit the current file in place, use Edit metadata on the issue page."
+            )
+        replacement_signature = build_managed_placement_signature(target)
+        evidence += json.dumps(replacement_signature, sort_keys=True).encode()
     context_key = hashlib.sha256(evidence).hexdigest()
     evidence += json.dumps(choices, sort_keys=True).encode()
     if editor is not None:
@@ -149,4 +200,5 @@ def _preview(
         shared_choices=shared_choices,
         reviewed_xml_fields=editor.reviewed_xml_fields if editor is not None else frozenset(),
         approved_pair=rendered if editor is not None else None,
+        replacement_signature=replacement_signature,
     )

@@ -1,0 +1,9 @@
+<div class="space-y-2 max-h-80 overflow-y-auto" data-testid="file-metadata-changes" x-show="!choicesDirty && preview && preview.ready !== false">
+  <template x-for="(change, index) in (preview ? (preview.changes || []) : [])" :key="index">
+    <article class="rounded-lg border border-pb-border p-3 space-y-1">
+      <p class="text-xs font-semibold text-pb-text break-all" x-text="change.document + ' · ' + change.field"></p>
+      <p class="text-sm text-pb-text-sec break-words" x-text="'Current: ' + (change.before === null ? 'Not set' : change.before)"></p>
+      <p class="text-sm text-pb-text break-words" x-text="'Proposed: ' + (change.after === null ? 'Not set' : change.after)"></p>
+    </article>
+  </template>
+</div>

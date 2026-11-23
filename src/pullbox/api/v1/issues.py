@@ -75,8 +75,8 @@ from pullbox.services.issue_import_service import (
 )
 from pullbox.services.issue_service import IssueService
 from pullbox.services.manual_import_metadata_review import (
-    ManualImportMetadataPreview,
-    preview_manual_import_metadata,
+    ManualSourcePreview,
+    preview_manual_source_metadata,
 )
 from pullbox.services.manual_paired_metadata import read_manual_metadata_plan
 from pullbox.services.release_validator import (
@@ -1210,14 +1210,14 @@ async def download_issue(
 
 @router.post(
     "/{issue_id}/import-file/metadata-preview",
-    response_model=ManualImportMetadataPreview | None,
+    response_model=ManualSourcePreview | None,
 )
 async def preview_import_file_metadata(
     issue_id: int,
     body: ManualFileImportPreviewRequest,
     _user: AuthenticatedUser,
     session: DbSession,
-) -> ManualImportMetadataPreview | None:
+) -> ManualSourcePreview | None:
     """Review the selected source without registering it or modifying either file."""
     from pullbox.config import get_settings
     from pullbox.services.issue_file_metadata import file_metadata_error
@@ -1237,7 +1237,29 @@ async def preview_import_file_metadata(
         plan = await read_manual_metadata_plan(session, issue_id)
         source = prepared.source_path
         await session.rollback()
-        return (await preview_manual_import_metadata(plan, source, body.choices)).preview
+        from pullbox.schemas.issue_metadata_editor import IssueMetadataEditorReview
+        from pullbox.services.archive_metadata_rendering import ArchiveMetadataRenderError
+        from pullbox.services.issue_file_metadata import repairable_metadata_field_error
+
+        editor = body.editor
+        try:
+            reviewed = await preview_manual_source_metadata(
+                plan, source, body.choices, editor=editor
+            )
+        except ArchiveMetadataRenderError as exc:
+            if editor is not None or body.choices or not repairable_metadata_field_error(exc):
+                raise
+            reviewed = await preview_manual_source_metadata(
+                plan, source, {}, editor=IssueMetadataEditorReview()
+            )
+            if reviewed.preview.ready:
+                raise
+        return ManualSourcePreview(
+            **reviewed.preview.model_dump(),
+            editor_fields=reviewed.editor_fields,
+            changes=reviewed.changes,
+            existing_file_id=plan.existing_file[0] if plan.existing_file else None,
+        )
     except ManualIssueImportError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     except (ValueError, OSError) as exc:

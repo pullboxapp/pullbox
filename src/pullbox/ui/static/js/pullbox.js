@@ -19603,6 +19603,7 @@ function issueDetailPage(config) {
     importReplacementConfirmed: false,
     importMetadataPreview: null,
     importMetadataChoices: {},
+    importFields: null,
     importPreviewController: null,
     importModalOpen: false,
     importPollTimer: null,
@@ -19700,6 +19701,7 @@ function issueDetailPage(config) {
       this.importReplacementConfirmed = false;
       this.importMetadataPreview = null;
       this.importMetadataChoices = {};
+      this.importFields = null;
       this.submitImport();
     },
 
@@ -19709,7 +19711,7 @@ function issueDetailPage(config) {
 
     trapImportFocus: function (event) {
       var dialog = event.currentTarget;
-      var elements = Array.from(dialog.querySelectorAll('button:not([disabled]), input:not([disabled]), a[href], [tabindex="0"]'))
+      var elements = Array.from(dialog.querySelectorAll('button:not([disabled]), input:not([disabled]), textarea:not([disabled]), a[href], [tabindex="0"]'))
         .filter(function (element) { return element.getClientRects().length > 0; });
       var first = elements[0], last = elements[elements.length - 1];
       if (!first) { event.preventDefault(); return; }
@@ -19973,8 +19975,16 @@ function issueDetailPage(config) {
       return (bytes / 1048576).toFixed(1) + " MB";
     },
 
+    beginImportEditor: function () {
+      if (this.importing) return;
+      this.importFields = Object.assign(issueEditorDraftState("import-editor-"), { preview: null, busy: false });
+      this.importMetadataChoices = Object.fromEntries(Object.entries(this.importMetadataChoices).filter(([key, source]) => key.startsWith("series.") && source === "library"));
+      return this.submitImport(false, "open");
+    },
+
     canImportReviewedMetadata: function () {
       var self = this;
+      if (self.importFields) return !self.importing && !self.importFields.choicesDirty && self.importFields.preview && self.importFields.preview.ready;
       return !self.importing && self.importMetadataPreview &&
         self.importMetadataPreview.conflicts.every(function (conflict) {
           return conflict.options.some(function (option) {
@@ -19983,22 +19993,8 @@ function issueDetailPage(config) {
         });
     },
 
-    submitImport: async function (approveMetadata) {
+    submitImport: async function (approveMetadata, editorAction) {
       if (!this.form.file_path || this.importing) return;
-
-      if (cfg.hasLibraryFile && !this.importReplacementConfirmed) {
-        var replaceConfirmed = await pbConfirm({
-          title: "Replace Issue File",
-          message:
-            "Pullbox will replace the current file for this issue using your import settings. This action cannot be rolled back.",
-          confirmText: "Replace File",
-          destructive: true,
-        });
-        if (!replaceConfirmed) {
-          return;
-        }
-        this.importReplacementConfirmed = true;
-      }
 
       this.importing = true;
       this.importModalOpen = true;
@@ -20019,28 +20015,66 @@ function issueDetailPage(config) {
         var approval = null;
         if (cfg.pairedImportMetadata && cfg.importMetadataPreviewUrl) {
           this.importState = "checking";
+          var last = this.importMetadataPreview;
+          var edits = this.importFields ? { edits: this.importFields.editorEdits() } : null;
+          var body = { file_path: this.form.file_path, move_to_library: this.form.move_to_library, choices: this.importMetadataChoices };
+          if (edits) body.editor = edits;
           this.importMessage = "Checking file metadata...";
           this.importPreviewController = new AbortController();
           var previewResponse = await fetch(cfg.importMetadataPreviewUrl, {
             method: "POST",
             headers: { "Content-Type": "application/json", "X-CSRF-Token": this.csrfToken() },
             signal: this.importPreviewController.signal,
-            body: JSON.stringify({ file_path: this.form.file_path, move_to_library: this.form.move_to_library, choices: this.importMetadataChoices }),
+            body: JSON.stringify(body),
           });
           var preview = await previewResponse.json();
-          if (!previewResponse.ok) throw new Error(preview.detail || "Unable to review file metadata.");
-          var changed = preview && this.importMetadataPreview &&
-            preview.context_key !== this.importMetadataPreview.context_key;
-          if (changed) this.importMetadataChoices = {};
+          if (!previewResponse.ok) throw new Error(_extractApiErrorMessage(previewResponse, preview, "Unable to review file metadata."));
+          if (!preview && (last || edits)) throw new Error("Paired import settings changed. Close this review and select the file again.");
+          var changed = preview && last && editorAction !== "open" && preview.context_key !== last.context_key;
           this.importMetadataPreview = preview;
-          if (preview && (changed || (preview.conflicts.length && (!approveMetadata || !preview.ready)))) {
+          if (preview && (this.importFields || (preview.editor_fields || []).length)) {
+            if (!this.importFields) {
+              this.importFields = Object.assign(issueEditorDraftState("import-editor-"), { busy: false });
+              editorAction = "open";
+            }
+            this.importFields.preview = preview;
+            if (changed || editorAction === "open") this.importFields.initializeFields(preview);
+            if (changed) { this.importMetadataChoices = {}; this.importReplacementConfirmed = false; }
+            this.importFields.choicesDirty = !!changed;
+            if (!approveMetadata || changed || !preview.ready || !last || preview.review_key !== last.review_key) {
+              this.importState = "metadata_review";
+              this.importMessage = changed ? "File or catalog changed. Review the current values and update the preview." : "Review file metadata";
+              this.importing = false;
+              return;
+            }
+          } else if (preview && (changed || (preview.conflicts.length && (!approveMetadata || !preview.ready)))) {
+            if (changed) this.importMetadataChoices = {};
             this.importState = "metadata_review";
             this.importMessage = changed ? "File or catalog changed. Review the current values." : "Review file metadata";
             this.importing = false;
             return;
           }
-          if (preview) approval = { review_key: preview.review_key, choices: this.importMetadataChoices };
+          if (preview) {
+            approval = { review_key: preview.review_key, choices: this.importMetadataChoices };
+            if (edits) approval.editor = edits;
+          }
         }
+        if ((cfg.hasLibraryFile || (preview && preview.existing_file_id)) && (!this.importReplacementConfirmed || (approval && approval.editor))) {
+          this.importModalOpen = false;
+          var replaceConfirmed = await pbConfirm({
+            title: "Replace Issue File",
+            message: "Pullbox will replace the current file for this issue using your import settings. This action cannot be rolled back.",
+            confirmText: "Replace File", destructive: true,
+          });
+          if (!replaceConfirmed) {
+            this.importState = last ? "metadata_review" : "idle";
+            this.importModalOpen = !!last; this.importing = false;
+            return;
+          }
+          this.importModalOpen = true;
+          this.importReplacementConfirmed = true;
+        }
+        if (approval && approval.editor && preview.existing_file_id) approval.replace_file_id = preview.existing_file_id;
         this.importState = "running";
         var requestBody = {
           file_path: this.form.file_path,
@@ -20077,6 +20111,11 @@ function issueDetailPage(config) {
         if (error.name === "AbortError") {
           this.importState = "cancelled";
           this.importModalOpen = false;
+          return;
+        }
+        if (this.importFields && this.importMetadataPreview && this.importState !== "running") {
+          this.importState = "metadata_review"; this.importMessage = error.message || "Update the metadata preview again.";
+          this.importFields.choicesDirty = true;
           return;
         }
         this.importState = "failed";

@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from pullbox.models.issue import IssueStatus
 from pullbox.schemas.issue_file_metadata import FileMetadataApproval, FileMetadataReview
+from pullbox.schemas.issue_metadata_editor import IssueMetadataEditorReview
 
 
 class IssueUpdate(BaseModel):
@@ -41,6 +42,11 @@ class IssueResponse(BaseModel):
     updated_at: datetime
 
 
+class ManualMetadataApproval(FileMetadataApproval):
+    editor: IssueMetadataEditorReview | None = None
+    replace_file_id: int | None = Field(default=None, gt=0)
+
+
 class ManualFileImportRequest(BaseModel):
     """Request body for manually importing a file for an issue."""
 
@@ -55,11 +61,13 @@ class ManualFileImportRequest(BaseModel):
         False,
         description="Allow one explicit resource safety exception for this manual import attempt.",
     )
-    metadata_approval: FileMetadataApproval | None = None
+    metadata_approval: ManualMetadataApproval | None = None
 
 
 class ManualFileImportPreviewRequest(ManualFileImportRequest, FileMetadataReview):
-    """Inspect the selected file and choose only values read from that file or library."""
+    """Inspect a selected source without writing its library copy."""
+
+    editor: IssueMetadataEditorReview | None = None
 
 
 class ManualFileImportResponse(BaseModel):
