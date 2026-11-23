@@ -11,6 +11,7 @@ from pullbox.core.comicinfo_text import (
     FLAG_CHOICES,
     descriptive_text,
     embedded_comicinfo_value,
+    selectable_main_name,
 )
 from pullbox.core.issue_community_rating import (
     RATING_HELP,
@@ -57,6 +58,8 @@ EDITABLE_FIELDS = {
     "description": ("Summary", "textarea"),
     "review": ("Review", "textarea"),
     "scan_information": ("Scan information", "textarea"),
+    "main_character_or_team": ("Main character or team", "text"),
+    "series_groups": ("Series groups", "textarea"),
     "black_and_white": ("Black and white", "text"),
     "manga": ("Manga", "text"),
     "notes": ("Notes", "textarea"),
@@ -72,6 +75,9 @@ EDITABLE_FIELDS = {
 }
 
 FIELD_HELP = {
+    "main_character_or_team": "ComicInfo.xml only. One featured name, not a cast list.",
+    "series_groups": "ComicInfo.xml only. One group per line. Changing these labels "
+    "does not move the issue or change its tracked series.",
     "black_and_white": "ComicInfo.xml only. Clear removes the tag; Unknown writes Unknown.",
     "manga": "ComicInfo.xml only. Yes (right to left) records the reading direction of the book. "
     "It does not change your reader settings, page order, or the Metron manga volume.",
@@ -114,11 +120,13 @@ def display_editor_value(value: object) -> str:
 
 
 def _selectable(field: str, value: object) -> bool:
+    if field == "main_character_or_team":
+        return selectable_main_name(value)
     if field in FLAG_CHOICES:
         return value is None or value in FLAG_CHOICES[field]
     if field == "community_rating":
         return value is None or shared_score(value) is not None
-    if field in LABEL_XML_PATHS:
+    if field in LABEL_XML_PATHS or field == "series_groups":
         return selectable_labels(value)
     if field == "story_arcs":
         return not isinstance(value, str)
@@ -162,7 +170,7 @@ def _custom_value(field: str, text: str) -> object:
             raise IssueMetadataEditError(
                 f"Choose a listed {EDITABLE_FIELDS[field][0]} value or clear it."
             )
-    elif field in COMICINFO_ONLY_TAGS:
+    elif field in COMICINFO_ONLY_TAGS and field != "series_groups":
         try:
             value = descriptive_text(text)
         except ValueError as exc:
@@ -176,11 +184,11 @@ def _custom_value(field: str, text: str) -> object:
                 "Catalog page count must be a whole number from 0 to 1000000."
             )
         value = int(text)
-    elif field in LABEL_XML_PATHS:
+    elif field in LABEL_XML_PATHS or field == "series_groups":
         value = tuple(line.strip() for line in text.split("\n") if line.strip())
         if not selectable_labels(value):
             raise IssueMetadataEditError(
-                f"Enter up to 128 distinct {field}, one per line, with no commas "
+                f"Enter up to 128 distinct {field.replace('_', ' ')}, one per line, with no commas "
                 "and no more than 255 characters per entry."
             )
     elif field == "imprint" and not selectable_imprint(text):
@@ -202,6 +210,14 @@ def _custom_value(field: str, text: str) -> object:
     try:
         return getattr(MetadataValues.model_validate({field: value}), field)
     except ValidationError:
+        if field == "series_groups":
+            raise IssueMetadataEditError(
+                "Use series group names without comic identifiers."
+            ) from None
+        if field == "main_character_or_team":
+            raise IssueMetadataEditError(
+                "Use one printable name of up to 255 characters."
+            ) from None
         raise IssueMetadataEditError(
             f"Enter a valid {EDITABLE_FIELDS[field][0].lower()}."
         ) from None
@@ -301,6 +317,12 @@ def prepare_issue_editor(
                     )
                 if field == "community_rating" and not _selectable(field, options[edit.source]):
                     raise IssueMetadataEditError(RATING_HELP)
+                if field in {"main_character_or_team", "series_groups"} and not _selectable(
+                    field, options[edit.source]
+                ):
+                    raise IssueMetadataEditError(
+                        f"{label} cannot be adopted as stored. Enter a correction or clear it."
+                    )
                 if field in FLAG_CHOICES and not _selectable(field, options[edit.source]):
                     raise IssueMetadataEditError(
                         f"Unrecognized {label} value. Choose a listed correction or clear it."

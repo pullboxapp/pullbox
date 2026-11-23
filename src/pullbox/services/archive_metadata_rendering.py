@@ -235,7 +235,7 @@ def _render_comicinfo_fields(
         if field not in reviewed:
             raise ArchiveMetadataRenderError("label_override_changed", tag)
         before = document_ids()
-        set_text(ci, tag, desired)
+        set_text(ci, tag, ", ".join(desired) if field == "series_groups" and desired else desired)
         if before != document_ids():
             raise ArchiveMetadataRenderError("comicinfo_text_identity_change", tag)
 

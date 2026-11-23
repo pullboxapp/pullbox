@@ -60,6 +60,8 @@ before moving it aside. The selected source file is never the replacement target
 | Issue title | Bounded text | Title | Stories/Story | Editable |
 | Summary | Bounded text | Summary | Summary | Editable |
 | Review, scan information | Separate multiline text fields, up to 20,000 characters each | Review, ScanInformation | No native equivalent | Choose a library or ComicInfo value, enter text, or explicitly clear. Neither field changes the summary, Notes, or MetronInfo. |
+| Main character or team | One printable name, up to 255 characters | MainCharacterOrTeam | No native equivalent | A comma can be part of the name. Does not change the character/team lists or their IDs. |
+| Series groups | Up to 128 distinct group names, one per line, up to 255 characters each | SeriesGroup, comma-separated | No native equivalent | Labels for this issue; order is preserved. Does not change the tracked series, file path, story arcs, or Metron collection title. |
 | Black and white | Unknown, No, Yes, or clear | BlackAndWhite | No native equivalent | Clear removes the field; it does not mean No. |
 | Manga | Same choices, plus Yes (right to left) | Manga | No native equivalent | Corrects the book's metadata, not the reader's settings, page order, or Metron's manga volume number. |
 | Notes | Plain text, up to 4096 characters including protected markers | Notes | Notes | Choose the prose from either file, enter text, or clear it. Each document keeps its own trailing identity markers. |
@@ -105,7 +107,6 @@ does not authorize dropping preserved data or writing to a new field on import.
 
 | Source fields | Remaining decision or workflow |
 | --- | --- |
-| ComicInfo MainCharacterOrTeam, SeriesGroup | Descriptive grouping fields, distinct from issue identity or tracked series membership. |
 | ComicInfo AlternateSeries, AlternateNumber, AlternateCount; Metron AlternativeNumber, MangaVolume, CollectionTitle | Alternate numbering, collections, and manga volumes are not the tracked issue number or its parent series. Do not rematch or renumber from these fields. |
 | Metron Universes, Reprints, multiple Stories, Prices | Structured entries need controls that preserve resource IDs, universe designations and price currencies where present. A list of stories is not a single issue title. |
 | ComicInfo Web, GTIN; Metron URLs, GTIN | Distinguish descriptive links from provider identity evidence; keep primary URLs, ISBNs and UPCs distinct. |

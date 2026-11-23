@@ -22,6 +22,15 @@ def test_editor_select_preview_apply_and_validation_retention(
     previews = []
     fields = [
         {
+            "key": "issue.series_groups",
+            "label": "Series groups",
+            "editable": True,
+            "input_type": "textarea",
+            "xml_conflict_key": "xml.SeriesGroup",
+            "options": [{"source": "ComicInfo.xml", "value": "Gotham\nClassics"}],
+            "differs": False,
+        },
+        {
             "key": "issue.manga",
             "label": "Manga",
             "editable": True,
@@ -244,6 +253,12 @@ def test_editor_select_preview_apply_and_validation_retention(
     tags = dialog.get_by_label("New Tags", exact=True)
     expect(tags).to_have_value("City\nNight")
     tags.fill("City\nHarbor")
+    dialog.get_by_label("Update Series groups", exact=True).check()
+    dialog.get_by_role("button", name="Value source for Series groups", exact=True).click()
+    page.get_by_role("option", name="Enter correction", exact=True).click()
+    groups = dialog.get_by_label("New Series groups", exact=True)
+    expect(groups).to_have_value("Gotham\nClassics")
+    groups.fill("Classics\nGotham & Beyond")
     dialog.get_by_label("Update Community rating", exact=True).check()
     expect(dialog.get_by_text("MetronInfo records 12 votes for this average.")).to_be_visible()
     dialog.get_by_role("button", name="Value source for Community rating", exact=True).click()
@@ -277,6 +292,7 @@ def test_editor_select_preview_apply_and_validation_retention(
     dialog.get_by_role("button", name="Update preview", exact=True).click()
     expect(dialog.get_by_role("button", name="Apply selected changes", exact=True)).to_be_enabled()
     selected = {
+        "series_groups": {"source": "custom", "value": "Classics\nGotham & Beyond"},
         "manga": {"source": "custom", "value": "YesAndRightToLeft"},
         "community_rating": {"source": "custom", "value": "0"},
         "notes": {"source": "ComicInfo.xml"},

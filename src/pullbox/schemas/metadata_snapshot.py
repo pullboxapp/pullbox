@@ -6,7 +6,7 @@ from typing import Literal, Self
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from pullbox.core.comicinfo_text import ColorFlag, MangaFlag, descriptive_text
+from pullbox.core.comicinfo_text import ColorFlag, MangaFlag, descriptive_text, selectable_main_name
 from pullbox.core.issue_community_rating import RATING_HELP, shared_score
 from pullbox.core.issue_notes import NOTES_LIMIT, safe_notes_prose
 from pullbox.core.issue_numbers import normalize_issue_number_text
@@ -78,6 +78,8 @@ class MetadataValues(BaseModel):
     imprint: str | None = Field(default=None, max_length=255, exclude_if=lambda v: v is None)
     notes: str | None = Field(default=None, max_length=NOTES_LIMIT, exclude_if=lambda v: v is None)
     review: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    main_character_or_team: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    series_groups: IssueLabels | None = Field(default=None, exclude_if=lambda v: v is None)
     black_and_white: ColorFlag | None = Field(default=None, exclude_if=lambda v: v is None)
     manga: MangaFlag | None = Field(default=None, exclude_if=lambda v: v is None)
     scan_information: str | None = Field(default=None, exclude_if=lambda v: v is None)
@@ -92,6 +94,21 @@ class MetadataValues(BaseModel):
     @classmethod
     def comicinfo_text(cls, value: str | None) -> str | None:
         return descriptive_text(value) if value is not None else None
+
+    @field_validator("main_character_or_team")
+    @classmethod
+    def single_name(cls, value: str | None) -> str | None:
+        name = descriptive_text(value) if value is not None else None
+        if not selectable_main_name(name):
+            raise ValueError("Use one printable name of up to 255 characters.")
+        return name
+
+    @field_validator("series_groups")
+    @classmethod
+    def descriptive_groups(cls, values: tuple[str, ...] | None) -> tuple[str, ...] | None:
+        for name in values or ():
+            descriptive_text(name)
+        return values
 
     @field_validator("community_rating")
     @classmethod

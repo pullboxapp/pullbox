@@ -22,12 +22,21 @@ FLAG_CHOICES: dict[str, tuple[str, ...]] = {
     "black_and_white": tuple(ColorFlag),
     "manga": tuple(MangaFlag),
 }
-type ComicInfoField = Literal["review", "scan_information", "black_and_white", "manga"]
+type ComicInfoField = Literal[
+    "review",
+    "scan_information",
+    "black_and_white",
+    "manga",
+    "main_character_or_team",
+    "series_groups",
+]
 COMICINFO_ONLY_TAGS: dict[ComicInfoField, str] = {
     "review": "Review",
     "scan_information": "ScanInformation",
     "black_and_white": "BlackAndWhite",
     "manga": "Manga",
+    "main_character_or_team": "MainCharacterOrTeam",
+    "series_groups": "SeriesGroup",
 }
 TEXT_LIMIT = 20000
 _ISSUE_ID = re.compile(r"(?:4000-|cv_issue_id\s*:\s*)(\d+)", re.I)
@@ -40,9 +49,9 @@ def comicinfo_text_ids(text: str) -> tuple[set[str], set[str]]:
     return set(_ISSUE_ID.findall(text)), set(_VOLUME_ID.findall(text))
 
 
-def descriptive_text(raw: str) -> str | None:
-    if len(raw) > TEXT_LIMIT:
-        raise ValueError("This field exceeds 20,000 characters.")
+def descriptive_text(raw: str, *, limit: int = TEXT_LIMIT) -> str | None:
+    if len(raw) > limit:
+        raise ValueError(f"This field exceeds {limit:,} characters.")
     if _INVALID_XML.search(raw):
         raise ValueError("This field contains characters that XML cannot store.")
     if _LEGACY_ID.search(raw) or any(comicinfo_text_ids(raw)):
@@ -50,9 +59,21 @@ def descriptive_text(raw: str) -> str | None:
     return raw.replace("\r\n", "\n").replace("\r", "\n").strip() or None
 
 
-def embedded_comicinfo_value(field: ComicInfoField, raw: str | None) -> str | None:
+def selectable_main_name(value: object) -> bool:
+    return value is None or (
+        isinstance(value, str) and 0 < len(value) <= 255 and value.isprintable()
+    )
+
+
+def embedded_comicinfo_value(
+    field: ComicInfoField, raw: str | None
+) -> str | tuple[str, ...] | None:
     if raw is None:
         return None
+    if field == "series_groups":
+        # 128 labels of 255 characters, plus their comma-space separators.
+        text = descriptive_text(raw, limit=128 * 255 + 127 * 2)
+        return tuple(part.strip() for part in text.split(",", 128)) if text else None
     text = descriptive_text(raw)
     if field in FLAG_CHOICES:
         # Only an empty *present* element takes the XSD default. Don't repair legacy tokens.

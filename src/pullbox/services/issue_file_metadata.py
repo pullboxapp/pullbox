@@ -112,6 +112,8 @@ def file_metadata_error(exc: BaseException) -> str:
     if code in {"rating_override_changed", "label_override_changed"}:
         field = getattr(exc, "field", "")
         label = {
+            "MainCharacterOrTeam": "main character or team",
+            "SeriesGroup": "series groups",
             "BlackAndWhite": "black and white",
             "Manga": "manga",
             "Review": "review",

@@ -719,7 +719,8 @@ async def test_recovery_offers_editor_for_an_unrenderable_arc_list(identity_prob
             "<ComicInfo><Number>50-X</Number><StoryArc>A, B</StoryArc>"
             "<StoryArcNumber>2</StoryArcNumber><Notes>Retained scan [CVDB123]</Notes>"
             "<CommunityRating>0</CommunityRating>"
-            "<ScanInformation>A scan</ScanInformation><Manga>YesAndRightToLeft</Manga></ComicInfo>",
+            "<ScanInformation>A scan</ScanInformation><Manga>YesAndRightToLeft</Manga>"
+            "<MainCharacterOrTeam>Robin</MainCharacterOrTeam></ComicInfo>",
         )
     before = source.read_bytes()
     assert (
@@ -741,6 +742,7 @@ async def test_recovery_offers_editor_for_an_unrenderable_arc_list(identity_prob
                     "community_rating": {"source": "ComicInfo.xml"},
                     "scan_information": {"source": "ComicInfo.xml"},
                     "manga": {"source": "ComicInfo.xml"},
+                    "main_character_or_team": {"source": "ComicInfo.xml"},
                     "story_arcs": {
                         "source": "custom",
                         "value": [{"name": "A", "position": None}, {"name": "B", "position": 2}],
@@ -781,6 +783,11 @@ async def test_recovery_offers_editor_for_an_unrenderable_arc_list(identity_prob
                 == "YesAndRightToLeft"
             )
             assert ET.fromstring(archive.read("MetronInfo.xml")).find("MangaVolume") is None
+            assert (
+                ET.fromstring(archive.read("ComicInfo.xml")).findtext("MainCharacterOrTeam")
+                == "Robin"
+            )
+            assert ET.fromstring(archive.read("MetronInfo.xml")).find("Characters") is None
             assert (
                 ET.fromstring(archive.read("MetronInfo.xml")).findtext("Notes") == "Retained scan"
             )

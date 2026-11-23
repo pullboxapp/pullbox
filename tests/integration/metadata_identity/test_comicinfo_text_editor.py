@@ -88,7 +88,13 @@ async def test_review_and_scan_information_are_independent_single_document_edits
 
 
 @pytest.mark.parametrize(
-    "field,tag", [("review", "Review"), ("scan_information", "ScanInformation")]
+    "field,tag",
+    [
+        ("review", "Review"),
+        ("scan_information", "ScanInformation"),
+        ("main_character_or_team", "MainCharacterOrTeam"),
+        ("series_groups", "SeriesGroup"),
+    ],
 )
 async def test_external_removal_of_single_document_value_requires_review(
     identity_probe_db, tmp_path, field, tag
