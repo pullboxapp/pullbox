@@ -83,6 +83,7 @@ before moving it aside. The selected source file is never the replacement target
 | Tags | Up to 128 distinct labels, one per line, maximum 255 characters each | Tags, comma-separated | Tags/Tag | Editable; retained labels keep their resource IDs, added labels have no ID |
 | Genres, characters, teams, locations | Same limits as tags, separately per list | Genre, Characters, Teams, Locations | Genres/Genre, Characters/Character, Teams/Team, Locations/Location | Editable; IDs are preserved within the selected list only |
 | Issue number, native provider IDs | Identity | Number/Web | Number/IDs | Protected; use validated provider linking |
+| Edition barcodes | Check digit and format | GTIN | GTIN/ISBN, GTIN/UPC | Edit either native identifier independently; explicitly select which one to use in an empty ComicInfo field. Does not change any provider match. |
 | Cover artwork URL | Artwork | Existing renderer projection | Existing renderer projection | Protected; artwork workflow |
 | Series title, sort title, publisher, summary, dates, type, archive format, status, count, volume, language, artwork | Series-wide catalog values | Existing series projection | Existing series projection | Read-only; no changes to siblings |
 | Issue imprint | Single-line name, up to 255 characters | Imprint | Publisher/Imprint | Editable for this issue only. A nonempty imprint requires a named publisher; retain its ID only for the same imprint. |
@@ -129,7 +130,7 @@ does not authorize dropping preserved data or writing to a new field on import.
 
 | Source fields | Remaining decision or workflow |
 | --- | --- |
-| ComicInfo Web, GTIN; Metron URLs, GTIN | Distinguish descriptive links from provider identity evidence; keep primary URLs, ISBNs and UPCs distinct. |
+| ComicInfo Web; Metron URLs | Distinguish descriptive links from provider identity evidence; retain the primary URL separately. |
 | ComicInfo Pages and attributes; Metron LastModified and nested resource IDs | Page annotations and source timestamps are not descriptive corrections. Resource IDs cannot be assigned by position or inferred from a renamed label. |
 | Metron Series/AlternativeNames and Series/VolumeCount | Series-wide values; do not implement these as issue-only overrides. |
 
@@ -137,6 +138,20 @@ Arbitrary extension nodes, resource identifiers and page annotations remain unde
 the existing preservation contract, not editable raw XML. See the separate
 [series editor](SERIES_METADATA_EDITOR.md) and [member-file propagation](SERIES_METADATA_PROPAGATION.md)
 workflows. Other XML-only fields and bulk editing remain outstanding.
+
+**Edition barcodes.** MetronInfo stores ISBN and UPC separately. ComicInfo has one
+GTIN field: choose **Use Metron ISBN** or **Use Metron UPC** to fill it. Pullbox
+does not pick one for an empty field. When a corrected native number already
+matches the ComicInfo barcode, the preview shows the corresponding change or
+clear there too. An unrelated retail number stays untouched. Conflicting
+numbers of the same kind require a choice when editing those barcodes; they do
+not block unrelated edits or create new import reviews.
+
+Original ISBN punctuation, leading zeros and UPC supplements are retained in
+MetronInfo. Projection uses the ISBN-13 or full UPC without the supplement
+([GS1 General Specifications](https://ref.gs1.org/standards/genspecs/)).
+Checksum validation cannot prove the number belongs to this edition. Barcodes
+are never used to create a provider link.
 
 The age rating selector offers only identical labels from the
 [ComicInfo 2.0 schema](https://raw.githubusercontent.com/anansi-project/comicinfo/main/schema/v2.0/ComicInfo.xsd)

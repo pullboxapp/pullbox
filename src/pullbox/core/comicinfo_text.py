@@ -4,6 +4,8 @@ import re
 from enum import StrEnum
 from typing import Literal
 
+from pullbox.core.issue_barcodes import NATIVE_BARCODES
+
 
 class ColorFlag(StrEnum):
     UNKNOWN = "Unknown"
@@ -24,6 +26,7 @@ FLAG_CHOICES: dict[str, tuple[str, ...]] = {
 }
 type ComicInfoField = Literal[
     "review",
+    "gtin",
     "scan_information",
     "black_and_white",
     "manga",
@@ -35,6 +38,7 @@ type ComicInfoField = Literal[
 ]
 COMICINFO_ONLY_TAGS: dict[ComicInfoField, str] = {
     "review": "Review",
+    "gtin": "GTIN",
     "scan_information": "ScanInformation",
     "black_and_white": "BlackAndWhite",
     "manga": "Manga",
@@ -51,6 +55,7 @@ METRON_ONLY_TAGS: dict[MetronTextField, str] = {
     "manga_volume": "MangaVolume",
 }
 SINGLE_DOCUMENT: dict[str, str] = {
+    **dict.fromkeys(NATIVE_BARCODES, "MetronInfo.xml"),
     "prices": "MetronInfo.xml",
     "universes": "MetronInfo.xml",
     "story_titles": "MetronInfo.xml",

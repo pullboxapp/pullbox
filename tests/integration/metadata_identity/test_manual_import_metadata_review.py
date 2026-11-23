@@ -259,6 +259,8 @@ async def test_manual_editor_previews_and_applies_only_approved_edits(
                 "universes": {"source": "custom", "value": [{"name": "Gotham"}]},
                 "story_titles": {"source": "custom", "value": "Opening\nSecond feature"},
                 "prices": {"source": "custom", "value": [{"country": "GB", "amount": "2.990"}]},
+                "isbn": {"source": "custom", "value": "0-8044-2957-X"},
+                "gtin": {"source": "isbn"},
             }
         },
     }
@@ -316,6 +318,8 @@ async def test_manual_editor_previews_and_applies_only_approved_edits(
                 ci = ET.fromstring(archive.read("ComicInfo.xml"))
                 mi = ET.fromstring(archive.read("MetronInfo.xml"))
                 assert ci.findtext("PageCount") == mi.findtext("PageCount") == "52"
+                assert ci.findtext("GTIN") == "9780804429573"
+                assert mi.findtext("GTIN/ISBN") == "0-8044-2957-X" and mi.find("GTIN/UPC") is None
                 assert ci.findtext("Series") == "Canonical series"
                 assert ci.findtext("Tags") == mi.findtext("Tags/Tag") == "Noir"
                 assert ci.findtext("Notes").startswith("Reviewed scan [CVDB123]")

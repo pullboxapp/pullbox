@@ -15,6 +15,13 @@ from pullbox.core.comicinfo_text import (
     embedded_comicinfo_value,
     selectable_single_line,
 )
+from pullbox.core.issue_barcodes import (
+    BARCODE_HELP,
+    NATIVE_BARCODES,
+    NativeBarcode,
+    barcode_gtin,
+    native_kind,
+)
 from pullbox.core.issue_community_rating import (
     RATING_HELP,
     RATING_LOCKED,
@@ -28,6 +35,7 @@ from pullbox.schemas.issue_metadata_editor import (
     EDITOR_XML_FIELDS,
     EditableIssueField,
     EditorXmlField,
+    IssueMetadataEdit,
     IssueMetadataEditorField,
     IssueMetadataEditorOption,
     IssueMetadataEditorReview,
@@ -78,6 +86,9 @@ EDITABLE_FIELDS = {
     "story_titles": ("Story titles", "textarea"),
     "universes": ("Universes", "universes"),
     "prices": ("Cover prices", "prices"),
+    "isbn": ("ISBN", "text"),
+    "upc": ("UPC", "text"),
+    "gtin": ("ComicInfo barcode (GTIN)", "text"),
     "manga_volume": ("Manga volume", "text"),
     "black_and_white": ("Black and white", "text"),
     "manga": ("Manga", "text"),
@@ -94,6 +105,12 @@ EDITABLE_FIELDS = {
 }
 
 FIELD_HELP = {
+    **BARCODE_HELP,
+    **{
+        key: f"MetronInfo.xml: {BARCODE_HELP[key]} If ComicInfo already uses this number, "
+        "the preview updates it there too."
+        for key in NATIVE_BARCODES
+    },
     "prices": "MetronInfo.xml only. Enter each amount with its two-letter country code. "
     "A country can appear more than once. No currency is inferred or converted.",
     "story_titles": "MetronInfo.xml only. Enter the stories in reading order, one title per line. "
@@ -161,6 +178,8 @@ def display_editor_value(value: object) -> str:
 
 
 def _selectable(field: str, value: object) -> bool:
+    if field in BARCODE_HELP:
+        return value is None or barcode_gtin(field, value) is not None
     if field in {
         "main_character_or_team",
         "alternate_series",
@@ -197,6 +216,38 @@ def _score_help(count: str, *, reviewed: bool, keeps_average: bool) -> str:
     )
 
 
+def _native_choice(
+    key: NativeBarcode,
+    review: IssueMetadataEditorReview,
+    embedded: dict[str, object],
+    proposed: dict[str, object],
+) -> str | None:
+    edit = review.edits.get(key)
+    return barcode_gtin(
+        key, proposed.get(key) if edit and edit.source != "reset" else embedded.get(key)
+    )
+
+
+def _mirrored_edit(
+    original: object,
+    embedded: dict[str, object],
+    proposed: dict[str, object],
+    review: IssueMetadataEditorReview,
+) -> IssueMetadataEdit | None:
+    gtin = barcode_gtin("gtin", original)
+    if not gtin or (key := native_kind(gtin)) is None:
+        return None
+    old = barcode_gtin(key, embedded.get(key))
+    if not old or old.zfill(14) != gtin.zfill(14):
+        return None
+    new = _native_choice(key, review, embedded, proposed)
+    if old == new:
+        return None
+    return (
+        IssueMetadataEdit(source="custom", value=new) if new else IssueMetadataEdit(source="clear")
+    )
+
+
 def _custom_value(field: str, text: str) -> object:
     if not text.strip():
         raise IssueMetadataEditError(
@@ -215,6 +266,9 @@ def _custom_value(field: str, text: str) -> object:
                 "Enter Notes as plain text of up to 4096 characters, without identity markers "
                 "or legacy retailer references."
             )
+    elif field in BARCODE_HELP:
+        if not barcode_gtin(field, text):
+            raise IssueMetadataEditError(BARCODE_HELP[field])
     elif field in FLAG_CHOICES:
         if text not in FLAG_CHOICES[field]:
             raise IssueMetadataEditError(
@@ -275,6 +329,8 @@ def _custom_value(field: str, text: str) -> object:
     try:
         return getattr(MetadataValues.model_validate({field: value}), field)
     except ValidationError:
+        if field in BARCODE_HELP:
+            raise IssueMetadataEditError(BARCODE_HELP[field]) from None
         if field in {"collection_title", "manga_volume"}:
             raise IssueMetadataEditError(
                 f"Enter {EDITABLE_FIELDS[field][0].lower()} as one printable line "
@@ -312,6 +368,7 @@ def prepare_issue_editor(
     values = issue.values.model_dump()
     fields: list[IssueMetadataEditorField] = []
     effective = dict(review.edits)
+    native_barcodes: dict[str, object] = {}
     ci, mi = preserved_roots(files, allow_price_review=True)
     for field, (label, input_type) in EDITABLE_FIELDS.items():
         current = getattr(issue_state.values, field)
@@ -337,11 +394,15 @@ def prepare_issue_editor(
                     continue
             elif (
                 field in METRON_ONLY_TAGS
+                or field in NATIVE_BARCODES
                 or field in METRON_TITLE_LISTS
                 or field in {"universes", "prices"}
             ):
                 try:
-                    if field in METRON_ONLY_TAGS:
+                    if field in NATIVE_BARCODES:
+                        value = metron_simple_text(mi, "GTIN/" + NATIVE_BARCODES[field])
+                        native_barcodes[field] = value
+                    elif field in METRON_ONLY_TAGS:
                         value = metron_simple_text(mi, METRON_ONLY_TAGS[field])
                     elif field in METRON_TITLE_LISTS:
                         value = embedded_metron_titles(mi, METRON_TITLE_LISTS[field]) or None
@@ -377,6 +438,13 @@ def prepare_issue_editor(
                 options[source] = value
         key = cast("EditableIssueField", field)
         edit = review.edits.get(key)
+        if field == "gtin" and edit is None and not locked_reason:
+            # Follow an existing mirror only. Never infer one from a blank or unrelated GTIN.
+            saved = origins.get("gtin")
+            if not (saved and saved.user_override and current != options.get("ComicInfo.xml")):
+                edit = _mirrored_edit(options.get("ComicInfo.xml"), native_barcodes, values, review)
+                if edit:
+                    effective[key] = edit
         if edit and locked_reason:
             raise IssueMetadataEditError(locked_reason)
         if (
@@ -392,7 +460,14 @@ def prepare_issue_editor(
             edit = None
         previous = origins.get(field)
         if edit is not None:
-            if edit.source == "custom":
+            if edit.source in ("isbn", "upc"):
+                projected = _native_choice(edit.source, review, native_barcodes, values)
+                if not projected:
+                    raise IssueMetadataEditError(
+                        f"Enter a valid Metron {edit.source.upper()} before using it in ComicInfo."
+                    )
+                values[field] = projected
+            elif edit.source == "custom":
                 values[field] = (
                     edit.value
                     if isinstance(edit.value, tuple)
@@ -456,6 +531,27 @@ def prepare_issue_editor(
                 user_override=edit.source != "reset",
                 provider_managed=edit.source == "reset",
             )
+        if field == "gtin":
+            generic = barcode_gtin(
+                "gtin",
+                values[field] if edit and edit.source != "reset" else options.get("ComicInfo.xml"),
+            )
+            if generic and (barcode_kind := native_kind(generic)):
+                sibling = _native_choice(barcode_kind, review, native_barcodes, values)
+                typed_edit = review.edits.get(barcode_kind)
+                if (
+                    sibling
+                    and sibling.zfill(14) != generic.zfill(14)
+                    and (
+                        (edit and edit.source != "reset")
+                        or (typed_edit and typed_edit.source != "reset")
+                    )
+                ):
+                    raise IssueMetadataEditError(
+                        f"The ComicInfo barcode and Metron {barcode_kind.upper()} disagree. "
+                        f"Choose Use Metron {barcode_kind.upper()} for the ComicInfo barcode, "
+                        "correct both values, or clear the one that does not belong."
+                    )
         proposed = MetadataValues.model_validate(values)
         if field == "community_rating":
             help_text = _score_help(
@@ -529,7 +625,7 @@ def prepare_issue_editor(
                     and bool(previous and previous.user_override)
                     and len(options) < (2 if field in SINGLE_DOCUMENT else 3)
                 ),
-                selected=key in review.edits,
+                selected=key in effective,
                 origin=(
                     "Manual correction"
                     if previous and previous.user_override

@@ -4,7 +4,15 @@ from datetime import date
 from enum import StrEnum
 from typing import Literal, Self
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from pullbox.core.comicinfo_text import (
     ColorFlag,
@@ -12,6 +20,7 @@ from pullbox.core.comicinfo_text import (
     descriptive_text,
     selectable_single_line,
 )
+from pullbox.core.issue_barcodes import BARCODE_HELP, barcode_gtin
 from pullbox.core.issue_community_rating import RATING_HELP, shared_score
 from pullbox.core.issue_notes import NOTES_LIMIT, safe_notes_prose
 from pullbox.core.issue_numbers import normalize_issue_number_text
@@ -99,6 +108,9 @@ class MetadataValues(BaseModel):
     story_titles: MetronTitleList | None = Field(default=None, exclude_if=lambda v: v is None)
     universes: IssueUniverseList | None = Field(default=None, exclude_if=lambda v: v is None)
     prices: IssuePriceList | None = Field(default=None, exclude_if=lambda v: v is None)
+    isbn: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    upc: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    gtin: str | None = Field(default=None, exclude_if=lambda v: v is None)
     manga_volume: str | None = Field(default=None, exclude_if=lambda v: v is None)
     alternate_count: int | None = Field(
         default=None, ge=-1, le=2147483647, strict=True, exclude_if=lambda v: v is None
@@ -117,6 +129,16 @@ class MetadataValues(BaseModel):
     @classmethod
     def comicinfo_text(cls, value: str | None) -> str | None:
         return descriptive_text(value) if value is not None else None
+
+    @field_validator("isbn", "upc", "gtin")
+    @classmethod
+    def edition_barcode(cls, value: str | None, info: ValidationInfo) -> str | None:
+        if value is not None:
+            field = str(info.field_name)
+            descriptive_text(value)
+            if not barcode_gtin(field, value):
+                raise ValueError(BARCODE_HELP[field])
+        return value
 
     @field_validator(
         "main_character_or_team", "alternate_series", "alternate_number", "alternative_number"

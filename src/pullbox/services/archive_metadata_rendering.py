@@ -17,6 +17,7 @@ from pullbox.core.comicinfo_text import (
     comicinfo_text_ids,
     embedded_comicinfo_value,
 )
+from pullbox.core.issue_barcodes import NATIVE_BARCODES
 from pullbox.core.issue_community_rating import annotated_rating, embedded_score
 from pullbox.core.issue_notes import UneditableNotesError, document_notes
 from pullbox.core.issue_numbers import normalize_issue_number_text
@@ -159,6 +160,28 @@ def render_archive_metadata(
         raise ArchiveMetadataRenderError("invalid_choice")
     if protected.intersection(COMICINFO_ONLY_TAGS):
         _render_comicinfo_fields(ci, issue.values, protected, reviewed_xml_fields)
+    for barcode, child in NATIVE_BARCODES.items():
+        if barcode not in protected:
+            continue
+        try:
+            existing = metron_simple_text(mi, f"GTIN/{child}")
+        except ValueError as exc:
+            raise ArchiveMetadataRenderError("label_override_changed", child) from exc
+        desired = getattr(issue.values, barcode)
+        parent = mi.find("GTIN")
+        if existing == desired and not (
+            barcode in reviewed_xml_fields
+            and desired is None
+            and mi.find(f"GTIN/{child}") is not None
+        ):
+            continue
+        if barcode not in reviewed_xml_fields:
+            raise ArchiveMetadataRenderError("label_override_changed", child)
+        if parent is None:
+            parent = ET.SubElement(mi, "GTIN")
+        set_text(parent, child, desired)
+        if not len(parent) and not parent.attrib and not (parent.text or "").strip():
+            mi.remove(parent)
     for metron_field, tag in METRON_ONLY_TAGS.items():
         if metron_field not in protected:
             continue

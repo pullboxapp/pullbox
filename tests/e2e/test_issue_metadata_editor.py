@@ -22,6 +22,24 @@ def test_editor_select_preview_apply_and_validation_retention(
     previews = []
     fields = [
         {
+            "key": "issue.upc",
+            "label": "UPC",
+            "editable": True,
+            "input_type": "text",
+            "xml_conflict_key": "xml.UPC",
+            "options": [{"source": "MetronInfo.xml", "value": "036000291452-00311"}],
+            "differs": False,
+        },
+        {
+            "key": "issue.gtin",
+            "label": "ComicInfo barcode (GTIN)",
+            "editable": True,
+            "input_type": "text",
+            "xml_conflict_key": "xml.GTIN",
+            "options": [],
+            "differs": False,
+        },
+        {
             "key": "issue.prices",
             "label": "Cover prices",
             "editable": True,
@@ -291,6 +309,12 @@ def test_editor_select_preview_apply_and_validation_retention(
     groups = dialog.get_by_label("New Series groups", exact=True)
     expect(groups).to_have_value("Gotham\nClassics")
     groups.fill("Classics\nGotham & Beyond")
+    dialog.get_by_label("Update ComicInfo barcode (GTIN)", exact=True).check()
+    dialog.get_by_role(
+        "button", name="Value source for ComicInfo barcode (GTIN)", exact=True
+    ).click()
+    expect(page.get_by_role("option", name="Use Metron ISBN", exact=True)).to_have_count(0)
+    page.get_by_role("option", name="Use Metron UPC", exact=True).click()
     dialog.get_by_label("Update Cover prices", exact=True).check()
     dialog.get_by_role("button", name="Value source for Cover prices", exact=True).click()
     page.get_by_role("option", name="Enter correction", exact=True).click()
@@ -354,6 +378,7 @@ def test_editor_select_preview_apply_and_validation_retention(
     dialog.get_by_role("button", name="Update preview", exact=True).click()
     expect(dialog.get_by_role("button", name="Apply selected changes", exact=True)).to_be_enabled()
     selected = {
+        "gtin": {"source": "upc"},
         "prices": {
             "source": "custom",
             "value": [

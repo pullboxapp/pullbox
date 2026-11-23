@@ -1,6 +1,6 @@
 """Bounded descriptive edits; identifiers and series-wide values are not editable."""
 
-from typing import Annotated, Literal, Self
+from typing import Annotated, Literal, Self, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -13,6 +13,9 @@ from pullbox.schemas.metadata_issue_universes import (
 )
 
 type EditorConflictField = Literal[
+    "xml.ISBN",
+    "xml.UPC",
+    "xml.GTIN",
     "xml.Prices",
     "xml.Stories",
     "xml.Universes",
@@ -42,6 +45,9 @@ type EditorConflictField = Literal[
 ]
 
 type EditableIssueField = Literal[
+    "isbn",
+    "upc",
+    "gtin",
     "prices",
     "story_titles",
     "universes",
@@ -76,6 +82,9 @@ type EditableIssueField = Literal[
     "story_arcs",
 ]
 type EditorXmlField = Literal[
+    "isbn",
+    "upc",
+    "gtin",
     "prices",
     "story_titles",
     "universes",
@@ -104,6 +113,9 @@ type EditorXmlField = Literal[
     "story_arcs",
 ]
 EDITOR_XML_FIELDS: dict[EditorXmlField, EditorConflictField] = {
+    "isbn": "xml.ISBN",
+    "upc": "xml.UPC",
+    "gtin": "xml.GTIN",
     "prices": "xml.Prices",
     "story_titles": "xml.Stories",
     "universes": "xml.Universes",
@@ -136,7 +148,9 @@ EDITOR_XML_FIELDS: dict[EditorXmlField, EditorConflictField] = {
 class IssueMetadataEdit(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    source: Literal["library", "ComicInfo.xml", "MetronInfo.xml", "custom", "clear", "reset"]
+    source: Literal[
+        "library", "ComicInfo.xml", "MetronInfo.xml", "custom", "clear", "reset", "isbn", "upc"
+    ]
     value: (
         Annotated[str, Field(max_length=200000)]
         | IssueArcList
@@ -155,7 +169,9 @@ class IssueMetadataEdit(BaseModel):
 class IssueMetadataEditorReview(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    edits: dict[EditableIssueField, IssueMetadataEdit] = Field(default_factory=dict, max_length=32)
+    edits: dict[EditableIssueField, IssueMetadataEdit] = Field(
+        default_factory=dict, max_length=len(get_args(EditableIssueField.__value__))
+    )
 
     @field_validator("edits", mode="before")
     @classmethod
@@ -173,6 +189,8 @@ class IssueMetadataEditorReview(BaseModel):
     @model_validator(mode="after")
     def matching_input_types(self) -> Self:
         for field, edit in self.edits.items():
+            if edit.source in ("isbn", "upc") and field != "gtin":
+                raise ValueError("Only the ComicInfo barcode can use a Metron ISBN or UPC.")
             if edit.source != "custom":
                 continue
             if field == "prices":

@@ -12,7 +12,7 @@ function issueEditorDraftState(fieldIdPrefix) {
     },
     editorFields: function () {
       return (this.preview ? this.preview.editor_fields || [] : []).filter(field =>
-        this.allFields || field.differs || (this.editorDrafts[field.key] && this.editorDrafts[field.key].selected));
+        this.allFields || field.differs || (field.selected && !this.choicesDirty) || (this.editorDrafts[field.key] && this.editorDrafts[field.key].selected));
     },
     editorValueLabel: function (field, value) {
       return field.key === "issue.manga" && value === "YesAndRightToLeft" ? "Yes (right to left)" : value;
@@ -22,6 +22,16 @@ function issueEditorDraftState(fieldIdPrefix) {
       for (const option of field.options || []) {
         if (option.selectable !== false && option.value != null && String(option.value).trim() !== "")
           options.push({ value: option.source, label: option.source === "library" ? "Keep library value" : option.source });
+      }
+      if (field.key === "issue.gtin") {
+        for (const key of ["isbn", "upc"]) {
+          const native = this.preview?.editor_fields?.find(row => row.key === "issue." + key);
+          const draft = this.editorDrafts["issue." + key];
+          const selected = draft?.selected && !["reset", "unchanged"].includes(draft.source);
+          const available = selected ? draft.source !== "clear" && (draft.source !== "custom" || draft.value.trim())
+            : native?.options.some(option => option.source === "MetronInfo.xml" && option.selectable !== false && option.value);
+          if (available) options.push({ value: key, label: "Use Metron " + key.toUpperCase() });
+        }
       }
       options.push({ value: "custom", label: "Enter correction" }, { value: "clear", label: "Clear value" });
       if (field.overridden) options.push({ value: "reset", label: "Remove manual override" });
