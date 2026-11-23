@@ -15,6 +15,7 @@ from pullbox.core.metadata_identity import (
 )
 from pullbox.schemas.metadata_credits import MetadataCredits
 from pullbox.schemas.metadata_sources import MetadataDomain
+from pullbox.schemas.metadata_tags import IssueTags
 
 type EmbeddedDocument = Literal["ComicInfo.xml", "MetronInfo.xml"]
 
@@ -58,6 +59,7 @@ class MetadataValues(BaseModel):
     store_date: date | None = None
     page_count: int | None = Field(default=None, ge=0, le=1000000, strict=True)
     age_rating: SharedAgeRating | None = Field(default=None, exclude_if=lambda v: v is None)
+    tags: IssueTags | None = Field(default=None, exclude_if=lambda v: v is None)
     image_url: str | None = Field(default=None, max_length=500)
     credits: MetadataCredits | None = None
 

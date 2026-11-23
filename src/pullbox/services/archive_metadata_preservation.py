@@ -1,5 +1,6 @@
 """Preserve schema-specific values while coordinating shared archive metadata."""
 
+from collections import Counter, defaultdict
 from copy import deepcopy
 from typing import cast
 from xml.etree import ElementTree as ET
@@ -171,6 +172,25 @@ def _parts(value: str | None) -> tuple[str, ...]:
     return tuple(part.strip() for part in value.split(",") if part.strip()) if value else ()
 
 
+def embedded_tags(ci: ET.Element, mi: ET.Element) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    return _parts(ci.findtext("Tags")), tuple(
+        (n.text or "").strip() for n in mi.findall("Tags/Tag")
+    )
+
+
+def apply_issue_tags(ci: ET.Element, mi: ET.Element, values: tuple[str, ...]) -> None:
+    set_text(ci, "Tags", ", ".join(values))
+    parent = mi.find("Tags")
+    if parent is None:
+        if not values:
+            return
+        ET.SubElement(mi, "Tags")
+    _replace_list(mi, "Tags/Tag", values)
+    parent = mi.find("Tags")
+    if parent is not None and not len(parent) and not parent.attrib:
+        mi.remove(parent)
+
+
 SHARED_FIELD_LABELS = {
     "AgeRating": "age rating",
     "Genre": "genres",
@@ -252,10 +272,24 @@ def _replace_list(mi: ET.Element, path: str, values: tuple[str, ...]) -> None:
     parent = mi.find(parent_tag)
     assert parent is not None
     old = parent.findall(child_tag)
+    matches_by_label: defaultdict[str, list[ET.Element]] = defaultdict(list)
+    for node in old:
+        matches_by_label[(node.text or "").strip()].append(node)
+    if path == "Tags/Tag":
+        counts = Counter(values)
+        for label, matches in matches_by_label.items():
+            if (
+                counts[label]
+                and (len(matches) != 1 or counts[label] != 1)
+                and any("id" in node.attrib for node in matches)
+            ):
+                raise ArchiveMetadataRenderError("ambiguous_tag_id", "Tags")
+            if any(len(node) for node in matches):
+                raise ArchiveMetadataRenderError("unsupported_content", "Tags")
     for node in old:
         parent.remove(node)
     for value in values:
-        matches = [n for n in old if (n.text or "").strip() == value]
+        matches = matches_by_label[value]
         node = deepcopy(matches[0]) if len(matches) == 1 else ET.Element(child_tag)
         node.text = value
         parent.append(node)
@@ -328,6 +362,17 @@ def _resolve_shared_fields(
         left = _parts(ci.findtext(field))
         right = tuple((n.text or "").strip() for n in mi.findall(path))
         if any(not value or "," in value for value in right):
+            if field == "Tags" and "xml.Tags" not in choices:
+                conflicts.append(
+                    FileMetadataConflict(
+                        key="xml.Tags",
+                        label="Tags",
+                        options=[],
+                        note="A Metron tag cannot be represented as a ComicInfo tag. Open Edit "
+                        "metadata and enter the tags to keep, one per line, or clear them.",
+                    )
+                )
+                continue
             raise ArchiveMetadataRenderError("unsupported_content", field)
         if left and right and left != right:
             selected = review(field, ", ".join(left), ", ".join(right))

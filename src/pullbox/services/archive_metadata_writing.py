@@ -23,6 +23,7 @@ from pullbox.core.metadata_archive_source import MetadataArchiveSource, open_met
 from pullbox.core.metadata_identity import ExternalIdentityRef
 from pullbox.core.metadata_pdf_source import PdfQuality
 from pullbox.schemas.issue_file_metadata import SharedXmlChoices
+from pullbox.schemas.issue_metadata_editor import EditorXmlField
 from pullbox.schemas.metadata_snapshot import MetadataSnapshot
 from pullbox.services.archive_metadata_binding import (
     assemble_archive_metadata_state,
@@ -57,7 +58,7 @@ def write_cbz_metadata(
     pdf_quality: PdfQuality = "medium",
     metadata_state: SeriesRefreshState | None = None,
     shared_choices: SharedXmlChoices | None = None,
-    edit_age_rating: bool = False,
+    reviewed_xml_fields: frozenset[EditorXmlField] = frozenset(),
     propagation_fields: frozenset[str] | None = None,
 ) -> bool:
     """Write a verified pair in one CBZ construction, off the event loop.
@@ -141,7 +142,7 @@ def write_cbz_metadata(
                 previous_issue=previous_issue,
                 replace_managed=replace_managed,
                 shared_choices=shared_choices,
-                edit_age_rating=edit_age_rating,
+                reviewed_xml_fields=reviewed_xml_fields,
                 propagation_fields=propagation_fields,
             )
             outputs = {"ComicInfo.xml": pair.comicinfo, "MetronInfo.xml": pair.metroninfo}

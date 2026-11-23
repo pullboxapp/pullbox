@@ -7,7 +7,9 @@ from pydantic import ValidationError
 
 from pullbox.core.archive_metadata import ArchiveMetadataFiles
 from pullbox.schemas.issue_metadata_editor import (
+    EDITOR_XML_FIELDS,
     EditableIssueField,
+    EditorXmlField,
     IssueMetadataEditorField,
     IssueMetadataEditorOption,
     IssueMetadataEditorReview,
@@ -19,9 +21,11 @@ from pullbox.schemas.metadata_snapshot import (
     SharedAgeRating,
     field_domain,
 )
+from pullbox.schemas.metadata_tags import selectable_tags
 from pullbox.services.archive_metadata_binding import ArchiveMetadataBinding
 from pullbox.services.archive_metadata_preservation import (
     ArchiveMetadataRenderError,
+    embedded_tags,
     preserved_roots,
     review_preserved_fields,
 )
@@ -36,16 +40,24 @@ EDITABLE_FIELDS = {
     "page_count": ("Catalog page count", "number"),
     "credits": ("Creator credits", "credits"),
     "age_rating": ("Age rating", "text"),
+    "tags": ("Tags", "textarea"),
 }
 SHARED_TAGS = {
     "Genre": ("Genre", "Genres/Genre"),
-    "Tags": ("Tags", "Tags/Tag"),
     "Characters": ("Characters", "Characters/Character"),
     "Teams": ("Teams", "Teams/Team"),
     "Locations": ("Locations", "Locations/Location"),
     "Imprint": ("Imprint", "Publisher/Imprint"),
     "StoryArc": ("Story arc", "Arcs/Arc/Name"),
     "StoryArcNumber": ("Story arc position", "Arcs/Arc/Number"),
+}
+
+FIELD_HELP = {
+    "tags": "One tag per line. Retained tags keep their Metron IDs; new or renamed tags get no ID.",
+    "age_rating": "Only ratings with the same label in both formats are offered. "
+    "Clear removes the rating; Unknown writes a rating of Unknown.",
+    "page_count": "Catalog page count does not change the number of comic pages.",
+    "credits": "One creator per line: Name | Role. Existing resource identifiers remain protected.",
 }
 
 
@@ -57,6 +69,8 @@ def display_editor_value(value: object) -> str:
     if value is None:
         return ""
     if isinstance(value, tuple):
+        if all(isinstance(item, str) for item in value):
+            return "\n".join(value)
         return "\n".join(f"{item.name} | {item.role}" for item in value)
     return value.isoformat() if isinstance(value, date) else str(value)
 
@@ -77,6 +91,13 @@ def _custom_value(field: str, text: str) -> object:
                 "Catalog page count must be a whole number from 0 to 1000000."
             )
         value = int(text)
+    elif field == "tags":
+        value = tuple(line.strip() for line in text.split("\n") if line.strip())
+        if not selectable_tags(value):
+            raise IssueMetadataEditError(
+                "Enter up to 128 distinct tags, one per line, with no commas "
+                "and no more than 255 characters per tag."
+            )
     elif field == "credits":
         credits = []
         for line in text.splitlines():
@@ -113,18 +134,21 @@ def prepare_issue_editor(
     values = issue.values.model_dump()
     fields: list[IssueMetadataEditorField] = []
     ci, mi = preserved_roots(files)
+    ci_tags, mi_tags = embedded_tags(ci, mi)
     for field, (label, input_type) in EDITABLE_FIELDS.items():
         current = getattr(issue_state.values, field)
         options: dict[str, object] = {"library": current}
-        for source, document in (
-            ("ComicInfo.xml", archive.comicinfo),
-            ("MetronInfo.xml", archive.metroninfo),
+        for source, document, root, tags in (
+            ("ComicInfo.xml", archive.comicinfo, ci, ci_tags),
+            ("MetronInfo.xml", archive.metroninfo, mi, mi_tags),
         ):
-            value = (
-                (ci if source == "ComicInfo.xml" else mi).findtext("AgeRating")
-                if field == "age_rating"
-                else getattr(document.issue, field)
-            )
+            value: object
+            if field == "tags":
+                value = tags or None
+            elif field == "age_rating":
+                value = root.findtext("AgeRating")
+            else:
+                value = getattr(document.issue, field)
             if value is not None:
                 options[source] = value
         edit = review.edits.get(cast("EditableIssueField", field))
@@ -138,6 +162,11 @@ def prepare_issue_editor(
                 if previous is None or not previous.user_override:
                     raise IssueMetadataEditError(f"{label} has no manual override to remove.")
             elif edit.source in options:
+                if field == "tags" and not selectable_tags(options[edit.source]):
+                    raise IssueMetadataEditError(
+                        "These tags cannot be written to both formats. "
+                        "Enter the tags to keep or choose Clear value."
+                    )
                 if (
                     field == "age_rating"
                     and options[edit.source] is not None
@@ -167,6 +196,7 @@ def prepare_issue_editor(
         fields.append(
             IssueMetadataEditorField(
                 key=f"issue.{field}",
+                xml_conflict_key=EDITOR_XML_FIELDS.get(cast("EditorXmlField", field)),
                 label=label,
                 current=display_editor_value(current),
                 proposed=display_editor_value(getattr(proposed, field)),
@@ -176,9 +206,13 @@ def prepare_issue_editor(
                     IssueMetadataEditorOption(
                         source=source,
                         value=display_editor_value(value),
-                        selectable=field != "age_rating"
-                        or value is None
-                        or value in tuple(SharedAgeRating),
+                        selectable=(
+                            selectable_tags(value)
+                            if field == "tags"
+                            else field != "age_rating"
+                            or value is None
+                            or value in tuple(SharedAgeRating)
+                        ),
                     )
                     for source, value in options.items()
                 ],
@@ -186,7 +220,7 @@ def prepare_issue_editor(
                 overridden=bool(previous and previous.user_override),
                 differs=any(value != current for value in options.values())
                 or (
-                    field == "age_rating"
+                    field in EDITOR_XML_FIELDS
                     and current is not None
                     and bool(previous and previous.user_override)
                     and len(options) < 3
@@ -199,19 +233,7 @@ def prepare_issue_editor(
                     if previous and previous.source
                     else "Library"
                 ),
-                reason=(
-                    "Only ratings with the same label in both formats are offered. "
-                    "Clear removes the rating; Unknown writes a rating of Unknown."
-                )
-                if field == "age_rating"
-                else "Catalog page count does not change the number of comic pages."
-                if field == "page_count"
-                else (
-                    "One creator per line: Name | Role. "
-                    "Existing resource identifiers remain protected."
-                )
-                if field == "credits"
-                else "",
+                reason=FIELD_HELP.get(field, ""),
             )
         )
     issue = MetadataSnapshot.model_validate(

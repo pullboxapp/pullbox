@@ -79,6 +79,12 @@ function issueFileMetadata(issueId) {
       if (field.overridden) options.push({ value: "reset", label: "Remove manual override" });
       return options;
     },
+    initialEditorValue: function (field) {
+      if (field.key !== "issue.tags" || field.current || field.overridden) return field.current || "";
+      var files = field.options.filter(option => option.source !== "library");
+      return files.length && files.every(option => option.selectable !== false && option.value === files[0].value)
+        ? files[0].value : "";
+    },
     selectEditorFields: function (selected) {
       (this.preview.editor_fields || []).filter(field => field.editable).forEach(field => { this.editorDrafts[field.key].selected = selected; });
       this.choicesDirty = true;
@@ -138,7 +144,7 @@ function issueFileMetadata(issueId) {
         if (this.editor && reset) {
           this.allFields = false; this.editorDrafts = {};
           (data.editor_fields || []).filter(field => field.editable).forEach(field => {
-            this.editorDrafts[field.key] = { selected: false, source: "library", value: field.current || "" };
+            this.editorDrafts[field.key] = { selected: false, source: "library", value: this.initialEditorValue(field) };
           });
         }
         this.choices = {};

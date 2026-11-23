@@ -48,6 +48,8 @@ def verify(sql, db, *, refreshed=False):
     )
     assert snapshot["values"]["title"] == TITLE
     assert snapshot["values"]["age_rating"] == "Teen"
+    assert snapshot["values"]["tags"] == ["Harbor", "Coastal"]
+    assert any(o["field"] == "tags" and o["user_override"] for o in snapshot["origins"])
     assert any(o["field"] == "age_rating" and o["user_override"] for o in snapshot["origins"])
     assert any(o["field"] == "title" and o["user_override"] for o in snapshot["origins"])
     if refreshed:
@@ -96,6 +98,10 @@ async def exercise(page, library, sql, db):
     await page.get_by_role("option", name="Enter correction", exact=True).click()
     await dialog.get_by_role("button", name="New Age rating", exact=True).click()
     await page.get_by_role("option", name="Teen", exact=True).click()
+    await dialog.get_by_label("Update Tags", exact=True).check()
+    await dialog.get_by_role("button", name="Value source for Tags").click()
+    await page.get_by_role("option", name="Enter correction", exact=True).click()
+    await dialog.get_by_label("New Tags", exact=True).fill("Harbor\nCoastal")
     async with page.expect_response("**/issues/10001/metadata-editor/preview") as response:
         await dialog.get_by_role("button", name="Update preview").click()
     result = await response.value
@@ -114,6 +120,11 @@ async def exercise(page, library, sql, db):
     verify(sql, db)
     with ZipFile(comic) as archive:
         assert fromstring(archive.read("ComicInfo.xml")).findtext("Title") == TITLE
+        assert fromstring(archive.read("ComicInfo.xml")).findtext("Tags") == "Harbor, Coastal"
+        assert [n.text for n in fromstring(archive.read("MetronInfo.xml")).findall("Tags/Tag")] == [
+            "Harbor",
+            "Coastal",
+        ]
         for name in ("ComicInfo.xml", "MetronInfo.xml"):
             assert fromstring(archive.read(name)).findtext("AgeRating") == "Teen"
         assert fromstring(archive.read("MetronInfo.xml")).findtext("Stories/Story") == TITLE

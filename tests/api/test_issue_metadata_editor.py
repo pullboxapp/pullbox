@@ -199,6 +199,10 @@ async def test_editor_opens_when_embedded_rating_has_no_exact_equivalent(
         {"cover_date": {"source": "custom", "value": "2026-02-30"}},
         {"title": {"source": "library", "value": "Client-injected value"}},
         {"age_rating": {"source": "custom", "value": "PG-13"}},
+        {"tags": {"source": "custom", "value": "City\ncity"}},
+        {"tags": {"source": "custom", "value": "City,Night"}},
+        {"tags": {"source": "custom", "value": "x" * 256}},
+        {"tags": {"source": "custom", "value": "\n".join(map(str, range(129)))}},
     ],
 )
 async def test_editor_rejects_invalid_or_protected_edits(

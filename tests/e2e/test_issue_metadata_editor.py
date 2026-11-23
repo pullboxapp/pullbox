@@ -61,6 +61,19 @@ def test_editor_select_preview_apply_and_validation_retention(
             "differs": False,
         },
         {
+            "key": "issue.tags",
+            "label": "Tags",
+            "current": "",
+            "editable": True,
+            "input_type": "textarea",
+            "options": [
+                {"source": "library", "value": ""},
+                {"source": "ComicInfo.xml", "value": "City\nNight"},
+                {"source": "MetronInfo.xml", "value": "City\nNight"},
+            ],
+            "differs": False,
+        },
+        {
             "key": "series.title",
             "label": "Series title",
             "current": "Batman",
@@ -148,11 +161,18 @@ def test_editor_select_preview_apply_and_validation_retention(
     page.get_by_role("option", name="Enter correction", exact=True).click()
     dialog.get_by_role("button", name="New Age rating", exact=True).click()
     page.get_by_role("option", name="Teen", exact=True).click()
+    dialog.get_by_label("Update Tags", exact=True).check()
+    dialog.get_by_role("button", name="Value source for Tags", exact=True).click()
+    page.get_by_role("option", name="Enter correction", exact=True).click()
+    tags = dialog.get_by_label("New Tags", exact=True)
+    expect(tags).to_have_value("City\nNight")
+    tags.fill("City\nHarbor")
     dialog.get_by_role("button", name="Update preview", exact=True).click()
     expect(dialog.get_by_role("button", name="Apply selected changes", exact=True)).to_be_enabled()
     selected = {
         "title": {"source": "custom", "value": "My corrected title"},
         "age_rating": {"source": "custom", "value": "Teen"},
+        "tags": {"source": "custom", "value": "City\nHarbor"},
     }
     assert previews[-1] == {"edits": selected}
     assert_no_axe_violations(

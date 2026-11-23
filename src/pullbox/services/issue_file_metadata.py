@@ -31,6 +31,7 @@ from pullbox.schemas.issue_file_metadata import (
     FileMetadataPreview,
     SharedXmlChoices,
 )
+from pullbox.schemas.issue_metadata_editor import EDITOR_XML_FIELDS
 from pullbox.services.archive_metadata_binding import (
     ArchiveMetadataBindingError,
     ArchiveMetadataTarget,
@@ -86,10 +87,18 @@ def file_metadata_error(exc: BaseException) -> str:
     if isinstance(exc, IssueMetadataEditError):
         return str(exc)
     code = getattr(exc, "code", "")
-    if code == "rating_override_changed":
+    if code in {"rating_override_changed", "tags_override_changed"}:
+        label = "age rating" if code == "rating_override_changed" else "tags"
         return (
-            "The file no longer matches your saved age rating. Open Edit metadata on "
-            "the issue, select Age rating, and preview the value to keep. No file was changed."
+            f"The file no longer matches your saved {label}. Open Edit metadata on "
+            f"the issue, select {label.capitalize()}, and preview the value to keep. "
+            "No file was changed."
+        )
+    if code == "ambiguous_tag_id":
+        return (
+            "Multiple Metron tags share a name. Pullbox cannot tell which identifier to keep. "
+            "Remove that tag from your proposed list, or correct its IDs in the source, "
+            "then preview again. No file was changed."
         )
     if code == "propagation_pair_required":
         return (
@@ -361,25 +370,26 @@ def _prepare(
     else:
         series, issue, conflicts = review_metadata_fields(binding, archive, series, issue, choices)
     shared_choices = shared_xml_choices(choices)
-    edit_rating = bool(editor and editor.writes_age_rating)
+    reviewed_xml_fields = editor.reviewed_xml_fields if editor else frozenset()
     shared_conflicts = review_preserved_fields(files, shared_choices)
-    if edit_rating:
-        shared_conflicts = [c for c in shared_conflicts if c.key != "xml.AgeRating"]
-    elif editor is not None:
-        rating = next(f for f in editor_fields if f.key == "issue.age_rating")
-        embedded = {o.source: o.value for o in rating.options if o.source != "library"}
-        incompatible = any(not o.selectable for o in rating.options) and (
+    for editor_field, key in EDITOR_XML_FIELDS.items() if editor else ():
+        if editor_field in reviewed_xml_fields:
+            shared_conflicts = [c for c in shared_conflicts if c.key != key]
+            continue
+        row = next(f for f in editor_fields if f.key == f"issue.{editor_field}")
+        embedded = {o.source: o.value for o in row.options if o.source != "library"}
+        incompatible = any(not o.selectable for o in row.options) and (
             embedded.get("ComicInfo.xml") != embedded.get("MetronInfo.xml")
         )
-        if ((rating.overridden and rating.differs) or incompatible) and not any(
-            c.key == "xml.AgeRating" for c in shared_conflicts
+        if ((row.overridden and row.differs) or incompatible) and not any(
+            c.key == key for c in shared_conflicts
         ):
             shared_conflicts.append(
                 FileMetadataConflict(
-                    key="xml.AgeRating",
-                    label="Age rating",
+                    key=key,
+                    label=row.label,
                     options=[],
-                    note="Select Age rating to choose the value to write to both documents.",
+                    note=f"Select {row.label} to choose the value to write to both documents.",
                 )
             )
     conflicts.extend(shared_conflicts)
@@ -397,7 +407,7 @@ def _prepare(
             previous_series=binding.metadata.series.baseline,
             previous_issue=binding.metadata.issues[0].baseline,
             shared_choices=shared_choices,
-            edit_age_rating=edit_rating,
+            reviewed_xml_fields=reviewed_xml_fields,
         )
     except ArchiveMetadataRenderError as exc:
         # Only descriptive disagreements enter review; identity/schema guards still fail closed.
@@ -405,7 +415,9 @@ def _prepare(
             ready
             or (
                 exc.code != "unreconciled_field"
-                and not (editor and exc.code == "rating_override_changed")
+                and not (
+                    editor and exc.code in {"rating_override_changed", "tags_override_changed"}
+                )
             )
             or not any(
                 item.key.split(".")[1] == exc.field for item in conflicts if item.selected is None
@@ -591,7 +603,7 @@ async def write_file_metadata(
             cancellation_check=check_control,
             progress_callback=progress,
             shared_choices=prepared.shared_choices,
-            edit_age_rating=bool(editor and editor.writes_age_rating),
+            reviewed_xml_fields=editor.reviewed_xml_fields if editor else frozenset(),
             propagation_fields=propagation_fields,
         ) as staged:
             plan = await prepare_archive_publication(

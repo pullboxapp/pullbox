@@ -36,10 +36,11 @@ contains an actual XML change, the normal reviewed archive write still applies.
 | Catalog page count | Integer 0-1000000 | PageCount | PageCount | Editable, never changes physical pages |
 | Creator credits | Up to 128 normalized Name / Role entries | Role-specific elements | Credits | Editable; resource IDs/unsupported content block destructive changes |
 | Age rating | Unknown, Everyone, Teen, or explicit clear | AgeRating | AgeRating | Editable even when both old values agree; a manual correction is saved with the issue |
+| Tags | Up to 128 distinct labels, one per line, maximum 255 characters each | Tags, comma-separated | Tags/Tag | Editable; retained labels keep their resource IDs, added labels have no ID |
 | Issue number, native provider IDs | Identity | Number/Web | Number/IDs | Protected; use validated provider linking |
 | Cover artwork URL | Artwork | Existing renderer projection | Existing renderer projection | Protected; artwork workflow |
 | Series title, sort title, publisher, summary, dates, type, archive format, status, count, volume, language, artwork | Series-wide catalog values | Existing series projection | Existing series projection | Read-only; no changes to siblings |
-| Genres, tags, characters, teams, locations, imprint, arcs/positions | Preserved XML-only values | Corresponding elements | Corresponding elements | Display both documents; existing Write file metadata resolves disagreements |
+| Genres, characters, teams, locations, imprint, arcs/positions | Preserved XML-only values | Corresponding elements | Corresponding elements | Display both documents; existing Write file metadata resolves disagreements |
 
 Arbitrary extension nodes, resource identifiers and page annotations remain under
 the existing preservation contract, not editable raw XML. See the separate
@@ -52,6 +53,12 @@ and the bundled MetronInfo 1.1 schema. A format-specific label is shown as
 evidence, not translated into a guessed audience. Explicitly clearing a rating
 removes both elements; selecting Unknown writes both elements. No provider is
 queried for a rating. A provider refresh preserves a manual correction.
+
+Tags preserve the selected order. A comma inside one Metron tag is not two
+ComicInfo tags: review the original and explicitly replace or clear it. An
+exact retained label keeps its Metron resource ID, a renamed label starts
+without one, and ambiguous duplicate IDs are never reassigned. A saved tag
+override does not authorize overwriting later external changes.
 
 ## Safety Boundary
 

@@ -64,7 +64,7 @@
                         </template>
                         <p class="text-sm text-pb-warning" x-show="editorDrafts[field.key].source === 'clear'">This deliberately removes the value and keeps it empty during refresh.</p>
                         <p class="text-sm text-pb-text-sec" x-show="editorDrafts[field.key].source === 'reset'">Keep the current value now and allow future provider refreshes to update it.</p>
-                        <p class="text-sm text-pb-warning" x-show="editorDrafts[field.key].source === 'reset' && !choicesDirty && preview && (preview.conflicts || []).some(c => c.key === field.key || (field.key === 'issue.age_rating' && c.key === 'xml.AgeRating'))">This field has conflicting values. Choose which value to keep and apply it first, then remove the override.</p>
+                        <p class="text-sm text-pb-warning" x-show="editorDrafts[field.key].source === 'reset' && !choicesDirty && preview && (preview.conflicts || []).some(c => c.key === field.key || c.key === field.xml_conflict_key)">This field has conflicting values. Choose which value to keep and apply it first, then remove the override.</p>
                         <div x-show="editorDrafts[field.key].source === 'custom'" class="space-y-2">
                           <label class="field-label" :for="'editor-value-' + field.key" x-text="'New ' + field.label"></label>
                           <template x-if="field.input_type === 'textarea' || field.input_type === 'credits'">

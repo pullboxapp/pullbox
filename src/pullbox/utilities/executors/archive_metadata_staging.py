@@ -18,6 +18,7 @@ from pullbox.core.file_safety import FileSafetyError
 from pullbox.core.metadata_identity import ExternalIdentityRef
 from pullbox.core.metadata_pdf_source import PdfQuality
 from pullbox.schemas.issue_file_metadata import SharedXmlChoices
+from pullbox.schemas.issue_metadata_editor import EditorXmlField
 from pullbox.schemas.metadata_snapshot import MetadataSnapshot
 from pullbox.services.archive_metadata_rendering import ArchiveMetadataRenderError
 from pullbox.services.archive_metadata_writing import write_cbz_metadata
@@ -52,7 +53,7 @@ class _StagingRequest(BaseModel):
     pdf_quality: PdfQuality = "medium"
     metadata_state: SeriesRefreshState | None = None
     shared_choices: SharedXmlChoices | None = None
-    edit_age_rating: bool = Field(default=False, strict=True)
+    reviewed_xml_fields: frozenset[EditorXmlField] = frozenset()
     propagation_fields: frozenset[str] | None = None
 
 
@@ -99,7 +100,7 @@ async def stage_cbz_metadata_interruptible(
     pdf_quality: PdfQuality = "medium",
     metadata_state: SeriesRefreshState | None = None,
     shared_choices: SharedXmlChoices | None = None,
-    edit_age_rating: bool = False,
+    reviewed_xml_fields: frozenset[EditorXmlField] = frozenset(),
     propagation_fields: frozenset[str] | None = None,
 ) -> AsyncIterator[StagedArchiveMetadata]:
     """Stage a verified pair, then yield to the independently authorized owner.
@@ -128,7 +129,7 @@ async def stage_cbz_metadata_interruptible(
         pdf_quality=pdf_quality,
         metadata_state=metadata_state,
         shared_choices=shared_choices,
-        edit_age_rating=edit_age_rating,
+        reviewed_xml_fields=reviewed_xml_fields,
         propagation_fields=propagation_fields,
     )
     encoded = request.model_dump_json().encode("utf-8")
@@ -267,7 +268,7 @@ def worker_stage_metadata(payload: dict[str, Any]) -> dict[str, Any]:
             pdf_quality=request.pdf_quality,
             metadata_state=request.metadata_state,
             shared_choices=request.shared_choices,
-            edit_age_rating=request.edit_age_rating,
+            reviewed_xml_fields=request.reviewed_xml_fields,
             propagation_fields=request.propagation_fields,
         )
         _check_fingerprint(request.source_path, request.source_fingerprint)

@@ -19,12 +19,15 @@ from pullbox.core.metadata_identity import (
 from pullbox.core.metadata_xml import MetadataXmlError, parse_metadata_xml
 from pullbox.core.metroninfo_schema import validate_metroninfo_xml
 from pullbox.schemas.issue_file_metadata import SharedXmlChoices
+from pullbox.schemas.issue_metadata_editor import EditorXmlField
 from pullbox.schemas.metadata_snapshot import MetadataSnapshot, MetadataValues
 from pullbox.services.archive_metadata_preservation import (
     ArchiveMetadataRenderError as ArchiveMetadataRenderError,
 )
 from pullbox.services.archive_metadata_preservation import (
+    apply_issue_tags,
     coordinate_preserved_fields,
+    embedded_tags,
     preserved_roots,
     set_text,
 )
@@ -70,7 +73,7 @@ def render_archive_metadata(
     previous_issue: MetadataSnapshot | None = None,
     replace_managed: bool = False,
     shared_choices: SharedXmlChoices | None = None,
-    edit_age_rating: bool = False,
+    reviewed_xml_fields: frozenset[EditorXmlField] = frozenset(),
     propagation_fields: frozenset[str] | None = None,
 ) -> RenderedArchiveMetadata:
     """Render both documents from bound snapshots; this is not write permission.
@@ -126,16 +129,23 @@ def render_archive_metadata(
     _render_core(series, issue, ci, mi)
     _render_ids(series, issue, ci, mi, primary)
     _render_credits(issue, archive, ci, mi)
-    if edit_age_rating:
-        if not any(o.field == "age_rating" and o.user_override for o in issue.origins):
-            raise ArchiveMetadataRenderError("invalid_choice", "AgeRating")
+    protected = {o.field for o in issue.origins if o.user_override}
+    if not reviewed_xml_fields <= protected:
+        raise ArchiveMetadataRenderError("invalid_choice")
+    if "age_rating" in reviewed_xml_fields:
         for root in (ci, mi):
             set_text(root, "AgeRating", issue.values.age_rating)
-    elif any(o.field == "age_rating" and o.user_override for o in issue.origins) and any(
+    elif "age_rating" in protected and any(
         root.findtext("AgeRating") != issue.values.age_rating for root in (ci, mi)
     ):
         # A saved correction is not fresh approval to replace externally changed metadata.
         raise ArchiveMetadataRenderError("rating_override_changed", "AgeRating")
+    if "tags" in reviewed_xml_fields:
+        apply_issue_tags(ci, mi, issue.values.tags or ())
+    elif "tags" in protected and any(
+        existing != (issue.values.tags or ()) for existing in embedded_tags(ci, mi)
+    ):
+        raise ArchiveMetadataRenderError("tags_override_changed", "Tags")
     coordinate_preserved_fields(ci, mi, shared_choices)
     return _validated_pair(ci, mi)
 

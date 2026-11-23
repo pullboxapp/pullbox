@@ -5,8 +5,20 @@ from typing import Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 type EditableIssueField = Literal[
-    "title", "description", "cover_date", "store_date", "page_count", "credits", "age_rating"
+    "title",
+    "description",
+    "cover_date",
+    "store_date",
+    "page_count",
+    "credits",
+    "age_rating",
+    "tags",
 ]
+type EditorXmlField = Literal["age_rating", "tags"]
+EDITOR_XML_FIELDS: dict[EditorXmlField, Literal["xml.AgeRating", "xml.Tags"]] = {
+    "age_rating": "xml.AgeRating",
+    "tags": "xml.Tags",
+}
 
 
 class IssueMetadataEdit(BaseModel):
@@ -25,12 +37,15 @@ class IssueMetadataEdit(BaseModel):
 class IssueMetadataEditorReview(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    edits: dict[EditableIssueField, IssueMetadataEdit] = Field(default_factory=dict, max_length=7)
+    edits: dict[EditableIssueField, IssueMetadataEdit] = Field(default_factory=dict, max_length=8)
 
     @property
-    def writes_age_rating(self) -> bool:
-        edit = self.edits.get("age_rating")
-        return edit is not None and edit.source != "reset"
+    def reviewed_xml_fields(self) -> frozenset[EditorXmlField]:
+        return frozenset(
+            field
+            for field in EDITOR_XML_FIELDS
+            if field in self.edits and self.edits[field].source != "reset"
+        )
 
 
 class IssueMetadataEditorApproval(IssueMetadataEditorReview):
@@ -57,3 +72,4 @@ class IssueMetadataEditorField(BaseModel):
     differs: bool = False
     selected: bool = False
     origin: str = ""
+    xml_conflict_key: str | None = None
