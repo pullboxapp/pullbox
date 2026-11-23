@@ -5,6 +5,7 @@ from typing import Annotated, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from pullbox.schemas.metadata_issue_arcs import IssueArcEntry, IssueArcList
+from pullbox.schemas.metadata_issue_prices import IssuePriceEntry, IssuePriceList
 from pullbox.schemas.metadata_issue_universes import (
     UNIVERSE_LIST,
     IssueUniverseEntry,
@@ -12,6 +13,7 @@ from pullbox.schemas.metadata_issue_universes import (
 )
 
 type EditorConflictField = Literal[
+    "xml.Prices",
     "xml.Stories",
     "xml.Universes",
     "xml.Reprints",
@@ -40,6 +42,7 @@ type EditorConflictField = Literal[
 ]
 
 type EditableIssueField = Literal[
+    "prices",
     "story_titles",
     "universes",
     "reprints",
@@ -73,6 +76,7 @@ type EditableIssueField = Literal[
     "story_arcs",
 ]
 type EditorXmlField = Literal[
+    "prices",
     "story_titles",
     "universes",
     "reprints",
@@ -100,6 +104,7 @@ type EditorXmlField = Literal[
     "story_arcs",
 ]
 EDITOR_XML_FIELDS: dict[EditorXmlField, EditorConflictField] = {
+    "prices": "xml.Prices",
     "story_titles": "xml.Stories",
     "universes": "xml.Universes",
     "reprints": "xml.Reprints",
@@ -132,7 +137,13 @@ class IssueMetadataEdit(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     source: Literal["library", "ComicInfo.xml", "MetronInfo.xml", "custom", "clear", "reset"]
-    value: Annotated[str, Field(max_length=200000)] | IssueArcList | IssueUniverseList | None = None
+    value: (
+        Annotated[str, Field(max_length=200000)]
+        | IssueArcList
+        | IssueUniverseList
+        | IssuePriceList
+        | None
+    ) = None
 
     @model_validator(mode="after")
     def explicit_custom_value(self) -> Self:
@@ -144,7 +155,7 @@ class IssueMetadataEdit(BaseModel):
 class IssueMetadataEditorReview(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    edits: dict[EditableIssueField, IssueMetadataEdit] = Field(default_factory=dict, max_length=31)
+    edits: dict[EditableIssueField, IssueMetadataEdit] = Field(default_factory=dict, max_length=32)
 
     @field_validator("edits", mode="before")
     @classmethod
@@ -164,7 +175,14 @@ class IssueMetadataEditorReview(BaseModel):
         for field, edit in self.edits.items():
             if edit.source != "custom":
                 continue
-            if field == "universes":
+            if field == "prices":
+                if not isinstance(edit.value, tuple) or not isinstance(
+                    edit.value[0], IssuePriceEntry
+                ):
+                    raise ValueError(
+                        "Enter the two-letter country code and decimal amount for each price"
+                    )
+            elif field == "universes":
                 if not isinstance(edit.value, tuple) or not isinstance(
                     edit.value[0], IssueUniverseEntry
                 ):
@@ -205,11 +223,12 @@ class IssueMetadataEditorField(BaseModel):
     proposed: str
     editable: bool = False
     reason: str = ""
-    input_type: Literal["text", "textarea", "date", "number", "credits", "arcs", "universes"] = (
-        "text"
-    )
+    input_type: Literal[
+        "text", "textarea", "date", "number", "credits", "arcs", "universes", "prices"
+    ] = "text"
     arc_draft: tuple[IssueArcEntry, ...] = ()
     universe_draft: tuple[IssueUniverseEntry, ...] = Field(default=(), exclude_if=lambda v: not v)
+    price_draft: tuple[IssuePriceEntry, ...] = Field(default=(), exclude_if=lambda v: not v)
     allowed_values: tuple[str, ...] = ()
     options: list[IssueMetadataEditorOption] = Field(default_factory=list)
     overridden: bool = False

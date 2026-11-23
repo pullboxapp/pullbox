@@ -22,6 +22,16 @@ def test_editor_select_preview_apply_and_validation_retention(
     previews = []
     fields = [
         {
+            "key": "issue.prices",
+            "label": "Cover prices",
+            "editable": True,
+            "input_type": "prices",
+            "xml_conflict_key": "xml.Prices",
+            "price_draft": [{"country": "US", "amount": "2.00"}, {"country": "CA", "amount": "0"}],
+            "options": [{"source": "MetronInfo.xml", "value": "US 2.00\nCA 0"}],
+            "differs": False,
+        },
+        {
             "key": "issue.story_titles",
             "label": "Story titles",
             "input_type": "textarea",
@@ -281,6 +291,21 @@ def test_editor_select_preview_apply_and_validation_retention(
     groups = dialog.get_by_label("New Series groups", exact=True)
     expect(groups).to_have_value("Gotham\nClassics")
     groups.fill("Classics\nGotham & Beyond")
+    dialog.get_by_label("Update Cover prices", exact=True).check()
+    dialog.get_by_role("button", name="Value source for Cover prices", exact=True).click()
+    page.get_by_role("option", name="Enter correction", exact=True).click()
+    expect(dialog.get_by_label("Price amount 2", exact=True)).to_have_value("0", timeout=2000)
+    dialog.get_by_role("button", name="Move price 2 up", exact=True).click()
+    expect(dialog.get_by_label("Price country 1", exact=True)).to_have_value("CA")
+    dialog.get_by_label("Price amount 2", exact=True).fill("4.990")
+    dialog.get_by_role("button", name="Add price entry", exact=True).click()
+    dialog.get_by_label("Price country 3", exact=True).fill("gb")
+    dialog.get_by_label("Price amount 3", exact=True).fill("1e5")
+    before_bad_price = len(previews)
+    dialog.get_by_role("button", name="Update preview", exact=True).click()
+    expect(dialog.get_by_role("alert")).to_contain_text("Enter each amount as a decimal")
+    assert len(previews) == before_bad_price
+    dialog.get_by_label("Price amount 3", exact=True).fill("0.123456789012345678")
     dialog.get_by_label("Update Story titles", exact=True).check()
     dialog.get_by_role("button", name="Value source for Story titles", exact=True).click()
     page.get_by_role("option", name="Enter correction", exact=True).click()
@@ -329,6 +354,14 @@ def test_editor_select_preview_apply_and_validation_retention(
     dialog.get_by_role("button", name="Update preview", exact=True).click()
     expect(dialog.get_by_role("button", name="Apply selected changes", exact=True)).to_be_enabled()
     selected = {
+        "prices": {
+            "source": "custom",
+            "value": [
+                {"country": "CA", "amount": "0"},
+                {"country": "US", "amount": "4.990"},
+                {"country": "GB", "amount": "0.123456789012345678"},
+            ],
+        },
         "story_titles": {"source": "custom", "value": "Backup story\nCorrected opening"},
         "universes": {
             "source": "custom",

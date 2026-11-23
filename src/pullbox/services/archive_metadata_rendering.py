@@ -38,12 +38,14 @@ from pullbox.services.archive_metadata_preservation import (
 from pullbox.services.archive_metadata_preservation import (
     apply_issue_labels,
     apply_metron_labels,
+    apply_prices,
     apply_reviewed_arcs,
     apply_universes,
     coordinate_preserved_fields,
     editor_arc_value,
     embedded_labels,
     embedded_metron_titles,
+    embedded_prices,
     embedded_universes,
     metron_simple_text,
     preserved_roots,
@@ -125,7 +127,7 @@ def render_archive_metadata(
     _identities(series, issue, archive)
     if any(item.code != "unmapped_content" for item in archive.diagnostics):
         raise ArchiveMetadataRenderError("invalid_input")
-    ci, mi = preserved_roots(files)
+    ci, mi = preserved_roots(files, allow_price_review="prices" in reviewed_xml_fields)
     primary = _primary(issue, archive, primary_identity)
     _namespace_guard(mi, archive, primary)
     _guard_values(series, issue, archive, previous_series, previous_issue, replace_managed)
@@ -170,6 +172,16 @@ def render_archive_metadata(
             if not reviewed:
                 raise ArchiveMetadataRenderError("label_override_changed", tag)
             set_text(mi, tag, desired)
+    if "prices" in protected:
+        try:
+            prices = embedded_prices(mi)
+        except ValueError as exc:
+            raise ArchiveMetadataRenderError("label_override_changed", "Prices") from exc
+        if "prices" in reviewed_xml_fields:
+            if prices != issue.values.prices or not prices:
+                apply_prices(mi, issue.values.prices or ())
+        elif prices != issue.values.prices:
+            raise ArchiveMetadataRenderError("label_override_changed", "Prices")
     if "universes" in protected:
         try:
             universes = embedded_universes(mi)

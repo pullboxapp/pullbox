@@ -87,6 +87,7 @@ if TYPE_CHECKING:
 
 def repairable_metadata_field_error(exc: ArchiveMetadataRenderError) -> bool:
     return exc.code in {
+        "invalid_price",
         "rating_override_changed",
         "label_override_changed",
         "publisher_required",
@@ -99,6 +100,11 @@ def file_metadata_error(exc: BaseException) -> str:
     if isinstance(exc, IssueMetadataEditError):
         return str(exc)
     code = getattr(exc, "code", "")
+    if code == "invalid_price":
+        return (
+            "Open Edit issue fields and select Cover prices. Enter a two-letter country code "
+            "and a decimal amount for each price, or choose Clear value. No file was changed."
+        )
     if code == "comicinfo_text_identity_change":
         return (
             "This edit would change a comic identifier spanning neighboring ComicInfo.xml "
@@ -120,6 +126,7 @@ def file_metadata_error(exc: BaseException) -> str:
             "CollectionTitle": "collection title",
             "Reprints": "reprints",
             "Stories": "story titles",
+            "Prices": "cover prices",
             "Universes": "universes",
             "MangaVolume": "manga volume",
             "SeriesGroup": "series groups",
@@ -477,6 +484,21 @@ def review_metadata_pair(
         )
     except ArchiveMetadataRenderError as exc:
         # Only descriptive disagreements enter review; identity/schema guards still fail closed.
+        if (
+            editor is not None
+            and exc.code == "invalid_price"
+            and "prices" not in reviewed_xml_fields
+        ):
+            if not any(c.key == "xml.Prices" for c in conflicts):
+                conflicts.append(
+                    FileMetadataConflict(
+                        key="xml.Prices",
+                        label="Cover prices",
+                        options=[],
+                        note=file_metadata_error(exc),
+                    )
+                )
+            ready = False
         arc_issue = (
             editor is not None
             and "story_arcs" not in reviewed_xml_fields
@@ -491,7 +513,8 @@ def review_metadata_pair(
                 and not (
                     editor
                     and (
-                        exc.code in {"rating_override_changed", "label_override_changed"}
+                        exc.code
+                        in {"rating_override_changed", "label_override_changed", "invalid_price"}
                         or (
                             exc.code == "publisher_required"
                             and "imprint" not in reviewed_xml_fields

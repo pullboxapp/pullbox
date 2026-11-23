@@ -51,6 +51,7 @@ METRON_ONLY_TAGS: dict[MetronTextField, str] = {
     "manga_volume": "MangaVolume",
 }
 SINGLE_DOCUMENT: dict[str, str] = {
+    "prices": "MetronInfo.xml",
     "universes": "MetronInfo.xml",
     "story_titles": "MetronInfo.xml",
     "reprints": "MetronInfo.xml",

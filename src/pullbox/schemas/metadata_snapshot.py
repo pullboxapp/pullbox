@@ -24,6 +24,7 @@ from pullbox.core.metadata_identity import (
 from pullbox.core.metroninfo import MAX_METRONINFO_FIELD_LENGTH
 from pullbox.schemas.metadata_credits import MetadataCredits
 from pullbox.schemas.metadata_issue_arcs import IssueArcList
+from pullbox.schemas.metadata_issue_prices import IssuePriceList
 from pullbox.schemas.metadata_issue_universes import IssueUniverseList
 from pullbox.schemas.metadata_labels import IssueLabels, MetronTitleList
 from pullbox.schemas.metadata_sources import MetadataDomain
@@ -97,6 +98,7 @@ class MetadataValues(BaseModel):
     reprints: MetronTitleList | None = Field(default=None, exclude_if=lambda v: v is None)
     story_titles: MetronTitleList | None = Field(default=None, exclude_if=lambda v: v is None)
     universes: IssueUniverseList | None = Field(default=None, exclude_if=lambda v: v is None)
+    prices: IssuePriceList | None = Field(default=None, exclude_if=lambda v: v is None)
     manga_volume: str | None = Field(default=None, exclude_if=lambda v: v is None)
     alternate_count: int | None = Field(
         default=None, ge=-1, le=2147483647, strict=True, exclude_if=lambda v: v is None

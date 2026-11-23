@@ -28,6 +28,10 @@ function issueEditorDraftState(fieldIdPrefix) {
       return options;
     },
     initialEditorValue: function (field) {
+      if (field.input_type === "prices") {
+        const rows = field.price_draft?.length ? field.price_draft : [{}];
+        return rows.map(entry => this.priceRow(entry));
+      }
       if (field.input_type === "universes") {
         const rows = field.universe_draft?.length ? field.universe_draft : [{}];
         return rows.map(entry => this.universeRow(entry));
@@ -47,7 +51,20 @@ function issueEditorDraftState(fieldIdPrefix) {
     universeRow: function (entry = {}) {
       return { key: ++this.editorRowId, name: entry.name || "", designation: entry.designation || "" };
     },
-    moveUniverse: function (rows, index, offset) {
+    priceRow: function (entry = {}) {
+      return { key: ++this.editorRowId, country: entry.country || "", amount: entry.amount || "" };
+    },
+    priceValues: function (rows) {
+      if (!rows.length) throw new Error("Choose Clear value to remove all cover prices.");
+      return rows.map(row => {
+        const code = row.country.trim(), amount = row.amount.trim();
+        if (!/^[A-Za-z]{2}$/.test(code)) throw new Error("Enter a two-letter country code for each price.");
+        if (!/^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)$/.test(amount))
+          throw new Error("Enter each amount as a decimal, without a currency symbol or thousands separator.");
+        return { country: code.toUpperCase(), amount };
+      });
+    },
+    moveEditorRow: function (rows, index, offset) {
       const target = index + offset;
       if (this.busy || target < 0 || target >= rows.length) return;
       rows.splice(target, 0, rows.splice(index, 1)[0]);
@@ -105,6 +122,7 @@ function issueEditorDraftState(fieldIdPrefix) {
         if (draft.source === "custom") {
           if (key === "issue.story_arcs") edit.value = this.arcValues(draft.value);
           else if (key === "issue.universes") edit.value = this.universeValues(draft.value);
+          else if (key === "issue.prices") edit.value = this.priceValues(draft.value);
           else edit.value = draft.value;
         }
         edits[key.slice(6)] = edit;

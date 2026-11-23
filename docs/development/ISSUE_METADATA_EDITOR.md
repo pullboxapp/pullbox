@@ -74,6 +74,7 @@ before moving it aside. The selected source file is never the replacement target
 | Manga | Same choices, plus Yes (right to left) | Manga | No native equivalent | Corrects the book's metadata, not the reader's settings, page order, or Metron's manga volume number. |
 | Notes | Plain text, up to 4096 characters including protected markers | Notes | Notes | Choose the prose from either file, enter text, or clear it. Each document keeps its own trailing identity markers. |
 | Cover date | ISO date | Year/Month/Day | CoverDate | Editable, distinct from store date |
+| Cover prices | Up to 128 country and amount pairs | No native equivalent | Prices/Price and its country attribute | Add, reorder, correct, or remove entries. Country codes can repeat. Zero and decimal precision are preserved; the format has no currency field. |
 | Store date | ISO date | No native equivalent | StoreDate | Editable; does not overwrite the cover date |
 | Catalog page count | Integer 0-1000000 | PageCount | PageCount | Editable, never changes physical pages |
 | Creator credits | Up to 128 normalized Name / Role entries | Role-specific elements | Credits | Editable; resource IDs/unsupported content block destructive changes |
@@ -86,6 +87,11 @@ before moving it aside. The selected source file is never the replacement target
 | Series title, sort title, publisher, summary, dates, type, archive format, status, count, volume, language, artwork | Series-wide catalog values | Existing series projection | Existing series projection | Read-only; no changes to siblings |
 | Issue imprint | Single-line name, up to 255 characters | Imprint | Publisher/Imprint | Editable for this issue only. A nonempty imprint requires a named publisher; retain its ID only for the same imprint. |
 | Embedded story arcs | Up to 128 unique arc names and optional positive positions | StoryArc and StoryArcNumber | Arcs/Arc/Name and Number | Edit names and positions together. Retained names keep their IDs. Does not create tracked arcs, change memberships, or reorder a reading list. |
+
+Choose **Cover prices** to correct or clear a malformed country or amount. The
+editor offers this repair only if the rest of the Metron document passes its
+schema. The original stays untouched until approval, and the final XML must
+validate in full. Annotated price entries are not editable.
 
 An unreviewed Metron file with a single short story still offers that story as
 an issue title, including the usual review if the titles disagree. Multiple
@@ -123,7 +129,6 @@ does not authorize dropping preserved data or writing to a new field on import.
 
 | Source fields | Remaining decision or workflow |
 | --- | --- |
-| Metron Prices | Price controls must preserve currencies. |
 | ComicInfo Web, GTIN; Metron URLs, GTIN | Distinguish descriptive links from provider identity evidence; keep primary URLs, ISBNs and UPCs distinct. |
 | ComicInfo Pages and attributes; Metron LastModified and nested resource IDs | Page annotations and source timestamps are not descriptive corrections. Resource IDs cannot be assigned by position or inferred from a renamed label. |
 | Metron Series/AlternativeNames and Series/VolumeCount | Series-wide values; do not implement these as issue-only overrides. |

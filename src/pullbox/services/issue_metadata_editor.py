@@ -33,6 +33,7 @@ from pullbox.schemas.issue_metadata_editor import (
     IssueMetadataEditorReview,
 )
 from pullbox.schemas.metadata_issue_arcs import IssueArcEntry, comicinfo_arcs
+from pullbox.schemas.metadata_issue_prices import IssuePriceEntry
 from pullbox.schemas.metadata_issue_universes import IssueUniverseEntry
 from pullbox.schemas.metadata_labels import LABEL_XML_PATHS, METRON_TITLE_LISTS, selectable_labels
 from pullbox.schemas.metadata_snapshot import (
@@ -48,6 +49,7 @@ from pullbox.services.archive_metadata_preservation import (
     editor_arc_value,
     embedded_labels,
     embedded_metron_titles,
+    embedded_prices,
     embedded_universes,
     metron_simple_text,
     preserved_roots,
@@ -75,6 +77,7 @@ EDITABLE_FIELDS = {
     "reprints": ("Reprints", "textarea"),
     "story_titles": ("Story titles", "textarea"),
     "universes": ("Universes", "universes"),
+    "prices": ("Cover prices", "prices"),
     "manga_volume": ("Manga volume", "text"),
     "black_and_white": ("Black and white", "text"),
     "manga": ("Manga", "text"),
@@ -91,6 +94,8 @@ EDITABLE_FIELDS = {
 }
 
 FIELD_HELP = {
+    "prices": "MetronInfo.xml only. Enter each amount with its two-letter country code. "
+    "A country can appear more than once. No currency is inferred or converted.",
     "story_titles": "MetronInfo.xml only. Enter the stories in reading order, one title per line. "
     "This does not rename the issue. Retained titles keep their IDs; new titles get no ID.",
     "universes": "MetronInfo.xml only. A name can appear with different designations. "
@@ -142,7 +147,7 @@ def display_editor_value(value: object) -> str:
     if value is None:
         return ""
     if isinstance(value, tuple):
-        if value and isinstance(value[0], IssueUniverseEntry):
+        if value and isinstance(value[0], (IssueUniverseEntry, IssuePriceEntry)):
             return "\n".join(e.label() for e in value)
         if value and isinstance(value[0], IssueArcEntry):
             return "\n".join(
@@ -173,7 +178,7 @@ def _selectable(field: str, value: object) -> bool:
         return value is None or shared_score(value) is not None
     if field in LABEL_XML_PATHS or field == "series_groups" or field in METRON_TITLE_LISTS:
         return selectable_labels(value, metron_titles=field in METRON_TITLE_LISTS)
-    if field in {"story_arcs", "universes"}:
+    if field in {"story_arcs", "universes", "prices"}:
         return not isinstance(value, str)
     if field == "imprint":
         return selectable_imprint(value)
@@ -307,7 +312,7 @@ def prepare_issue_editor(
     values = issue.values.model_dump()
     fields: list[IssueMetadataEditorField] = []
     effective = dict(review.edits)
-    ci, mi = preserved_roots(files)
+    ci, mi = preserved_roots(files, allow_price_review=True)
     for field, (label, input_type) in EDITABLE_FIELDS.items():
         current = getattr(issue_state.values, field)
         options: dict[str, object] = {"library": current}
@@ -330,12 +335,18 @@ def prepare_issue_editor(
                         f"{label} is read-only. {exc} Leave it unchanged or correct the source."
                     )
                     continue
-            elif field in METRON_ONLY_TAGS or field in METRON_TITLE_LISTS or field == "universes":
+            elif (
+                field in METRON_ONLY_TAGS
+                or field in METRON_TITLE_LISTS
+                or field in {"universes", "prices"}
+            ):
                 try:
                     if field in METRON_ONLY_TAGS:
                         value = metron_simple_text(mi, METRON_ONLY_TAGS[field])
                     elif field in METRON_TITLE_LISTS:
                         value = embedded_metron_titles(mi, METRON_TITLE_LISTS[field]) or None
+                    elif field == "prices":
+                        value = embedded_prices(mi)
                     else:
                         value = embedded_universes(mi)
                 except ValueError as exc:
@@ -455,6 +466,13 @@ def prepare_issue_editor(
         differs = any(value != current for value in options.values())
         arc_draft: tuple[IssueArcEntry, ...] = ()
         universe_draft: tuple[IssueUniverseEntry, ...] = ()
+        price_draft: tuple[IssuePriceEntry, ...] = ()
+        if field == "prices":
+            embedded = options.get("MetronInfo.xml")
+            if current or (previous and previous.user_override):
+                price_draft = issue_state.values.prices or ()
+            elif isinstance(embedded, tuple):
+                price_draft = embedded
         if field == "universes":
             embedded = options.get("MetronInfo.xml")
             if current or (previous and previous.user_override):
@@ -485,6 +503,7 @@ def prepare_issue_editor(
                 input_type=input_type,
                 arc_draft=arc_draft,
                 universe_draft=universe_draft,
+                price_draft=price_draft,
                 options=[
                     IssueMetadataEditorOption(
                         source=source,

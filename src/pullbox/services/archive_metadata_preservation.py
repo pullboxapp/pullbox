@@ -1,6 +1,6 @@
 """Preserve schema-specific values while coordinating shared archive metadata."""
 
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from copy import deepcopy
 from typing import cast
 from xml.etree import ElementTree as ET
@@ -20,6 +20,7 @@ from pullbox.schemas.issue_file_metadata import (
     SharedXmlField,
 )
 from pullbox.schemas.metadata_issue_arcs import ARC_LIST, IssueArcEntry
+from pullbox.schemas.metadata_issue_prices import PRICE_LIST, IssuePriceEntry
 from pullbox.schemas.metadata_issue_universes import UNIVERSE_LIST, IssueUniverseEntry
 from pullbox.schemas.metadata_labels import LABEL_XML_PATHS
 
@@ -85,7 +86,9 @@ class ArchiveMetadataRenderError(ValueError):
         super().__init__(code)
 
 
-def preserved_roots(files: ArchiveMetadataFiles) -> tuple[ET.Element, ET.Element]:
+def preserved_roots(
+    files: ArchiveMetadataFiles, *, allow_price_review: bool = False
+) -> tuple[ET.Element, ET.Element]:
     roots = []
     for member, name in ((files.comicinfo, "ComicInfo"), (files.metroninfo, "MetronInfo")):
         if (
@@ -124,7 +127,13 @@ def preserved_roots(files: ArchiveMetadataFiles) -> tuple[ET.Element, ET.Element
                 for node in (*root.findall("GTIN/ISBN"), *root.findall("GTIN/UPC")):
                     if node.attrib or len(node):
                         raise ArchiveMetadataRenderError("unsupported_content", "GTIN")
-                validate_metroninfo_xml(ET.tostring(root, encoding="utf-8"))
+                try:
+                    validate_metroninfo_xml(ET.tostring(root, encoding="utf-8"))
+                except MetadataXmlError as exc:
+                    if exc.code != "invalid_schema" or not _only_price_values_invalid(root):
+                        raise
+                    if not allow_price_review:
+                        raise ArchiveMetadataRenderError("invalid_price", "Prices") from exc
         except MetadataXmlError as exc:
             raise ArchiveMetadataRenderError("invalid_input", name) from exc
         roots.append(root)
@@ -245,6 +254,75 @@ def embedded_metron_titles(mi: ET.Element, path: str) -> tuple[str, ...]:
     return embedded_labels(mi, path)
 
 
+def embedded_prices(mi: ET.Element) -> tuple[IssuePriceEntry, ...] | str | None:
+    groups = mi.findall("Prices")
+    if not groups:
+        return None
+    parent = groups[0]
+    if (
+        len(groups) != 1
+        or parent.attrib
+        or (parent.text or "").strip()
+        or any(
+            n.tag != "Price" or set(n.attrib) - {"country"} or len(n) or (n.tail or "").strip()
+            for n in parent
+        )
+    ):
+        raise ValueError("Cover prices contain extra XML or an annotation.")
+    if not len(parent):
+        return None
+    rows = [
+        {"country": n.get("country", ""), "amount": (n.text or "").strip(" \t\r\n")} for n in parent
+    ]
+    try:
+        return PRICE_LIST.validate_python(rows)
+    except ValidationError:
+        return "\n".join(
+            f"{r['country'] or '(missing country)'} {r['amount'] or '(missing amount)'}"
+            for r in rows
+        )[:4096]
+
+
+def _only_price_values_invalid(mi: ET.Element) -> bool:
+    try:
+        if not isinstance(embedded_prices(mi), str):
+            return False
+    except ValueError:
+        return False
+    # Validate the entire document after substituting only the two editable scalar values.
+    # This scratch tree is never returned. The real output still has to pass the full schema.
+    probe = deepcopy(mi)
+    for node in probe.findall("Prices/Price"):
+        node.set("country", "US")
+        node.text = "0"
+    try:
+        validate_metroninfo_xml(ET.tostring(probe, encoding="utf-8"))
+    except MetadataXmlError:
+        return False
+    return True
+
+
+def apply_prices(mi: ET.Element, entries: tuple[IssuePriceEntry, ...]) -> None:
+    parent = mi.find("Prices")
+    if not entries:
+        if parent is not None:
+            mi.remove(parent)
+        return
+    if parent is None:
+        parent = ET.SubElement(mi, "Prices")
+    # Reuse matching nodes in order, including repeated prices and their original XML whitespace.
+    retained: defaultdict[tuple[str | None, str], deque[ET.Element]] = defaultdict(deque)
+    for node in list(parent):
+        retained[node.get("country"), (node.text or "").strip(" \t\r\n")].append(node)
+        parent.remove(node)
+    for entry in entries:
+        matches = retained[entry.country, entry.amount]
+        if matches:
+            parent.append(matches.popleft())
+        else:
+            ET.SubElement(parent, "Price", country=entry.country).text = entry.amount
+
+
 def _universe_pair(node: ET.Element) -> tuple[str, str | None]:
     return node.findtext("Name", "").strip(), node.findtext("Designation", "").strip() or None
 
@@ -329,7 +407,7 @@ def shared_xml_choices(choices: FileMetadataChoices) -> SharedXmlChoices:
 def review_preserved_fields(
     files: ArchiveMetadataFiles, choices: SharedXmlChoices, *, editor: bool = False
 ) -> list[FileMetadataConflict]:
-    ci, mi = preserved_roots(files)
+    ci, mi = preserved_roots(files, allow_price_review=editor)
     return _resolve_shared_fields(ci, mi, choices, editor=editor)
 
 

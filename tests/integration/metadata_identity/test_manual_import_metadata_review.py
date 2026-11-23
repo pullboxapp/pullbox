@@ -258,6 +258,7 @@ async def test_manual_editor_previews_and_applies_only_approved_edits(
                 "reprints": {"source": "custom", "value": "A, Vol. 1 #2\nGotham #3"},
                 "universes": {"source": "custom", "value": [{"name": "Gotham"}]},
                 "story_titles": {"source": "custom", "value": "Opening\nSecond feature"},
+                "prices": {"source": "custom", "value": [{"country": "GB", "amount": "2.990"}]},
             }
         },
     }
@@ -333,6 +334,9 @@ async def test_manual_editor_previews_and_applies_only_approved_edits(
                     "Second feature",
                 ]
                 assert ci.findtext("Title") not in {"Opening", "Second feature"}
+                price = mi.find("Prices/Price")
+                assert (price.get("country"), price.text) == ("GB", "2.990")
+                assert ci.find("Prices") is None
                 assert mi.find("Universes/Universe/Designation") is ci.find("Universes") is None
                 assert [(r.text, r.get("id")) for r in mi.findall("Reprints/Reprint")] == [
                     ("A, Vol. 1 #2", None),
