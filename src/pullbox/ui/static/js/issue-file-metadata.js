@@ -5,7 +5,8 @@ function issueEditorDraftState(fieldIdPrefix) {
     initializeFields: function (data) {
       this.allFields = false; this.editorDrafts = {};
       (data.editor_fields || []).filter(field => field.editable).forEach(field => {
-        this.editorDrafts[field.key] = { selected: false, source: "library", value: this.initialEditorValue(field) };
+        var hasLibrary = this.editorOptions(field).some(option => option.value === "library");
+        this.editorDrafts[field.key] = { selected: false, source: hasLibrary ? "library" : "unchanged", value: this.initialEditorValue(field) };
       });
     },
     editorFields: function () {
@@ -13,7 +14,11 @@ function issueEditorDraftState(fieldIdPrefix) {
         this.allFields || field.differs || (this.editorDrafts[field.key] && this.editorDrafts[field.key].selected));
     },
     editorOptions: function (field) {
-      var options = (field.options || []).filter(option => option.selectable !== false).map(option => ({ value: option.source, label: option.source === "library" ? "Keep library value" : option.source }));
+      var options = [{ value: "unchanged", label: "Leave unchanged" }];
+      for (const option of field.options || []) {
+        if (option.selectable !== false && option.value != null && option.value !== "")
+          options.push({ value: option.source, label: option.source === "library" ? "Keep library value" : option.source });
+      }
       options.push({ value: "custom", label: "Enter correction" }, { value: "clear", label: "Clear value" });
       if (field.overridden) options.push({ value: "reset", label: "Remove manual override" });
       return options;
@@ -48,7 +53,7 @@ function issueEditorDraftState(fieldIdPrefix) {
       var edits = {};
       Object.keys(this.editorDrafts).forEach(key => {
         var draft = this.editorDrafts[key];
-        if (!draft.selected) return;
+        if (!draft.selected || draft.source === "unchanged") return;
         edits[key.slice(6)] = draft.source === "custom"
           ? { source: draft.source, value: key === "issue.story_arcs" ? this.arcValues(draft.value) : draft.value }
           : { source: draft.source };

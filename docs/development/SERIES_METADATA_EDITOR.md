@@ -9,6 +9,9 @@ Open **Edit metadata** from series details. **Differences** shows saved-value
 disagreements; **All fields** also exposes unchanged, empty and protected fields.
 Select fields and choose a saved value, enter a correction, intentionally clear
 an optional value, or remove a manual override. Preview before applying.
+**Select all eligible** defaults empty library fields to **Leave unchanged**.
+They receive no new override. A provider can fill the gap later unless you
+explicitly choose **Clear value** to keep it empty.
 
 The default destination is **Library and eligible series.json files**. **Library only** is an
 explicit choice, including for reference-only libraries. Preview lists actual

@@ -429,8 +429,8 @@ async def execute_manual_issue_import(
 
     if (
         editor is not None
-        and (manual_approval is None or editor.edits)
         and reviewed is not None
+        and (manual_approval is None or reviewed.editor_changed)
         and plan is not None
     ):
         from pullbox.services.archive_metadata_binding import (

@@ -49,17 +49,39 @@ async def edit(factory, issue_id, edits):
     )
 
 
-@pytest.mark.parametrize("action", ["custom", "clear"])
-async def test_editor_override_survives_refresh_and_reset_allows_provider(
+@pytest.mark.parametrize("field", ["description", "credits", "tags"])
+async def test_empty_library_source_cannot_pin_an_absent_issue_value(
+    identity_probe_db, tmp_path, field
+):
+    _, factory, _ = identity_probe_db
+    async with prepared(factory, tmp_path) as (path, _, plan):
+        issue_id = plan.target.binding.metadata.issues[0].local_id
+        original = path.read_bytes(), path.stat().st_mtime_ns
+        review = IssueMetadataEditorReview.model_validate({"edits": {field: {"source": "library"}}})
+        async with factory() as session:
+            result = await prepare_file_metadata(session, issue_id, editor=review)
+            assert not result.preview.editor_changed
+            assert not any(o.field == field and o.user_override for o in result.issue.origins)
+        assert (path.read_bytes(), path.stat().st_mtime_ns) == original
+
+
+@pytest.mark.parametrize("action", ["custom", "clear", "unchanged", "legacy_blank"])
+async def test_editor_refresh_respects_only_explicit_field_actions(
     identity_probe_db, tmp_path, action
 ):
     _, factory, _ = identity_probe_db
     async with prepared(factory, tmp_path) as (path, _, plan):
         issue_id = plan.target.binding.metadata.issues[0].local_id
-        body = {"source": action}
-        if action == "custom":
-            body["value"] = "My summary"
-        await edit(factory, issue_id, {"description": body})
+        edits = {
+            "custom": {"description": {"source": "custom", "value": "My summary"}},
+            "clear": {"description": {"source": "clear"}},
+            "unchanged": {"title": {"source": "custom", "value": "Reviewed title"}},
+            "legacy_blank": {
+                "title": {"source": "custom", "value": "Reviewed title"},
+                "description": {"source": "library"},
+            },
+        }
+        await edit(factory, issue_id, edits[action])
         after_edit = path.read_bytes()
         adapter = IssueAdapter(
             ProviderIssueRead(
@@ -78,8 +100,12 @@ async def test_editor_override_survives_refresh_and_reset_allows_provider(
             await session.commit()
         async with factory() as session:
             issue = await session.get(Issue, issue_id)
-            assert issue.description == ("My summary" if action == "custom" else None)
+            assert issue.description == {"custom": "My summary", "clear": None}.get(
+                action, "Provider summary"
+            )
         assert path.read_bytes() == after_edit
+        if action in {"unchanged", "legacy_blank"}:
+            return
         before_reset = path.stat()
         outcome = await edit(factory, issue_id, {"description": {"source": "reset"}})
         assert outcome == "override_released"

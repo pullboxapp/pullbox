@@ -171,6 +171,15 @@ def test_editor_select_preview_apply_and_validation_retention(
     dialog.get_by_role("button", name="Select all eligible", exact=True).click()
     expect(dialog.get_by_label("Update Title", exact=True)).to_be_checked()
     expect(dialog.get_by_label("Update Summary", exact=True)).to_be_checked()
+    with page.expect_response("**/metadata-editor/preview"):
+        dialog.get_by_role("button", name="Update preview", exact=True).click()
+    assert previews[-1]["edits"] == {
+        key: {"source": "library"} for key in ("title", "description", "age_rating")
+    }
+    expect(dialog.get_by_role("button", name="Value source for Tags")).to_contain_text(
+        "Leave unchanged"
+    )
+    assert not writes
     dialog.get_by_role("button", name="Deselect all", exact=True).click()
     dialog.get_by_label("Update Title", exact=True).check()
     dialog.get_by_role("button", name="Value source for Title", exact=True).click()

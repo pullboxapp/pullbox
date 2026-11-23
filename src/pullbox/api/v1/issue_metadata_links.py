@@ -213,7 +213,7 @@ async def editor_write(
         prepared = await prepare_file_metadata(session, issue_id, editor=review)
         if not prepared.preview.ready:
             raise ArchivePublicationError("unresolved_conflicts")
-        if not body.edits or prepared.preview.review_key != body.review_key:
+        if not prepared.preview.editor_changed or prepared.preview.review_key != body.review_key:
             raise ArchivePublicationError("approval_changed")
         await ensure_no_active_import_file_mutation(session)
         manager = _get_manager()

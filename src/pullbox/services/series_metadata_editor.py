@@ -90,6 +90,7 @@ class PreparedSeriesEditor:
     binding: SidecarBinding | None
     targets: tuple[SidecarTarget, ...]
     preview: SeriesMetadataEditorPreview
+    edited_fields: frozenset[str]
 
 
 PLAN = TypeAdapter(SeriesEditorPlan)
@@ -306,6 +307,15 @@ async def prepare_series_editor(
                 "Library metadata can still be saved."
             )
     sources = _saved_sources(binding, targets)
+    edited_fields = frozenset(
+        key
+        for key, edit in review.edits.items()
+        if not (
+            edit.action == "library"
+            and getattr(state.series.values, key) in (None, "")
+            and all(source.get(key) in (None, "") for _, source in sources.values())
+        )
+    )
     original = targets
     values = snapshot.values.model_dump()
     origins = {origin.field: origin for origin in snapshot.origins}
@@ -314,7 +324,7 @@ async def prepare_series_editor(
         current = getattr(state.series.values, field)
         previous = origins.get(field)
         edit = review.edits.get(type_cast("EditableSeriesField", field))
-        if edit is not None:
+        if edit is not None and field in edited_fields:
             if edit.action == "reset":
                 if previous is None or not previous.user_override:
                     raise ValueError(f"{label} has no manual override to remove.")
@@ -335,16 +345,11 @@ async def prepare_series_editor(
                     else sources.get(edit.source or "", ("", {}))[1].get(field)
                 )
                 if selected is None or selected == "":
-                    if current not in (None, "") or any(
-                        source.get(field) not in (None, "") for _, source in sources.values()
-                    ):
-                        raise ValueError(
-                            f"{label} has no value in that saved source. "
-                            "Choose Clear value to remove it."
-                        )
-                    values[field] = selected
-                else:
-                    values[field] = _validated(field, selected)
+                    raise ValueError(
+                        f"{label} has no value in that saved source. Leave it unchanged "
+                        "or choose Clear value to keep it empty."
+                    )
+                values[field] = _validated(field, selected)
             origins[field] = FieldOrigin(
                 field=field,
                 domain=field_domain(snapshot.entity_kind, field),
@@ -370,7 +375,7 @@ async def prepare_series_editor(
                 input_type=input_type,
                 overridden=bool(previous and previous.user_override),
                 selected=edit is not None,
-                changed=edit is not None,
+                changed=field in edited_fields,
                 can_clear=field not in REQUIRED,
                 options=[
                     SeriesMetadataEditorOption(value=value, label=value.replace("_", " ").title())
@@ -401,9 +406,7 @@ async def prepare_series_editor(
         {**snapshot.model_dump(), "values": proposed, "origins": tuple(origins.values())}
     )
     if binding is not None:
-        targets = _render_targets(
-            replace(binding, snapshot=snapshot), targets, frozenset(review.edits)
-        )
+        targets = _render_targets(replace(binding, snapshot=snapshot), targets, edited_fields)
     protected = [
         ("issue_count", "Issue count", state.series.values.issue_count),
         ("image_url", "Cover artwork", state.series.values.image_url),
@@ -439,13 +442,13 @@ async def prepare_series_editor(
         series_id=series_id,
         mode=review.mode,
         editor_fields=fields,
-        editor_changed=bool(review.edits),
+        editor_changed=bool(edited_fields),
         targets=[target.read for target in targets],
-        ready=bool(review.edits),
+        ready=bool(edited_fields),
         review_key=hashlib.sha256(evidence).hexdigest(),
         warnings=warnings,
     )
-    return PreparedSeriesEditor(state, snapshot, binding, targets, preview)
+    return PreparedSeriesEditor(state, snapshot, binding, targets, preview, edited_fields)
 
 
 async def save_series_editor(
@@ -477,7 +480,7 @@ async def save_series_editor(
         update={
             "origins": tuple(
                 origin.model_copy(update={"observed_at": now})
-                if origin.field in review.edits
+                if origin.field in prepared.edited_fields
                 else origin
                 for origin in prepared.snapshot.origins
             )
@@ -486,7 +489,7 @@ async def save_series_editor(
     async with metadata_write_scope(session):
         series = await session.get(Series, series_id)
         assert series is not None
-        if {"status", "year_end"} & review.edits.keys():
+        if {"status", "year_end"} & prepared.edited_fields:
             # The legacy pin owns both fields. Assembly retained the unselected pin as provenance.
             series.status_override = None
         await apply_series_metadata_values(session, series, snapshot.values)
@@ -503,13 +506,13 @@ async def save_series_editor(
             binding = replace(
                 await read_series_sidecar_binding(session, series_id), snapshot=snapshot
             )
-            targets = _render_targets(binding, targets, frozenset(review.edits))
+            targets = _render_targets(binding, targets, prepared.edited_fields)
         plan = SeriesEditorPlan(
             state,
             snapshot,
             binding,
             targets,
-            frozenset(review.edits),
+            prepared.edited_fields,
             review.mode,
             tuple(prepared.preview.warnings),
         )

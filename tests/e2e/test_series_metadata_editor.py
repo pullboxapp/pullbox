@@ -37,6 +37,7 @@ def editor_api(authed_page):
         _field("sort_title", "Sort title", "Batman", overridden=True, can_clear=False),
         _field("description", "Description", "Keep this", input_type="textarea", overridden=True),
         _field("year_start", "Start year", "2016", input_type="number"),
+        _field("year_end", "End year", "", input_type="number"),
         _field(
             "status",
             "Status",
@@ -226,6 +227,16 @@ def test_editor_preview_exact_inputs_typed_controls_and_themes(
     expect(dialog.get_by_label("Update Issue count", exact=True)).to_have_count(0)
     dialog.get_by_role("button", name="Select all eligible", exact=True).click()
     expect(dialog.get_by_label("Update Description", exact=True)).to_be_checked()
+    with page.expect_response("**/metadata-editor/preview"):
+        dialog.get_by_role("button", name="Update preview", exact=True).click()
+    assert editor_api["previews"][-1]["edits"] == {
+        key: {"action": "library"}
+        for key in ("title", "sort_title", "description", "year_start", "status")
+    }
+    expect(dialog.get_by_role("button", name="Value source for End year")).to_contain_text(
+        "Leave unchanged"
+    )
+    assert not editor_api["writes"]
     dialog.get_by_role("button", name="Deselect all", exact=True).click()
     _source(page, dialog, "Title", "Enter correction")
     dialog.get_by_label("New Title", exact=True).fill("Rejected")

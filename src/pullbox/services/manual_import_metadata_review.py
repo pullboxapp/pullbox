@@ -77,6 +77,7 @@ class ReviewedManualMetadata:
     approved_pair: RenderedArchiveMetadata | None = None
     replacement_signature: dict[str, int | str] | None = None
     editor_fields: list[IssueMetadataEditorField] = field(default_factory=list)
+    editor_changed: bool = False
     changes: list[FileMetadataChange] = field(default_factory=list)
 
 
@@ -143,8 +144,8 @@ def _preview(
     primary = select_archive_primary_identity(plan.metadata, archive)
     from pullbox.services.issue_file_metadata import preview_xml_changes, review_metadata_pair
 
-    series, issue, editor_fields, conflicts, shared_choices, rendered = review_metadata_pair(
-        plan.metadata, files, archive, series, issue, primary, choices, editor
+    series, issue, editor_fields, conflicts, shared_choices, rendered, effective = (
+        review_metadata_pair(plan.metadata, files, archive, series, issue, primary, choices, editor)
     )
     for conflict in conflicts if editor is None else ():
         if conflict.key == "issue.page_count":
@@ -194,11 +195,12 @@ def _preview(
             conflicts=conflicts,
         ),
         editor_fields=editor_fields,
+        editor_changed=bool(effective and effective.edits),
         changes=preview_xml_changes(files, rendered)
         if editor is not None and rendered is not None
         else [],
         shared_choices=shared_choices,
-        reviewed_xml_fields=editor.reviewed_xml_fields if editor is not None else frozenset(),
+        reviewed_xml_fields=effective.reviewed_xml_fields if effective is not None else frozenset(),
         approved_pair=rendered if editor is not None else None,
         replacement_signature=replacement_signature,
     )

@@ -12,7 +12,10 @@ or enter corrections, then **Update preview** and **Apply selected changes**.
 Preview does not query providers or write files. The existing background progress
 and cancellation controls apply after approval.
 
-Only selected issue fields acquire correction intent. Clear is explicit and
+**Select all eligible** leaves fields without a usable library value set to
+**Leave unchanged**. They receive no new override, so a provider can still fill
+a gap. Choose a saved XML value or enter a correction to adopt a value instead.
+Only selected issue fields with a value action acquire correction intent. Clear is explicit and
 remains empty during refresh. Remove manual override keeps the current value
 now but permits later provider refresh to replace it. Selecting an absent source
 cannot erase a nonempty value; the user must choose Clear. Closing before Apply

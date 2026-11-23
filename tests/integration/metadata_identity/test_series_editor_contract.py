@@ -91,6 +91,22 @@ async def test_changed_sidecar_is_not_overwritten_after_library_save(managed_ser
         assert (await session.get(Series, series_id)).title == "Reviewed title"
 
 
+async def test_empty_library_source_cannot_pin_an_absent_series_value(managed_series):
+    factory, series_id, _, folder, comic = managed_series
+    before = comic.read_bytes(), comic.stat().st_mtime_ns
+    review = SeriesMetadataEditorReview.model_validate(
+        {"edits": {"description": {"action": "library"}}}
+    )
+    async with factory() as session:
+        result = await prepare_series_editor(session, series_id, review)
+        assert not result.preview.editor_changed and not result.preview.ready
+        assert not any(
+            o.field == "description" and o.user_override for o in result.snapshot.origins
+        )
+    assert not (folder / "series.json").exists()
+    assert (comic.read_bytes(), comic.stat().st_mtime_ns) == before
+
+
 async def test_clear_and_override_reset_survive_database_round_trip(managed_series):
     factory, series_id, _, folder, comic = managed_series
     original = comic.read_bytes(), comic.stat()
@@ -102,6 +118,7 @@ async def test_clear_and_override_reset_survive_database_round_trip(managed_seri
                 "mode": "library_only",
                 "edits": {
                     "description": {"action": "clear"},
+                    "year_end": {"action": "library"},
                     "title": {"action": "set", "value": "My title"},
                 },
             }
@@ -109,7 +126,7 @@ async def test_clear_and_override_reset_survive_database_round_trip(managed_seri
     )
     source = MetadataSource.COMICVINE_API
     candidate = row(source).model_copy(
-        update={"title": "Provider title", "description": "Provider summary"}
+        update={"title": "Provider title", "description": "Provider summary", "year_end": 2026}
     )
 
     async def assembled():
@@ -130,6 +147,7 @@ async def test_clear_and_override_reset_survive_database_round_trip(managed_seri
     protected = await assembled()
     assert protected.values.title == "My title"
     assert protected.values.description is None
+    assert protected.values.year_end == 2026
     await save(
         factory,
         series_id,

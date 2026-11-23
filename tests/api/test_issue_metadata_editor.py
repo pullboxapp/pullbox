@@ -67,6 +67,26 @@ async def test_preview_accepts_all_editable_fields_together(authenticated_client
         assert path.read_bytes() == before
 
 
+async def test_blank_keep_only_does_not_queue_a_write(authenticated_client, sec_db, tmp_path):
+    async with prepared(sec_db, tmp_path) as (path, _, plan):
+        issue_id = plan.target.binding.metadata.issues[0].local_id
+        endpoint = f"/api/v1/issues/{issue_id}/metadata-editor"
+        before = path.read_bytes(), path.stat().st_mtime_ns
+        headers = csrf(authenticated_client)
+        body = {"edits": {"description": {"source": "library"}}}
+        preview = await authenticated_client.post(endpoint + "/preview", json=body, headers=headers)
+        assert preview.status_code == 200 and not preview.json()["editor_changed"]
+        result = await authenticated_client.post(
+            endpoint + "/write",
+            json={**body, "review_key": preview.json()["review_key"]},
+            headers=headers,
+        )
+        assert result.status_code == 409
+        job = await authenticated_client.get(f"/api/v1/issues/{issue_id}/file-metadata/job")
+        assert job.status_code == 200 and job.json()["job"] is None
+        assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+
+
 async def test_editor_custom_title_writes_both_xml_and_persists_override(
     authenticated_client, sec_db, tmp_path, monkeypatch
 ):

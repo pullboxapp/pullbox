@@ -259,6 +259,7 @@ class PreparedFileMetadata:
     preview: FileMetadataPreview
     approved_resource_limit: int | None = None
     shared_choices: SharedXmlChoices | None = None
+    effective_editor: IssueMetadataEditorReview | None = None
 
 
 async def prepare_file_metadata(
@@ -373,6 +374,7 @@ def review_metadata_pair(
     list[FileMetadataConflict],
     SharedXmlChoices,
     RenderedArchiveMetadata | None,
+    IssueMetadataEditorReview | None,
 ]:
     """Review descriptive fields without requiring ownership of the source archive."""
     editor_fields: list[IssueMetadataEditorField] = []
@@ -381,7 +383,7 @@ def review_metadata_pair(
 
         if any(not key.startswith("series.") for key in choices):
             raise ArchiveMetadataRenderError("invalid_choice")
-        series, issue, editor_fields = prepare_issue_editor(
+        series, issue, editor_fields, editor = prepare_issue_editor(
             metadata, archive, series, issue, files, editor
         )
         reviewed_series, _, conflicts = review_metadata_fields(
@@ -468,7 +470,15 @@ def review_metadata_pair(
         ):
             raise
         rendered = None
-    return series, issue, editor_fields, conflicts, shared_choices, rendered if ready else None
+    return (
+        series,
+        issue,
+        editor_fields,
+        conflicts,
+        shared_choices,
+        rendered if ready else None,
+        editor,
+    )
 
 
 def preview_xml_changes(
@@ -512,8 +522,10 @@ def _prepare(
     archive = reconcile_archive_metadata(files)
     series, issue = assemble_bound_archive_metadata(binding, archive, now=datetime.now(UTC))
     primary = archive_primary_identity(binding, archive)
-    series, issue, editor_fields, conflicts, shared_choices, rendered = review_metadata_pair(
-        binding.metadata, files, archive, series, issue, primary, choices, editor
+    series, issue, editor_fields, conflicts, shared_choices, rendered, effective = (
+        review_metadata_pair(
+            binding.metadata, files, archive, series, issue, primary, choices, editor
+        )
     )
     evidence = TypeAdapter(ArchiveMetadataTarget).dump_json(target)
     evidence += json.dumps(choices, sort_keys=True, separators=(",", ":")).encode()
@@ -537,9 +549,10 @@ def _prepare(
                 conflicts=conflicts,
                 converts_to_cbz=converts,
                 editor_fields=editor_fields,
-                editor_changed=bool(editor and editor.edits),
+                editor_changed=bool(effective and effective.edits),
             ),
             shared_choices=shared_choices,
+            effective_editor=effective,
         )
     changes = preview_xml_changes(files, rendered)
     review_key = hashlib.sha256(evidence + rendered.comicinfo + rendered.metroninfo).hexdigest()
@@ -551,7 +564,7 @@ def _prepare(
         canonical_names
         and files.comicinfo.payload == rendered.comicinfo
         and files.metroninfo.payload == rendered.metroninfo
-        and not (editor and any(edit.source != "reset" for edit in editor.edits.values()))
+        and not (effective and any(edit.source != "reset" for edit in effective.edits.values()))
     )
     return PreparedFileMetadata(
         target,
@@ -567,9 +580,10 @@ def _prepare(
             converts_to_cbz=converts,
             conflicts=conflicts,
             editor_fields=editor_fields,
-            editor_changed=bool(editor and editor.edits),
+            editor_changed=bool(effective and effective.edits),
         ),
         shared_choices=shared_choices,
+        effective_editor=effective,
     )
 
 
@@ -651,6 +665,7 @@ async def write_file_metadata(
         raise ArchivePublicationError("unresolved_conflicts")
     if prepared.preview.review_key != review_key:
         raise ArchivePublicationError("approval_changed")
+    editor = prepared.effective_editor
     if prepared.preview.unchanged:
         if editor and editor.edits:
             from pullbox.services.issue_metadata_override_release import release_issue_overrides

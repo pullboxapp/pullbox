@@ -153,7 +153,9 @@ def prepare_issue_editor(
     assembled_issue: MetadataSnapshot,
     files: ArchiveMetadataFiles,
     review: IssueMetadataEditorReview,
-) -> tuple[MetadataSnapshot, MetadataSnapshot, list[IssueMetadataEditorField]]:
+) -> tuple[
+    MetadataSnapshot, MetadataSnapshot, list[IssueMetadataEditorField], IssueMetadataEditorReview
+]:
     """Never use client-supplied source values or adopt unselected descriptive changes."""
     series_state, issue_state = metadata.series, metadata.issues[0]
     series = assembled_series.model_copy(update={"values": series_state.values})
@@ -161,6 +163,7 @@ def prepare_issue_editor(
     origins = {origin.field: origin for origin in issue.origins}
     values = issue.values.model_dump()
     fields: list[IssueMetadataEditorField] = []
+    effective = dict(review.edits)
     ci, mi = preserved_roots(files)
     for field, (label, input_type) in EDITABLE_FIELDS.items():
         current = getattr(issue_state.values, field)
@@ -183,7 +186,12 @@ def prepare_issue_editor(
                 value = getattr(document.issue, field)
             if value is not None:
                 options[source] = value
-        edit = review.edits.get(cast("EditableIssueField", field))
+        key = cast("EditableIssueField", field)
+        edit = review.edits.get(key)
+        # Older select-all clients sent "keep library" even when no source had a value.
+        if edit and edit.source == "library" and all(v in (None, "", ()) for v in options.values()):
+            del effective[key]
+            edit = None
         previous = origins.get(field)
         if edit is not None:
             if edit.source == "custom":
@@ -198,6 +206,11 @@ def prepare_issue_editor(
                 if previous is None or not previous.user_override:
                     raise IssueMetadataEditError(f"{label} has no manual override to remove.")
             elif edit.source in options:
+                if options[edit.source] in (None, "", ()):
+                    raise IssueMetadataEditError(
+                        f"{label} has no value in that source. Leave it unchanged "
+                        "or choose Clear value to keep it empty."
+                    )
                 if field == "story_arcs" and isinstance(options[edit.source], str):
                     raise IssueMetadataEditError(
                         "These arc names and positions cannot be paired safely. "
@@ -220,12 +233,6 @@ def prepare_issue_editor(
                     raise IssueMetadataEditError(
                         "This rating has no exact equivalent in both formats. "
                         "Choose a shared rating or clear it."
-                    )
-                if options[edit.source] in (None, "", ()) and any(
-                    value not in (None, "", ()) for value in options.values()
-                ):
-                    raise IssueMetadataEditError(
-                        f"{label} has no value in that source. Choose Clear value to remove it."
                     )
                 values[field] = options[edit.source]
             else:
@@ -279,7 +286,7 @@ def prepare_issue_editor(
                     and bool(previous and previous.user_override)
                     and len(options) < 3
                 ),
-                selected=edit is not None,
+                selected=key in review.edits,
                 origin=(
                     "Manual correction"
                     if previous and previous.user_override
@@ -303,7 +310,7 @@ def prepare_issue_editor(
             "diagnostics": tuple(
                 item
                 for item in issue.diagnostics
-                if not any(item.startswith(f"archive:issue:{field}:") for field in review.edits)
+                if not any(item.startswith(f"archive:issue:{field}:") for field in effective)
             ),
         }
     )
@@ -342,4 +349,4 @@ def prepare_issue_editor(
                     reason="Identity is protected. Review provider links to change a match.",
                 )
             )
-    return series, issue, fields
+    return series, issue, fields, review.model_copy(update={"edits": effective})

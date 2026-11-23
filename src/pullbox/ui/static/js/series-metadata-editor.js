@@ -38,8 +38,11 @@ function seriesMetadataEditor(seriesId) {
         (this.drafts[field.key] && this.drafts[field.key].selected));
     },
     sourceOptions(field) {
-      const options = (field.sources || []).filter(source => this.mode !== "library_only" || source.token === "library")
-        .map(source => ({ value: source.token, label: source.token === "library" ? "Keep library value" : source.label }));
+      const options = [{ value: "unchanged", label: "Leave unchanged" }];
+      for (const source of field.sources || []) {
+        if (source.value != null && source.value !== "" && (this.mode !== "library_only" || source.token === "library"))
+          options.push({ value: source.token, label: source.token === "library" ? "Keep library value" : source.label });
+      }
       options.push({ value: "custom", label: "Enter correction" });
       if (field.can_clear) options.push({ value: "clear", label: "Clear value" });
       if (field.overridden) options.push({ value: "reset", label: "Remove manual override" });
@@ -59,7 +62,7 @@ function seriesMetadataEditor(seriesId) {
       const edits = {};
       (this.preview ? this.preview.editor_fields : []).filter(field => field.editable).forEach(field => {
         const draft = this.drafts[field.key];
-        if (!draft || !draft.selected) return;
+        if (!draft || !draft.selected || draft.source === "unchanged") return;
         let edit;
         if (draft.source === "custom") {
           let value = draft.value;
@@ -103,7 +106,8 @@ function seriesMetadataEditor(seriesId) {
         if (initialize) {
           this.drafts = {}; this.allFields = false;
           data.editor_fields.filter(field => field.editable).forEach(field => {
-            this.drafts[field.key] = { selected: false, source: "library", value: field.current };
+            const hasLibrary = this.sourceOptions(field).some(option => option.value === "library");
+            this.drafts[field.key] = { selected: false, source: hasLibrary ? "library" : "unchanged", value: field.current };
           });
         }
         this.job = null; this.librarySaved = false; this.jobTargets = []; this.jobWarnings = []; this.retryable = false; this.partial = false;

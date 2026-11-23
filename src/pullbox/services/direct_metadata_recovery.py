@@ -482,7 +482,7 @@ async def prepare_direct_metadata_recovery(
             conflicts=reviewed.preview.conflicts,
             restores_copy=True,
             editor_fields=reviewed.editor_fields,
-            editor_changed=bool(editor and editor.edits),
+            editor_changed=reviewed.editor_changed,
             editor_available=eligible,
             changes=reviewed.changes,
             converts_to_cbz=owner.source.suffix.lower() in {".cbr", ".cb7", ".pdf"},
@@ -662,14 +662,15 @@ async def run_direct_metadata_recovery(
             await _complete(writer, owner, result.library_file, operation, review_key)
             await writer.commit()
         return "restored"
-    if editor and editor.edits and prepared.preview.unchanged:
+    effective = prepared.file_plan.effective_editor if prepared.file_plan else None
+    if effective and effective.edits and prepared.preview.unchanged:
         from pullbox.services.issue_metadata_override_release import release_issue_overrides
 
         # With no archive publication, commit override release and queue resolution together.
         assert prepared.file_plan is not None
         async with factory.begin() as writer:
             result_code = await release_issue_overrides(
-                writer, prepared.file_plan, editor, operation, job_id
+                writer, prepared.file_plan, effective, operation, job_id
             )
             file = await writer.get(LibraryFile, owner.file_id)
             if file is None:
