@@ -132,7 +132,8 @@ does not authorize dropping preserved data or writing to a new field on import.
 | Source fields | Remaining decision or workflow |
 | --- | --- |
 | ComicInfo Pages and attributes; Metron LastModified and nested resource IDs | Page annotations and source timestamps are not descriptive corrections. Resource IDs cannot be assigned by position or inferred from a renamed label. |
-| Metron Series/AlternativeNames and Series/VolumeCount | Series-wide values; do not implement these as issue-only overrides. |
+| Metron Series/VolumeCount | Use **Total volumes** in the series editor. Updating selected comic files is a separate series action. |
+| Metron Series/AlternativeNames | Series-wide descriptive names, not issue-only overrides. |
 
 Arbitrary extension nodes, resource identifiers and page annotations remain under
 the existing preservation contract, not editable raw XML. See the separate

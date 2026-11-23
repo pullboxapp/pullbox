@@ -44,9 +44,9 @@ def prepare_projection(
     fields: frozenset[str],
 ) -> PreparedFileMetadata:
     bound = target.binding.metadata
-    protected = (fields - {"title", "sort_title", "year_start", "volume", "format"}) | (
-        {"series_type", "archive_format"} if "format" in fields else set()
-    )
+    protected = (
+        fields - {"title", "sort_title", "year_start", "volume", "volume_count", "format"}
+    ) | ({"series_type", "archive_format"} if "format" in fields else set())
     origins = bound.issues[0].baseline.origins if bound.issues[0].baseline else ()
     if protected & (bound.issues[0].overrides | {o.field for o in origins if o.user_override}):
         raise ArchiveMetadataRenderError("propagation_issue_override")

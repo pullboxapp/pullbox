@@ -67,6 +67,7 @@ FIELDS = {
     "series_type": ("Type", "select"),
     "archive_format": ("Publication format", "select"),
     "volume": ("Volume", "text"),
+    "volume_count": ("Total volumes", "number"),
     "language": ("Language", "text"),
 }
 REQUIRED = frozenset({"title", "sort_title", "status", "series_type"})
@@ -199,6 +200,7 @@ def _saved_sources(
                 aliases = {
                     "title": {"name", "series", "title"},
                     "year_start": {"year", "year_start"},
+                    "volume_count": {"volume_count", "volumecount"},
                     "description": {"summary", "description"},
                     "series_type": {"type", "booktype", "series_type"},
                     "status": {"status", "series_status"},
@@ -374,7 +376,7 @@ async def prepare_series_editor(
                 label=label,
                 current=_display(current),
                 current_source_label=field_sources.get(field),
-                proposed=_display(values[field]),
+                proposed=_display(values.get(field)),
                 input_type=input_type,
                 overridden=bool(previous and previous.user_override),
                 selected=edit is not None,

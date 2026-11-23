@@ -82,6 +82,9 @@ class MetadataValues(BaseModel):
     year_start: int | None = Field(default=None, ge=1, le=9999, strict=True)
     year_end: int | None = Field(default=None, ge=1, le=9999, strict=True)
     volume: str | None = Field(default=None, max_length=100)
+    volume_count: int | None = Field(
+        default=None, ge=1, le=2**31 - 1, strict=True, exclude_if=lambda v: v is None
+    )
     series_type: str | None = Field(default=None, max_length=50)
     # These embedded formats describe publication, not a library classification.
     archive_format: Literal["Limited Series", "Digital Chapter"] | None = None

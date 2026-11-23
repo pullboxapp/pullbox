@@ -7,6 +7,8 @@ from zipfile import ZipFile
 import pytest
 
 from pullbox.models import Issue, LibraryFile, Series
+from pullbox.schemas.series_metadata_editor import SeriesMetadataEditorReview
+from pullbox.services.series_metadata_editor import prepare_series_editor, save_series_editor
 from pullbox.utilities.executors.file_metadata import FileMetadataExecutor
 from pullbox.utilities.job_queue import JobQueueManager
 from pullbox.utilities.models import JobType
@@ -89,6 +91,56 @@ async def test_preview_then_selected_write_preserves_canonical_and_pages(
         await queue.dispatch_next()
         report = (await authenticated_client.get(endpoint + "/job")).json()
         assert report["counts"]["current"] == 1, report
+
+
+async def test_saved_total_volumes_reaches_only_an_explicitly_approved_comic(
+    authenticated_client, sec_db, tmp_path, queue
+):
+    async with prepared(sec_db, tmp_path) as (path, staged, plan):
+        await seed_pair(sec_db, path, staged, plan)
+        series_id = plan.target.binding.metadata.series.local_id
+        issue_id = plan.target.binding.metadata.issues[0].local_id
+        before = path.read_bytes(), path.stat().st_mtime_ns
+        review = SeriesMetadataEditorReview.model_validate(
+            {"mode": "library_only", "edits": {"volume_count": {"action": "set", "value": 7}}}
+        )
+        async with sec_db() as session:
+            preview = await prepare_series_editor(session, series_id, review)
+        async with sec_db() as session:
+            await save_series_editor(session, series_id, review, preview.preview.review_key)
+            await session.commit()
+        endpoint = f"/api/v1/series/{series_id}/metadata-propagation"
+
+        async def preview_count():
+            response = await authenticated_client.post(
+                endpoint + "/preview",
+                json={"fields": ["volume_count"]},
+                headers=csrf(authenticated_client),
+            )
+            assert response.status_code == 202, response.text
+            await queue.dispatch_next()
+            return (await authenticated_client.get(endpoint + "/job")).json()
+
+        report = await preview_count()
+        assert report["counts"]["ready"] == 1, report
+        changes = report["targets"][0]["changes"]
+        assert len(changes) == 1 and changes[0]["field"].endswith("/VolumeCount[1]")
+        assert changes[0]["after"] == "7" and changes[0]["document"] == "MetronInfo.xml"
+        assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+        response = await authenticated_client.post(
+            endpoint + "/write",
+            json={"job_id": report["job"]["id"], "issue_ids": [issue_id]},
+            headers=csrf(authenticated_client),
+        )
+        assert response.status_code == 202, response.text
+        await queue.dispatch_next()
+        assert (await authenticated_client.get(endpoint + "/job")).json()["counts"]["written"] == 1
+        with ZipFile(path) as archive:
+            assert archive.read("page.jpg") == b"page bytes"
+            assert (
+                ET.fromstring(archive.read("MetronInfo.xml")).findtext("Series/VolumeCount") == "7"
+            )
+        assert (await preview_count())["counts"]["current"] == 1
 
 
 @pytest.mark.parametrize("change", ["series", "file"])

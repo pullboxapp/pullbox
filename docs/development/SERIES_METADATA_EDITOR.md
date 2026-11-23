@@ -61,6 +61,7 @@ preview; there is no need to contact a provider or repeat the catalog refresh.
 | Start/end year, status and series type | Validated series values and canonical sidecar |
 | Archive format | Publication format, distinct from Pullbox's internal series type |
 | Volume and language | Canonical baseline and sidecar; no member comic propagation |
+| Total volumes | Positive number of volumes, not the volume number or catalog issue count. Saving updates only the chosen library/sidecar destinations. |
 | Issue count | Protected catalog value; editing metadata cannot create catalog rows |
 | Provider IDs and cover artwork | Protected; use validated provider linking or artwork workflow |
 | Aliases and safe custom JSON | Preserved; not a raw JSON editor |

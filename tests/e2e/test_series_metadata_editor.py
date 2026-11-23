@@ -544,6 +544,8 @@ def test_editor_real_api_previews_typed_library_only_corrections(authed_page, se
     dialog.get_by_role("button", name="All fields", exact=True).click()
     _source(page, dialog, "Description", "Enter correction")
     dialog.get_by_label("New Description", exact=True).fill("A corrected series description.")
+    _source(page, dialog, "Total volumes", "Enter correction")
+    dialog.get_by_label("New Total volumes", exact=True).fill("7")
     _source(page, dialog, "Status", "Enter correction")
     dialog.get_by_role("button", name="New Status", exact=True).click()
     page.get_by_role("option", name="Ended", exact=True).click()
@@ -552,6 +554,10 @@ def test_editor_real_api_previews_typed_library_only_corrections(authed_page, se
     assert response.value.status == 200
     body = response.value.json()
     assert body["mode"] == "library_only" and body["targets"] == []
+    assert (
+        next(f for f in body["editor_fields"] if f["key"] == "series.volume_count")["proposed"]
+        == "7"
+    )
     assert (
         next(field for field in body["editor_fields"] if field["key"] == "series.description")[
             "proposed"

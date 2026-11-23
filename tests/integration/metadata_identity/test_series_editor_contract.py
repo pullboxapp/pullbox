@@ -32,6 +32,49 @@ async def save(factory, series_id, review):
     return plan
 
 
+async def test_total_volumes_is_a_series_correction_not_an_issue_count(managed_series):
+    factory, series_id, _, folder, comic = managed_series
+    sidecar = folder / "series.json"
+    sidecar.write_text(json.dumps({"ComicID": 42, "VolumeCount": 3, "custom": {"VolumeCount": 8}}))
+    original = comic.read_bytes(), comic.stat().st_mtime_ns
+    async with factory() as session:
+        prepared = await prepare_series_editor(session, series_id, SeriesMetadataEditorReview())
+        field = next(
+            (f for f in prepared.preview.editor_fields if f.key == "series.volume_count"), None
+        )
+        assert field is not None and field.editable and field.input_type == "number"
+        source = next(s.token for s in field.sources if s.value == "3")
+    count = prepared.snapshot.values.issue_count
+    for choice, expected in (
+        ({"action": "sidecar", "source": source}, 3),
+        ({"action": "set", "value": 5}, 5),
+        ({"action": "clear"}, None),
+    ):
+        review = SeriesMetadataEditorReview.model_validate({"edits": {"volume_count": choice}})
+        plan = await save(factory, series_id, review)
+        async with factory() as session:
+            assert (await run_series_editor_target(session, plan, 0))["outcome"] == "saved"
+            reopened = await prepare_series_editor(session, series_id, SeriesMetadataEditorReview())
+            current = next(f for f in reopened.preview.editor_fields if f.key == field.key)
+            assert current.current == ("" if expected is None else str(expected))
+            assert current.overridden
+        data = json.loads(sidecar.read_bytes())
+        assert data["VolumeCount"] == data["volume_count"] == expected
+        assert data["custom"]["VolumeCount"] == 8 and data["ComicID"] == 42
+        assert (
+            data["total_issues"] == count
+            and plan.snapshot.values.volume == prepared.snapshot.values.volume
+        )
+        assert (comic.read_bytes(), comic.stat().st_mtime_ns) == original
+    for invalid in (0, -1, 2**31, "two"):
+        review = SeriesMetadataEditorReview.model_validate(
+            {"edits": {"volume_count": {"action": "set", "value": invalid}}}
+        )
+        async with factory() as session:
+            with pytest.raises(ValueError, match="valid total volumes"):
+                await prepare_series_editor(session, series_id, review)
+
+
 async def test_selected_fields_sidecar_and_replay_leave_comic_and_identity_untouched(
     managed_series,
 ):

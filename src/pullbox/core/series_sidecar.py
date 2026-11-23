@@ -165,6 +165,7 @@ def render_series_sidecar(
         "sort_title": {"sort_title"},
         "year_end": {"year_end"},
         "volume": {"volume"},
+        "volume_count": {"volume_count", "volumecount"},
         "language": {"language"},
         "archive_format": {"archive_format"},
     }

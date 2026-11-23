@@ -17,6 +17,7 @@ type EditableSeriesField = Literal[
     "series_type",
     "archive_format",
     "volume",
+    "volume_count",
     "language",
 ]
 type SeriesEditorMode = Literal["library_and_sidecars", "library_only"]
@@ -44,7 +45,7 @@ class SeriesMetadataEditorReview(BaseModel):
 
     mode: SeriesEditorMode = "library_and_sidecars"
     edits: dict[EditableSeriesField, SeriesMetadataEdit] = Field(
-        default_factory=dict, max_length=11
+        default_factory=dict, max_length=12
     )
 
 

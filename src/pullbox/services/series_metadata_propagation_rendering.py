@@ -27,6 +27,7 @@ FIELDS = {
     "sort_title": "Series sort name",
     "year_start": "Series start year",
     "volume": "Series volume",
+    "volume_count": "Total volumes",
 }
 
 
@@ -62,12 +63,20 @@ def render_series_propagation(
         ("sort_title", None, "SortName"),
         ("year_start", None, "StartYear"),
         ("volume", None, "Volume"),
+        ("volume_count", None, "VolumeCount"),
     ):
         if field not in fields:
             continue
         value = getattr(series.values, field)
         if field == "title" and not value:
             raise ArchiveMetadataRenderError("missing_series_title")
+        if (
+            field == "volume_count"
+            and value is None
+            and parent.find(mi_tag) is not None
+            and not any(o.field == field and o.user_override for o in series.origins)
+        ):
+            raise ArchiveMetadataRenderError("propagation_volume_count_unset")
         if field == "year_start" and value is not None:
             value = f"{value:04d}"
         if ci_tag:

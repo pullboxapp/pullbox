@@ -10,7 +10,7 @@ from pullbox.services.archive_metadata_rendering import (
     render_archive_metadata,
 )
 from pullbox.services.series_metadata_propagation_rendering import render_series_propagation
-from tests.unit.test_archive_metadata_rendering import files, snapshots
+from tests.unit.test_archive_metadata_rendering import files, origin, snapshots
 
 
 def source_pair():
@@ -117,6 +117,36 @@ def test_selected_publisher_never_discards_resource_identity():
             frozenset({"publisher"}),
         )
     assert caught.value.code == "resource_metadata_change"
+
+
+def test_total_volumes_changes_only_selected_metron_series_value():
+    series, issue, source = source_pair()
+    mi = ET.fromstring(source.metroninfo.payload)
+    parent = mi.find("Series")
+    for tag, value in (("Volume", "2"), ("IssueCount", "12"), ("VolumeCount", "4")):
+        if parent.find(tag) is None:
+            ET.SubElement(parent, tag)
+        parent.find(tag).text = value
+    source = files(source.comicinfo.payload.decode(), ET.tostring(mi).decode())
+    from pullbox.services.issue_file_metadata import file_metadata_error
+
+    with pytest.raises(ArchiveMetadataRenderError) as caught:
+        render_series_propagation(series, issue, source, frozenset({"volume_count"}))
+    assert "Clear value" in file_metadata_error(caught.value)
+    for count in (7, None):
+        series = series.model_copy(
+            update={
+                "values": series.values.model_copy(update={"volume_count": count}),
+                "origins": (origin("volume_count", user=True),),
+            }
+        )
+        unchanged = render_series_propagation(series, issue, source, frozenset({"title"}))
+        assert ET.fromstring(unchanged.metroninfo).findtext("Series/VolumeCount") == "4"
+        result = render_series_propagation(series, issue, source, frozenset({"volume_count"}))
+        out = ET.fromstring(result.metroninfo)
+        assert out.findtext("Series/VolumeCount") == (str(count) if count else None)
+        assert out.findtext("Series/Volume") == "2" and out.findtext("Series/IssueCount") == "12"
+        assert result.comicinfo == unchanged.comicinfo
 
 
 def test_identity_and_issue_number_conflicts_are_not_overridden():

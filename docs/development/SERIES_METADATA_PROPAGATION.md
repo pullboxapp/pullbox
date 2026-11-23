@@ -24,8 +24,11 @@ require a new preview; retry does not silently approve new content.
 ## Boundaries
 
 - Fields: series name, publisher, language, publication format, sort name, start year,
-  and volume. Start year and volume use the existing Metron series mappings, not
+  volume and total volumes. Start year and volume use the existing Metron series mappings, not
   issue dates or issue numbering.
+- **Total volumes** writes only MetronInfo's series volume count. A missing library
+  value does not erase an embedded count. To remove it, first choose **Clear value**
+  for **Total volumes** in the series editor, then preview and approve the affected comics.
 - Only registered managed CBZ/ZIP files with verified issue/series bindings and a
   reconciled XML pair qualify. Missing pairs link to the issue's existing metadata
   review workflow; the batch does not invent unreviewed issue metadata.

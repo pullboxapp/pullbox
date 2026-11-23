@@ -72,6 +72,7 @@ def test_preview_selection_progress_and_modal_bounds(authed_page, live_server, t
     page.get_by_role("button", name="Update comic metadata", exact=True).click()
     dialog = page.get_by_role("dialog", name="Update series comic metadata")
     expect(dialog).to_be_visible()
+    expect(dialog.get_by_role("checkbox", name="Total volumes", exact=True)).not_to_be_checked()
     expect(dialog.get_by_role("button", name="Preview comic files")).to_be_disabled()
     dialog.get_by_role("checkbox", name="Series name", exact=True).check()
     dialog.get_by_role("button", name="Preview comic files").click()

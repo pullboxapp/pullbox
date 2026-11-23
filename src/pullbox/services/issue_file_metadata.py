@@ -164,6 +164,12 @@ def file_metadata_error(exc: BaseException) -> str:
             "An issue-level manual correction protects a selected field. Review it in "
             "Edit metadata on the issue page; this file was left unchanged."
         )
+    if code == "propagation_volume_count_unset":
+        return (
+            "The comic has a total volume count but the library does not. Open Edit metadata "
+            "on the series and set Total volumes or choose Clear value, then preview again. "
+            "To keep the comic's count, leave Total volumes unchecked."
+        )
     if code == "editor_conversion_required":
         return (
             "This editor updates managed CBZ files without conversion. Convert this file to CBZ "
