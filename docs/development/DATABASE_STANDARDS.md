@@ -1002,6 +1002,13 @@ matches must preserve the CBZ bytes, inode, and modification time. Only the next
 provider refresh should restore the date. Check the title override and restored
 date again after native restore.
 
+On the migrated Mylar series, save a library-only description, then explicitly
+write the saved value to the managed folder's existing `series.json`. Preview
+and library-only apply must preserve the original sidecar. Explicit publication
+must update the legacy summary and canonical snapshot together, preserve custom
+JSON, and leave every CBZ's contents, inode and modification time untouched.
+Compare the restored PostgreSQL series baseline with the sidecar on disk.
+
 Story Arc reader bookmarks are unique per user and arc. A bookmark
 stores the stable membership and the issue the user actually read, not a page
 number or a sequence offset. Progress remains in `issue_reader_states`.

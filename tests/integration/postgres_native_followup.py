@@ -185,6 +185,7 @@ async def exercise(origin, cases, originals, library, db, sql, owned_digest):
     from tests.e2e.accessibility import AXE_SCRIPT, WCAG_AA_TAGS
     from tests.integration import postgres_linked_catalog as linked
     from tests.integration import postgres_manual_metadata as manual
+    from tests.integration import postgres_series_editor as series_editor
 
     def posted_to(suffix):
         return lambda response: response.request.method == "POST" and response.url.endswith(suffix)
@@ -304,6 +305,7 @@ async def exercise(origin, cases, originals, library, db, sql, owned_digest):
             assert all(path.read_bytes() == before for path, before in originals["mylar"].items())
             catalog_rows = await linked.exercise(page, library, sql, db, owned_digest)
             await manual.exercise(page, library, sql, db)
+            await series_editor.exercise(page, library, sql, db)
             return catalog_rows
         finally:
             await browser.close()

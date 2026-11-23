@@ -184,6 +184,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reopening **Edit metadata** on a series after a successful save now shows a
+  fresh preview. Unfinished sidecar writes still show their recovery actions.
+
 - Removing a manual issue metadata override no longer rewrites a comic whose
   embedded metadata already matches. The editor confirms when only provider
   control changed; a later refresh can update the library value.

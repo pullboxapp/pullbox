@@ -69,6 +69,11 @@ are not one atomic transaction. Results must distinguish a saved library record
 from completed, blocked or still-pending sidecar writes. A retry must preserve
 completed output and never silently broaden the approved destinations.
 
+Reopening **Edit metadata** after a successful save starts a fresh preview.
+Ongoing work and incomplete results remain visible, including blocked folders
+that need a new preview rather than a retry. Closing and reopening an unsaved
+draft does not discard it.
+
 The library update and retained sidecar job are committed together. Sidecar work
 uses the existing background utility queue. Closing the dialog does not cancel
 it; cancelling stops unfinished sidecars, not the already-saved library update.

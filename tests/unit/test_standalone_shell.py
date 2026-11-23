@@ -17,6 +17,7 @@ from pullbox.ui import standalone_shell
         "metadata-sources.js",
         "series-metadata-links.js",
         "issue-file-metadata.js",
+        "series-metadata-editor.js",
     ],
 )
 def test_story_arc_controller_change_invalidates_main_shell_cache(

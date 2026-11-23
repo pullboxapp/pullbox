@@ -19,6 +19,7 @@ from tests.integration import postgres_import_workload as workload
 from tests.integration import postgres_linked_catalog as linked
 from tests.integration import postgres_manual_metadata as manual
 from tests.integration import postgres_native_followup as native
+from tests.integration import postgres_series_editor as series_editor
 from tests.integration import test_postgres_stage_review as review
 from tests.integration import test_postgres_transfer_stage as stages
 from tests.integration.test_postgres_first_start import _NAVIGATE, docker
@@ -117,6 +118,11 @@ async def test_recheck_original_source_and_reviewed_target(
         if browser:
             owned_digest = linked.seed(db, imports, comics)
             manual.seed(db, imports)
+            db.execute(
+                "INSERT INTO series_external_identities(series_id,identity_namespace,external_id,"
+                "verification_state,evidence_kind) "
+                "VALUES(1001,'comicvine','92000','verified','provider_result')"
+            )
     originals = native.make_sources(imports) if browser else {}
     token = tmp_path / "token"
     key = secrets.token_hex(32)
@@ -191,6 +197,8 @@ async def test_recheck_original_source_and_reviewed_target(
             check=True,
         )
         cases = json.loads(source_run.stdout.splitlines()[-1]) if browser else []
+        if browser:
+            series_editor.seed_sidecar(comics)
         write_wal("first confidential title")
         before = hashlib.sha256(source.read_bytes()).digest()
         offline = inspect(name)
@@ -477,6 +485,7 @@ async def test_recheck_original_source_and_reviewed_target(
                 if cases:
                     assert linked.verify(sql, restored) == refreshed_rows
                     manual.verify(sql, restored, refreshed=True)
+                    series_editor.verify(sql, restored, copied)
                     assert sql(restored, stat_query) == last_run
                 assert (
                     sql(restored, "SELECT name FROM story_arcs WHERE id=55")

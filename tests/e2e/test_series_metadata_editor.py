@@ -421,9 +421,8 @@ def test_editor_completed_job_can_start_a_fresh_review(authed_page, seeded_serve
         }
     )
     dialog = _open(page, seeded_server)
-    expect(dialog.get_by_text("Written", exact=True)).to_be_visible()
-    dialog.get_by_role("button", name="Preview again", exact=True).click()
     expect(dialog.get_by_role("button", name="All fields", exact=True)).to_be_visible()
+    expect(dialog.get_by_text("Written", exact=True)).to_be_hidden()
     expect(dialog.get_by_role("button", name="Apply selected changes", exact=True)).to_be_disabled()
     assert editor_api["previews"] == [{"mode": "library_and_sidecars", "edits": {}}]
 

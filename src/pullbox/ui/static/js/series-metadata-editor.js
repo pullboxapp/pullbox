@@ -21,7 +21,10 @@ function seriesMetadataEditor(seriesId) {
       this.trigger = document.activeElement;
       this.open = true;
       this.$nextTick(() => this.$refs.dialog.focus({ preventScroll: true }));
-      if (!this.preview && !this.job && !this.busy && !this.checkingJob) await this.loadPreview();
+      if (this.busy || this.checkingJob) return;
+      if (this.job && this.job.state === "COMPLETED" && this.librarySaved && !this.job.error && !this.partial && !this.retryable) {
+        await this.loadPreview(true);
+      } else if (!this.preview && !this.job) await this.loadPreview();
     },
     close() {
       this.open = false;
