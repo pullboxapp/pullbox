@@ -17,6 +17,8 @@ from pullbox.utilities.models import JobType
 from tests.api.test_issue_archive_metadata import sec_db as _sec_db
 from tests.api.test_metadata_sources_api import csrf
 from tests.integration.metadata_identity.test_archive_metadata_publication import prepared
+from tests.integration.metadata_identity.test_issue_metadata_editor import edit
+from tests.integration.metadata_identity.test_issue_tag_editor import source
 
 pytest_plugins = ["conftest_security"]
 sec_db = _sec_db
@@ -39,9 +41,73 @@ async def test_editor_exposes_clean_empty_and_protected_fields_without_writing(
         assert fields["issue.description"]["current"] == ""
         assert not fields["issue.issue_number_text"]["editable"]
         assert not fields["series.title"]["editable"]
+        for key in ("xml.Pages", "xml.LastModified", "xml.ResourceIDs"):
+            assert not fields[key]["editable"] and not fields[key]["current"]
         assert fields["issue.age_rating"]["editable"]
         assert not response.json()["editor_changed"]
         assert (path.read_bytes(), path.stat()) == before
+
+
+@pytest.mark.parametrize(
+    "long_fraction", [False, True], ids=["annotated-timestamp", "long-timestamp"]
+)
+async def test_protected_archive_inventory_survives_an_unrelated_edit(
+    authenticated_client, sec_db, tmp_path, long_fraction
+):
+    async with prepared(sec_db, tmp_path) as (path, _, plan):
+        issue = plan.target.binding.metadata.issues[0].local_id
+        stamp = "2026-09-01T22:12:30" + ("." + "1" * 100 if long_fraction else "") + "-07:00"
+        annotated = stamp.replace("T", "<!--private-annotation-->T")
+        await source(
+            sec_db,
+            plan,
+            path,
+            "Noir",
+            '<Tag id="private-resource-id">Noir</Tag>',
+            ci_extra='<Pages><Page Image="0" Bookmark="private-note" Key="private-key"/></Pages>',
+            mi_extra=f"<LastModified>{annotated}</LastModified>",
+        )
+        before = path.read_bytes()
+        response = await authenticated_client.post(
+            f"/api/v1/issues/{issue}/metadata-editor/preview",
+            json={},
+            headers=csrf(authenticated_client),
+        )
+        assert response.status_code == 200, response.text
+        report = response.json()
+        fields = {row["key"]: row for row in report["editor_fields"]}
+        for key, value in (
+            ("xml.Pages", "1 page entry"),
+            (
+                "xml.LastModified",
+                "Timestamp recorded (too long to display)" if long_fraction else stamp,
+            ),
+            ("xml.ResourceIDs", "1 entry with an ID"),
+        ):
+            row = fields[key]
+            assert row["current"] == row["proposed"] == value
+            assert not any(row[k] for k in ("differs", "editable", "selected", "options"))
+            assert "private-" not in str(row)
+        assert report["ready"] and not report["editor_changed"] and path.read_bytes() == before
+        assert (
+            await edit(sec_db, issue, {"review": {"source": "custom", "value": "Good read"}})
+            == "written"
+        )
+        with ZipFile(path) as archive:
+            ci = ET.fromstring(archive.read("ComicInfo.xml"))
+            mi = ET.fromstring(archive.read("MetronInfo.xml"))
+            assert ci.find("Pages/Page").attrib == {
+                "Image": "0",
+                "Bookmark": "private-note",
+                "Key": "private-key",
+            }
+            assert mi.findtext("LastModified") == stamp
+            assert annotated.encode() in archive.read("MetronInfo.xml")
+            assert mi.find("Tags/Tag").get("id") == "private-resource-id"
+            assert mi.find("Series").get("id") == "12" and mi.findtext("IDS/ID") == "42"
+            assert (
+                ci.findtext("Review") == "Good read" and archive.read("page.jpg") == b"page bytes"
+            )
 
 
 async def test_preview_accepts_all_editable_fields_together(authenticated_client, sec_db, tmp_path):
@@ -58,7 +124,8 @@ async def test_preview_accepts_all_editable_fields_together(authenticated_client
             if f["editable"]
         }
         assert {"genres", "tags", "characters", "teams", "locations"} <= keys
-        edits = {key: {"source": "library"} for key in keys}
+        # Every library value in this fixture is empty: keeping it would be a no-op.
+        edits = {key: {"source": "clear"} for key in keys}
         report = await authenticated_client.post(endpoint, json={"edits": edits}, headers=headers)
         assert report.status_code == 200, report.text
         assert {
@@ -237,6 +304,9 @@ async def test_editor_opens_when_embedded_rating_has_no_exact_equivalent(
     "edits",
     [
         {"issue_number_text": {"source": "custom", "value": "7"}},
+        {"xml.Pages": {"source": "clear"}},
+        {"xml.LastModified": {"source": "clear"}},
+        {"xml.ResourceIDs": {"source": "clear"}},
         {"series.title": {"source": "custom", "value": "Other series"}},
         {"page_count": {"source": "custom", "value": "-1"}},
         {"cover_date": {"source": "custom", "value": "2026-02-30"}},

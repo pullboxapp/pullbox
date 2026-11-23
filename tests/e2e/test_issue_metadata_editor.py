@@ -22,6 +22,13 @@ def test_editor_select_preview_apply_and_validation_retention(
     previews = []
     fields = [
         {
+            "key": "xml.Pages",
+            "label": "ComicInfo page annotations",
+            "current": "2 page entries",
+            "editable": False,
+            "differs": False,
+        },
+        {
             "key": "issue.web_links",
             "label": "Reference links",
             "editable": True,
@@ -267,7 +274,11 @@ def test_editor_select_preview_apply_and_validation_retention(
     dialog = page.get_by_role("dialog", name="Edit issue metadata", exact=True)
     expect(dialog).to_be_visible()
     expect(dialog.get_by_text("No differences to review.")).to_be_visible()
+    pages = dialog.get_by_role("group", name="ComicInfo page annotations", exact=True)
+    expect(pages).to_have_count(0)
     dialog.get_by_role("button", name="All fields", exact=True).click()
+    expect(pages.get_by_text("Embedded: 2 page entries", exact=True)).to_be_visible()
+    expect(pages.get_by_role("checkbox")).to_have_count(0)
     expect(dialog.get_by_text("Saved source: Metron", exact=True)).to_be_visible()
     expect(dialog.get_by_text("metron_api", exact=True)).not_to_be_visible()
     summary = dialog.get_by_role("group", name="Summary", exact=True)

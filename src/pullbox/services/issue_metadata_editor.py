@@ -2,6 +2,7 @@
 
 from datetime import UTC, date, datetime
 from typing import cast
+from xml.etree.ElementTree import Element
 
 from pydantic import ValidationError
 
@@ -352,6 +353,49 @@ def _custom_value(field: str, text: str) -> object:
         raise IssueMetadataEditError(
             f"Enter a valid {EDITABLE_FIELDS[field][0].lower()}."
         ) from None
+
+
+def _protected_archive_fields(ci: Element, mi: Element) -> list[IssueMetadataEditorField]:
+    pages = sum(1 for _ in ci.iterfind("Pages/Page"))
+    series = mi.find("Series")
+    resources = sum(
+        1 for node in mi.iterfind(".//*[@id]") if node is not series and node.get("id", "").strip()
+    )
+    modified = mi.find("LastModified")
+    stamp = ""
+    if modified is not None:
+        # Comments and processing instructions aren't part of the timestamp.
+        stamp = ((modified.text or "") + "".join(child.tail or "" for child in modified)).strip()
+        if len(stamp) > 96:
+            stamp = "Timestamp recorded (too long to display)"
+    rows = (
+        (
+            "Pages",
+            "ComicInfo page annotations",
+            ("1 page entry" if pages == 1 else f"{pages} page entries") if pages else "",
+            "Counts page entries in ComicInfo.xml, not pages in the book or your reading progress.",
+        ),
+        (
+            "LastModified",
+            "MetronInfo source timestamp",
+            stamp,
+            "LastModified in MetronInfo.xml, not the release date or the file's modification time.",
+        ),
+        (
+            "ResourceIDs",
+            "MetronInfo resource IDs",
+            ("1 entry with an ID" if resources == 1 else f"{resources} entries with IDs")
+            if resources
+            else "",
+            "Counts entries such as creators and tags. Excludes series and issue provider IDs.",
+        ),
+    )
+    return [
+        IssueMetadataEditorField(
+            key=f"xml.{key}", label=label, current=value, proposed=value, reason=reason
+        )
+        for key, label, value, reason in rows
+    ]
 
 
 def prepare_issue_editor(
@@ -732,4 +776,5 @@ def prepare_issue_editor(
                     reason="Identity is protected. Review provider links to change a match.",
                 )
             )
+    fields.extend(_protected_archive_fields(ci, mi))
     return series, issue, fields, review.model_copy(update={"edits": effective})
