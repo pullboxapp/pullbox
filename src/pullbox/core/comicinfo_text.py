@@ -29,6 +29,9 @@ type ComicInfoField = Literal[
     "manga",
     "main_character_or_team",
     "series_groups",
+    "alternate_series",
+    "alternate_number",
+    "alternate_count",
 ]
 COMICINFO_ONLY_TAGS: dict[ComicInfoField, str] = {
     "review": "Review",
@@ -37,6 +40,13 @@ COMICINFO_ONLY_TAGS: dict[ComicInfoField, str] = {
     "manga": "Manga",
     "main_character_or_team": "MainCharacterOrTeam",
     "series_groups": "SeriesGroup",
+    "alternate_series": "AlternateSeries",
+    "alternate_number": "AlternateNumber",
+    "alternate_count": "AlternateCount",
+}
+SINGLE_DOCUMENT: dict[str, str] = {
+    **dict.fromkeys(COMICINFO_ONLY_TAGS, "ComicInfo.xml"),
+    "alternative_number": "MetronInfo.xml",
 }
 TEXT_LIMIT = 20000
 _ISSUE_ID = re.compile(r"(?:4000-|cv_issue_id\s*:\s*)(\d+)", re.I)
@@ -67,7 +77,7 @@ def selectable_main_name(value: object) -> bool:
 
 def embedded_comicinfo_value(
     field: ComicInfoField, raw: str | None
-) -> str | tuple[str, ...] | None:
+) -> str | int | tuple[str, ...] | None:
     if raw is None:
         return None
     if field == "series_groups":
@@ -75,6 +85,16 @@ def embedded_comicinfo_value(
         text = descriptive_text(raw, limit=128 * 255 + 127 * 2)
         return tuple(part.strip() for part in text.split(",", 128)) if text else None
     text = descriptive_text(raw)
+    if field == "alternate_count":
+        if raw == "":
+            return -1  # XSD default for an empty, present element, not a missing tag.
+        if text and re.fullmatch(r"[+-]?[0-9]+", text):
+            digits = text.lstrip("+-").lstrip("0") or "0"
+            if len(digits) <= 10:
+                count = int(digits) * (-1 if text.startswith("-") else 1)
+                if -1 <= count <= 2147483647:
+                    return count
+        return raw  # Keep malformed counts visible, but not selectable.
     if field in FLAG_CHOICES:
         # Only an empty *present* element takes the XSD default. Don't repair legacy tokens.
         return raw if raw else "Unknown"

@@ -7,6 +7,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pullbox.schemas.metadata_issue_arcs import IssueArcEntry, IssueArcList
 
 type EditorConflictField = Literal[
+    "xml.AlternateSeries",
+    "xml.AlternateNumber",
+    "xml.AlternateCount",
+    "xml.AlternativeNumber",
     "xml.MainCharacterOrTeam",
     "xml.SeriesGroup",
     "xml.BlackAndWhite",
@@ -26,6 +30,10 @@ type EditorConflictField = Literal[
 ]
 
 type EditableIssueField = Literal[
+    "alternate_series",
+    "alternate_number",
+    "alternate_count",
+    "alternative_number",
     "main_character_or_team",
     "series_groups",
     "black_and_white",
@@ -50,6 +58,10 @@ type EditableIssueField = Literal[
     "story_arcs",
 ]
 type EditorXmlField = Literal[
+    "alternate_series",
+    "alternate_number",
+    "alternate_count",
+    "alternative_number",
     "main_character_or_team",
     "series_groups",
     "black_and_white",
@@ -68,6 +80,10 @@ type EditorXmlField = Literal[
     "story_arcs",
 ]
 EDITOR_XML_FIELDS: dict[EditorXmlField, EditorConflictField] = {
+    "alternate_series": "xml.AlternateSeries",
+    "alternate_number": "xml.AlternateNumber",
+    "alternate_count": "xml.AlternateCount",
+    "alternative_number": "xml.AlternativeNumber",
     "main_character_or_team": "xml.MainCharacterOrTeam",
     "series_groups": "xml.SeriesGroup",
     "black_and_white": "xml.BlackAndWhite",
@@ -103,7 +119,7 @@ class IssueMetadataEdit(BaseModel):
 class IssueMetadataEditorReview(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    edits: dict[EditableIssueField, IssueMetadataEdit] = Field(default_factory=dict, max_length=22)
+    edits: dict[EditableIssueField, IssueMetadataEdit] = Field(default_factory=dict, max_length=26)
 
     @model_validator(mode="after")
     def matching_input_types(self) -> Self:

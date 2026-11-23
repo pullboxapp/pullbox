@@ -80,6 +80,12 @@ class MetadataValues(BaseModel):
     review: str | None = Field(default=None, exclude_if=lambda v: v is None)
     main_character_or_team: str | None = Field(default=None, exclude_if=lambda v: v is None)
     series_groups: IssueLabels | None = Field(default=None, exclude_if=lambda v: v is None)
+    alternate_series: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    alternate_number: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    alternative_number: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    alternate_count: int | None = Field(
+        default=None, ge=-1, le=2147483647, strict=True, exclude_if=lambda v: v is None
+    )
     black_and_white: ColorFlag | None = Field(default=None, exclude_if=lambda v: v is None)
     manga: MangaFlag | None = Field(default=None, exclude_if=lambda v: v is None)
     scan_information: str | None = Field(default=None, exclude_if=lambda v: v is None)
@@ -95,7 +101,9 @@ class MetadataValues(BaseModel):
     def comicinfo_text(cls, value: str | None) -> str | None:
         return descriptive_text(value) if value is not None else None
 
-    @field_validator("main_character_or_team")
+    @field_validator(
+        "main_character_or_team", "alternate_series", "alternate_number", "alternative_number"
+    )
     @classmethod
     def single_name(cls, value: str | None) -> str | None:
         name = descriptive_text(value) if value is not None else None

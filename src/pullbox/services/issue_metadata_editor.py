@@ -9,6 +9,7 @@ from pullbox.core.archive_metadata import ArchiveMetadataFiles
 from pullbox.core.comicinfo_text import (
     COMICINFO_ONLY_TAGS,
     FLAG_CHOICES,
+    SINGLE_DOCUMENT,
     descriptive_text,
     embedded_comicinfo_value,
     selectable_main_name,
@@ -43,6 +44,7 @@ from pullbox.services.archive_metadata_preservation import (
     ArchiveMetadataRenderError,
     editor_arc_value,
     embedded_labels,
+    metron_alternative_number,
     preserved_roots,
 )
 from pullbox.services.archive_metadata_reconciliation import ArchiveMetadataReconciliation
@@ -60,6 +62,10 @@ EDITABLE_FIELDS = {
     "scan_information": ("Scan information", "textarea"),
     "main_character_or_team": ("Main character or team", "text"),
     "series_groups": ("Series groups", "textarea"),
+    "alternate_series": ("Alternate series", "text"),
+    "alternate_number": ("Number in alternate series", "text"),
+    "alternate_count": ("Total in alternate series", "text"),
+    "alternative_number": ("Alternative issue number", "text"),
     "black_and_white": ("Black and white", "text"),
     "manga": ("Manga", "text"),
     "notes": ("Notes", "textarea"),
@@ -75,6 +81,14 @@ EDITABLE_FIELDS = {
 }
 
 FIELD_HELP = {
+    "alternate_series": "ComicInfo.xml only. A second series or crossover for this book. "
+    "Review its number and total separately; the tracked series stays the same.",
+    "alternate_number": "ComicInfo.xml only. This book's position in the alternate series. "
+    "Letters and leading zeros are preserved.",
+    "alternate_count": "ComicInfo.xml only. Number of books in the alternate series. "
+    "Use -1 for unknown, or Clear value to remove the tag.",
+    "alternative_number": "MetronInfo.xml only. Another number for this issue, not its "
+    "position in a crossover. The tracked issue number stays the same.",
     "main_character_or_team": "ComicInfo.xml only. One featured name, not a cast list.",
     "series_groups": "ComicInfo.xml only. One group per line. Changing these labels "
     "does not move the issue or change its tracked series.",
@@ -120,8 +134,15 @@ def display_editor_value(value: object) -> str:
 
 
 def _selectable(field: str, value: object) -> bool:
-    if field == "main_character_or_team":
+    if field in {
+        "main_character_or_team",
+        "alternate_series",
+        "alternate_number",
+        "alternative_number",
+    }:
         return selectable_main_name(value)
+    if field == "alternate_count":
+        return value is None or isinstance(value, int)
     if field in FLAG_CHOICES:
         return value is None or value in FLAG_CHOICES[field]
     if field == "community_rating":
@@ -170,7 +191,16 @@ def _custom_value(field: str, text: str) -> object:
             raise IssueMetadataEditError(
                 f"Choose a listed {EDITABLE_FIELDS[field][0]} value or clear it."
             )
-    elif field in COMICINFO_ONLY_TAGS and field != "series_groups":
+    elif field == "alternate_count":
+        try:
+            value = embedded_comicinfo_value("alternate_count", text)
+        except ValueError:
+            value = None
+        if not isinstance(value, int):
+            raise IssueMetadataEditError(
+                "Enter a whole number from 0 to 2147483647 or -1 for unknown."
+            )
+    elif field in SINGLE_DOCUMENT and field != "series_groups":
         try:
             value = descriptive_text(text)
         except ValueError as exc:
@@ -255,11 +285,19 @@ def prepare_issue_editor(
             ("MetronInfo.xml", archive.metroninfo, mi),
         ):
             value: object
+            if field in SINGLE_DOCUMENT and source != SINGLE_DOCUMENT[field]:
+                continue
             if field in COMICINFO_ONLY_TAGS:
-                if root is mi:
-                    continue
                 try:
                     value = embedded_comicinfo_value(field, ci.findtext(COMICINFO_ONLY_TAGS[field]))
+                except ValueError as exc:
+                    locked_reason = (
+                        f"{label} is read-only. {exc} Leave it unchanged or correct the source."
+                    )
+                    continue
+            elif field == "alternative_number":
+                try:
+                    value = metron_alternative_number(mi)
                 except ValueError as exc:
                     locked_reason = (
                         f"{label} is read-only. {exc} Leave it unchanged or correct the source."
@@ -290,8 +328,13 @@ def prepare_issue_editor(
         edit = review.edits.get(key)
         if edit and locked_reason:
             raise IssueMetadataEditError(locked_reason)
-        if edit and field in COMICINFO_ONLY_TAGS and edit.source == "MetronInfo.xml":
-            raise IssueMetadataEditError(f"{label} is stored in ComicInfo.xml only.")
+        if (
+            edit
+            and edit.source.endswith(".xml")
+            and field in SINGLE_DOCUMENT
+            and edit.source != SINGLE_DOCUMENT[field]
+        ):
+            raise IssueMetadataEditError(f"{label} is stored in {SINGLE_DOCUMENT[field]} only.")
         # Older select-all clients sent "keep library" even when no source had a value.
         if edit and edit.source == "library" and all(v in (None, "", ()) for v in options.values()):
             del effective[key]
@@ -317,8 +360,10 @@ def prepare_issue_editor(
                     )
                 if field == "community_rating" and not _selectable(field, options[edit.source]):
                     raise IssueMetadataEditError(RATING_HELP)
-                if field in {"main_character_or_team", "series_groups"} and not _selectable(
-                    field, options[edit.source]
+                if (
+                    field in SINGLE_DOCUMENT
+                    and field not in FLAG_CHOICES
+                    and not _selectable(field, options[edit.source])
                 ):
                     raise IssueMetadataEditError(
                         f"{label} cannot be adopted as stored. Enter a correction or clear it."
@@ -406,7 +451,7 @@ def prepare_issue_editor(
                 overridden=bool(previous and previous.user_override),
                 differs=differs
                 or bool(
-                    (field == "notes" or field in COMICINFO_ONLY_TAGS)
+                    (field == "notes" or field in SINGLE_DOCUMENT)
                     and locked_reason
                     and previous
                     and previous.user_override
@@ -415,7 +460,7 @@ def prepare_issue_editor(
                     field in EDITOR_XML_FIELDS
                     and current is not None
                     and bool(previous and previous.user_override)
-                    and len(options) < (2 if field in COMICINFO_ONLY_TAGS else 3)
+                    and len(options) < (2 if field in SINGLE_DOCUMENT else 3)
                 ),
                 selected=key in review.edits,
                 origin=(

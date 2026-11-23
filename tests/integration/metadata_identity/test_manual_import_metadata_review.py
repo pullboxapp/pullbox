@@ -252,6 +252,8 @@ async def test_manual_editor_previews_and_applies_only_approved_edits(
                 "review": {"source": "custom", "value": "Reader review"},
                 "black_and_white": {"source": "custom", "value": "No"},
                 "series_groups": {"source": "custom", "value": "Elseworlds\nGotham"},
+                "alternate_number": {"source": "custom", "value": "007-A"},
+                "alternative_number": {"source": "custom", "value": "105"},
             }
         },
     }
@@ -316,6 +318,10 @@ async def test_manual_editor_previews_and_applies_only_approved_edits(
                 assert ci.findtext("Review") == "Reader review" and mi.find("Review") is None
                 assert ci.findtext("BlackAndWhite") == "No" and ci.find("Manga") is None
                 assert ci.findtext("SeriesGroup") == "Elseworlds, Gotham"
+                assert (
+                    ci.findtext("AlternateNumber") == "007-A"
+                    and mi.findtext("AlternativeNumber") == "105"
+                )
                 assert mi.find("CollectionTitle") is None
                 assert archive.read("page-053.jpg") == b"page 53"
     assert source.read_bytes() == original

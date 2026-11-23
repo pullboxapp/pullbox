@@ -141,6 +141,15 @@ used to match nested comics, even when an identifier spans neighboring XML field
 If an externally edited or removed value disagrees with a saved correction,
 preview asks which ComicInfo value to keep rather than silently restoring it.
 
+**Alternate series**, **Number in alternate series**, and **Total in alternate
+series** describe the book's [ComicInfo crossover grouping](https://anansi-project.github.io/docs/comicinfo/documentation#alternateseries--alternatenumber--alternatecount).
+**Alternative issue number** edits only the MetronInfo field. For example, the
+same issue can be 003-b in a crossover and 0150-X in MetronInfo. Select each
+field separately. Neither number changes the tracked issue, series, provider
+match, filename, or reading order. Clearing the total removes the tag; -1 means
+unknown and 0 is distinct from both. A malformed legacy total can be corrected
+or cleared without having to replace it during unrelated edits.
+
 The issue-page editor requires one independently bound, managed CBZ/ZIP. Missing,
 referenced/read-only, actively importing and ambiguous files retain the existing
 writer's rejection. Native formats require the separate explicit conversion

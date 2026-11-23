@@ -40,6 +40,7 @@ from pullbox.services.archive_metadata_preservation import (
     coordinate_preserved_fields,
     editor_arc_value,
     embedded_labels,
+    metron_alternative_number,
     preserved_roots,
     set_reviewed_imprint,
     set_text,
@@ -147,6 +148,18 @@ def render_archive_metadata(
         raise ArchiveMetadataRenderError("invalid_choice")
     if protected.intersection(COMICINFO_ONLY_TAGS):
         _render_comicinfo_fields(ci, issue.values, protected, reviewed_xml_fields)
+    if "alternative_number" in protected:
+        raw = mi.findtext("AlternativeNumber")
+        try:
+            existing = metron_alternative_number(mi)
+        except ValueError as exc:
+            raise ArchiveMetadataRenderError("label_override_changed", "AlternativeNumber") from exc
+        desired = issue.values.alternative_number
+        reviewed = "alternative_number" in reviewed_xml_fields
+        if existing != desired or (reviewed and raw is not None and desired is None):
+            if not reviewed:
+                raise ArchiveMetadataRenderError("label_override_changed", "AlternativeNumber")
+            set_text(mi, "AlternativeNumber", desired)
     if "community_rating" in protected:
         _render_community_rating(
             ci, mi, issue.values.community_rating, "community_rating" in reviewed_xml_fields

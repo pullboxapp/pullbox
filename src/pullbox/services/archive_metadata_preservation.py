@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from pullbox.core.archive_metadata import ArchiveMetadataFiles
 from pullbox.core.archive_metadata_fields import normalize_comicinfo_aliases
+from pullbox.core.comicinfo_text import descriptive_text
 from pullbox.core.metadata_xml import MetadataXmlError, parse_metadata_xml
 from pullbox.core.metroninfo_schema import validate_metroninfo_xml
 from pullbox.schemas.issue_file_metadata import (
@@ -155,6 +156,15 @@ def _validate_comicinfo(root: ET.Element) -> None:
                     raise ArchiveMetadataRenderError("unsupported_content", "Pages")
         elif node.tag not in _CI_FIELDS or node.attrib or len(node):
             raise ArchiveMetadataRenderError("unsupported_content", "ComicInfo")
+
+
+def metron_alternative_number(mi: ET.Element) -> str | None:
+    node = mi.find("AlternativeNumber")
+    if node is None:
+        return None
+    if len(node) or node.attrib:
+        raise ValueError("The number contains an XML annotation.")
+    return descriptive_text(node.text or "")
 
 
 def set_text(root: ET.Element, path: str, value: object) -> None:

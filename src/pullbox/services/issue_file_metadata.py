@@ -21,7 +21,7 @@ from pullbox.core.archive_metadata import (
     MetadataFile,
     read_archive_metadata,
 )
-from pullbox.core.comicinfo_text import COMICINFO_ONLY_TAGS
+from pullbox.core.comicinfo_text import SINGLE_DOCUMENT
 from pullbox.models import LibraryFile
 from pullbox.models.archive_metadata_publication import PublicationState
 from pullbox.models.library_conversion import LibraryConversion
@@ -113,6 +113,10 @@ def file_metadata_error(exc: BaseException) -> str:
         field = getattr(exc, "field", "")
         label = {
             "MainCharacterOrTeam": "main character or team",
+            "AlternateSeries": "alternate series",
+            "AlternateNumber": "number in alternate series",
+            "AlternateCount": "total in alternate series",
+            "AlternativeNumber": "alternative issue number",
             "SeriesGroup": "series groups",
             "BlackAndWhite": "black and white",
             "Manga": "manga",
@@ -429,13 +433,14 @@ def review_metadata_pair(
         )
         incompatible = (
             editor_field != "community_rating"
-            and editor_field not in COMICINFO_ONLY_TAGS
+            and editor_field not in SINGLE_DOCUMENT
             and any(not o.selectable for o in row.options)
             and (embedded.get("ComicInfo.xml") != embedded.get("MetronInfo.xml"))
         )
         if ((row.overridden and row.differs) or incompatible or missing_publisher) and not any(
             c.key == key for c in shared_conflicts
         ):
+            destination = SINGLE_DOCUMENT.get(editor_field, "both documents")
             shared_conflicts.append(
                 FileMetadataConflict(
                     key=key,
@@ -443,9 +448,7 @@ def review_metadata_pair(
                     options=[],
                     note=row.reason
                     if missing_publisher or not row.editable
-                    else f"Select {row.label} to choose the value to write to ComicInfo.xml."
-                    if editor_field in COMICINFO_ONLY_TAGS
-                    else f"Select {row.label} to choose the value to write to both documents.",
+                    else f"Select {row.label} to choose the value to write to {destination}.",
                 )
             )
     conflicts.extend(shared_conflicts)
