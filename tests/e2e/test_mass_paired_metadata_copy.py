@@ -10,10 +10,13 @@ pytestmark = pytest.mark.e2e
 
 
 @pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 390), ("tron", 1280)])
+@pytest.mark.parametrize("paired", [True, False], ids=["paired", "comicinfo-only"])
 def test_mass_paired_metadata_copy_and_keyboard_toggle(
-    authed_page, seeded_server, monkeypatch, theme, width
+    authed_page, seeded_server, monkeypatch, theme, width, paired
 ):
-    settings = get_settings().model_copy(update={"metadata_paired_conversion_writer_enabled": True})
+    settings = get_settings().model_copy(
+        update={"metadata_paired_conversion_writer_enabled": paired}
+    )
     monkeypatch.setattr("pullbox.ui.utilities_routes.get_settings", lambda: settings)
     page = authed_page
     page.set_viewport_size({"width": width, "height": 1000})
@@ -21,9 +24,14 @@ def test_mass_paired_metadata_copy_and_keyboard_toggle(
     page.goto(f"{seeded_server}/utilities/mass-convert")
     page.evaluate("theme => applyTheme(theme)", theme)
 
-    expect(page.get_by_text("Embed paired metadata", exact=True)).to_be_visible()
+    label = "Embed paired metadata" if paired else "Embed ComicInfo.xml"
+    expect(page.get_by_text(label, exact=True)).to_be_visible()
     help_text = page.locator("#utilities-mass-convert-metadata-help")
-    expect(help_text).to_contain_text("ComicInfo.xml and MetronInfo.xml")
+    expect(help_text).to_contain_text(
+        "ComicInfo.xml and MetronInfo.xml" if paired else "This step updates only ComicInfo.xml."
+    )
+    if not paired:
+        expect(help_text).to_contain_text("MetronInfo.xml")
     expect(help_text).to_be_visible()
     checkbox = page.locator('input[x-model="steps.metadata"]')
     expect(checkbox).to_be_checked()
@@ -39,6 +47,6 @@ def test_mass_paired_metadata_copy_and_keyboard_toggle(
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     assert_no_axe_violations(
         page,
-        name=f"mass-paired-metadata-{theme}",
+        name=f"mass-metadata-{paired}-{theme}",
         include=['[data-testid="utilities-mass-convert-workspace"]'],
     )

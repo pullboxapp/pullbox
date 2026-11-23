@@ -28,7 +28,7 @@
           <span class="utility-step-num">02</span>
           <span class="utility-step-name">{{ "Embed paired metadata" if paired_metadata_enabled else "Embed ComicInfo.xml" }}</span>
           <span class="utility-step-tag">Optional</span>
-          <input x-model="steps.metadata" type="checkbox" class="checkbox-pb utility-step-check"{% if paired_metadata_enabled %} aria-describedby="utilities-mass-convert-metadata-help"{% endif %} />
+          <input x-model="steps.metadata" type="checkbox" class="checkbox-pb utility-step-check" aria-describedby="utilities-mass-convert-metadata-help" />
         </label>
 
         <label
@@ -41,11 +41,13 @@
           <input x-model="steps.verify" type="checkbox" class="checkbox-pb utility-step-check" />
         </label>
       </div>
-      {% if paired_metadata_enabled %}
       <p id="utilities-mass-convert-metadata-help" x-show="steps.metadata" x-cloak class="text-sm text-pb-text-sec">
+        {% if paired_metadata_enabled %}
         Writes reconciled ComicInfo.xml and MetronInfo.xml. Existing managed CBZ files stay at the same path with an original backup.
+        {% else %}
+        This step updates only ComicInfo.xml. If a file already has MetronInfo.xml, turn off this step to convert it without updating its metadata.
+        {% endif %}
       </p>
-      {% endif %}
     {% endcall %}
   </section>
 

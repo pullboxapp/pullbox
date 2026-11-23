@@ -57,6 +57,8 @@ async def test_explicitly_written_pair_stays_protected_with_automatic_writing_of
             processed = executor.process_item(item, config, context)
             assert processed.result is ItemResult.FAILED, "Automatic flag bypassed pair protection"
             assert "MetronInfo.xml" in processed.error_message
+            assert "Write file metadata on the issue page" in processed.error_message
+            assert "turn off Embed ComicInfo.xml" in processed.error_message
             assert path.read_bytes() == original
             assert not path.with_name(f"{path.stem}._mass_convert_.cbz").exists()
     finally:

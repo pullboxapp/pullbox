@@ -418,9 +418,8 @@ class TestUtilitiesRouteContracts:
         assert (
             "Existing managed CBZ files stay at the same path" in response.text
         ) is paired_enabled
-        assert (
-            'aria-describedby="utilities-mass-convert-metadata-help"' in response.text
-        ) is paired_enabled
+        assert 'aria-describedby="utilities-mass-convert-metadata-help"' in response.text
+        assert ("This step updates only ComicInfo.xml." in response.text) is not paired_enabled
         assert 'x-model="steps.metadata"' in response.text
         assert 'data-testid="utilities-mass-convert-footer-dock"' in response.text
 

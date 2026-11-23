@@ -81,9 +81,10 @@ def _guard_existing_metadata_pair(path: Path) -> None:
         )
     if contains_metroninfo:
         raise ValueError(
-            "This file contains MetronInfo.xml. Mass Convert cannot update both metadata "
-            "documents together yet. Use Write file metadata on the series page, or disable "
-            "the ComicInfo step before retrying. The original file has not been changed."
+            "This file contains MetronInfo.xml. Updating only ComicInfo.xml could leave the "
+            "two documents in disagreement. The original was left unchanged. To review both, "
+            "use Write file metadata on the issue page. To convert without a metadata update, "
+            "turn off Embed ComicInfo.xml and start a new conversion."
         )
 
 
