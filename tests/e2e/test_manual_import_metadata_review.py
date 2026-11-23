@@ -84,7 +84,16 @@ def test_manual_editor_requires_updated_preview_and_replacement_consent(
                         "selected": bool(title),
                         "proposed": title,
                         "options": [{"source": "library", "value": "Original"}],
-                    }
+                    },
+                    {
+                        "key": "issue.tags",
+                        "label": "Tags",
+                        "current": "",
+                        "editable": True,
+                        "differs": True,
+                        "input_type": "textarea",
+                        "options": [{"source": "ComicInfo.xml", "value": "Noir"}],
+                    },
                 ]
                 if editor is not None
                 else [],
@@ -114,6 +123,8 @@ def test_manual_editor_requires_updated_preview_and_replacement_consent(
     dialog.get_by_role("button", name="Value source for Title", exact=True).click()
     page.get_by_role("option", name="Enter correction", exact=True).click()
     dialog.get_by_label("New Title", exact=True).fill("My correction")
+    dialog.get_by_role("checkbox", name="Update Tags", exact=True).check()
+    dialog.get_by_role("button", name="Use ComicInfo.xml", exact=True).click()
     submit = dialog.get_by_role("button", name="Import reviewed file")
     expect(submit).to_be_disabled()
     dialog.get_by_role("button", name="Update preview").click()
@@ -137,7 +148,12 @@ def test_manual_editor_requires_updated_preview_and_replacement_consent(
         "review_key": "b" * 64,
         "choices": {},
         "replace_file_id": 18,
-        "editor": {"edits": {"title": {"source": "custom", "value": "My correction"}}},
+        "editor": {
+            "edits": {
+                "title": {"source": "custom", "value": "My correction"},
+                "tags": {"source": "ComicInfo.xml"},
+            }
+        },
     }
 
 

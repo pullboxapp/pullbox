@@ -245,7 +245,16 @@ def test_recovery_review_scrolls_and_finishes_without_reacquisition(
                         "input_type": "text",
                         "differs": False,
                         "options": [{"source": "library", "value": "Original"}],
-                    }
+                    },
+                    {
+                        "key": "issue.description",
+                        "label": "Summary",
+                        "current": "",
+                        "editable": True,
+                        "input_type": "textarea",
+                        "differs": True,
+                        "options": [{"source": "MetronInfo.xml", "value": "Retained file summary"}],
+                    },
                 ]
                 if editable
                 else [],
@@ -272,7 +281,14 @@ def test_recovery_review_scrolls_and_finishes_without_reacquisition(
             "review_key": "a" * 64,
             "choices": {"series.issue_count": "library"},
             **(
-                {"editor": {"edits": {"title": {"source": "custom", "value": "Reviewed"}}}}
+                {
+                    "editor": {
+                        "edits": {
+                            "title": {"source": "custom", "value": "Reviewed"},
+                            "description": {"source": "MetronInfo.xml"},
+                        }
+                    }
+                }
                 if editor
                 else {}
             ),
@@ -314,6 +330,9 @@ def test_recovery_review_scrolls_and_finishes_without_reacquisition(
         dialog.get_by_role("button", name="Value source for Title", exact=True).click()
         page.get_by_role("option", name="Enter correction", exact=True).click()
         dialog.get_by_label("New Title", exact=True).fill("Reviewed")
+        dialog.get_by_role("checkbox", name="Update Summary", exact=True).check()
+        dialog.get_by_role("button", name="Use MetronInfo.xml", exact=True).click()
+        expect(finish).to_be_disabled()
     dialog.get_by_role("radio", name="Library 12").check()
     dialog.get_by_role("button", name="Update preview", exact=True).click()
     expect(finish).to_be_enabled()

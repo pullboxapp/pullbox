@@ -5,6 +5,16 @@
   <button type="button" class="btn-ghost btn-sm" :disabled="busy" @click="selectEditorFields(true)">Select all eligible</button>
   <button type="button" class="btn-ghost btn-sm" :disabled="busy" @click="selectEditorFields(false)">Deselect all</button>
 </div>
+<fieldset class="space-y-2" x-show="checkedEditorFields().length" x-cloak>
+  <legend class="field-label">Use a document for checked fields</legend>
+  <p class="text-xs text-pb-text-sec">Fields without a usable value in that document keep their current choice. Update the preview to review your changes.</p>
+  <div class="flex flex-wrap gap-2">
+    <template x-for="doc in ['ComicInfo.xml', 'MetronInfo.xml']" :key="doc">
+      <button type="button" class="btn-ghost btn-sm" :disabled="busy || !pendingDocumentFields(doc).length" @click="useEditorDocument(doc)" x-text="'Use ' + doc"></button>
+    </template>
+  </div>
+  <p class="text-xs text-pb-text-sec" role="status" x-text="editorDocumentSummary()"></p>
+</fieldset>
 <p class="text-sm text-pb-text-sec" x-show="!editorFields().length">No differences to review.</p>
 <template x-for="field in editorFields()" :key="field.key">
   <fieldset class="rounded-lg border border-pb-border p-3 space-y-2 min-w-0">

@@ -12,6 +12,13 @@ or enter corrections, then **Update preview** and **Apply selected changes**.
 Preview does not query providers or write files. The existing background progress
 and cancellation controls apply after approval.
 
+With fields checked, **Use ComicInfo.xml** or **Use MetronInfo.xml** chooses
+that document for the checked fields where it has a usable value. Missing or
+incompatible values leave the existing draft choice intact. The shortcut does
+not check more fields, resolve series or identity conflicts, or write anything.
+Use **Update preview** before applying. Manual import and recovery use these
+same controls when **Edit issue fields** is open.
+
 **Select all eligible** leaves fields without a usable library value set to
 **Leave unchanged**. They receive no new override, so a provider can still fill
 a gap. Choose a saved XML value or enter a correction to adopt a value instead.

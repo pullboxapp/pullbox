@@ -2,8 +2,9 @@
 function issueEditorDraftState(fieldIdPrefix) {
   return {
     fieldIdPrefix: fieldIdPrefix, allFields: false, editorDrafts: {}, arcRowId: 0, choicesDirty: false,
+    lastEditorDocument: "",
     initializeFields: function (data) {
-      this.allFields = false; this.editorDrafts = {};
+      this.allFields = false; this.editorDrafts = {}; this.lastEditorDocument = "";
       (data.editor_fields || []).filter(field => field.editable).forEach(field => {
         var hasLibrary = this.editorOptions(field).some(option => option.value === "library");
         this.editorDrafts[field.key] = { selected: false, source: hasLibrary ? "library" : "unchanged", value: this.initialEditorValue(field) };
@@ -16,7 +17,7 @@ function issueEditorDraftState(fieldIdPrefix) {
     editorOptions: function (field) {
       var options = [{ value: "unchanged", label: "Leave unchanged" }];
       for (const option of field.options || []) {
-        if (option.selectable !== false && option.value != null && option.value !== "")
+        if (option.selectable !== false && option.value != null && String(option.value).trim() !== "")
           options.push({ value: option.source, label: option.source === "library" ? "Keep library value" : option.source });
       }
       options.push({ value: "custom", label: "Enter correction" }, { value: "clear", label: "Clear value" });
@@ -48,6 +49,28 @@ function issueEditorDraftState(fieldIdPrefix) {
     selectEditorFields: function (selected) {
       (this.preview.editor_fields || []).filter(field => field.editable).forEach(field => { this.editorDrafts[field.key].selected = selected; });
       this.choicesDirty = true;
+    },
+    checkedEditorFields: function () {
+      return (this.preview?.editor_fields || []).filter(field => field.editable && this.editorDrafts[field.key]?.selected);
+    },
+    pendingDocumentFields: function (source) {
+      return this.checkedEditorFields().filter(field => this.editorDrafts[field.key].source !== source &&
+        this.editorOptions(field).some(option => option.value === source));
+    },
+    useEditorDocument: function (source) {
+      if (this.busy || !["ComicInfo.xml", "MetronInfo.xml"].includes(source)) return;
+      const fields = this.pendingDocumentFields(source);
+      if (!fields.length) return;
+      for (const field of fields) this.editorDrafts[field.key].source = source;
+      this.lastEditorDocument = source;
+      this.choicesDirty = true;
+    },
+    editorDocumentSummary: function () {
+      if (!this.lastEditorDocument) return "";
+      const fields = this.checkedEditorFields();
+      if (!fields.length) return "";
+      const count = fields.filter(field => this.editorDrafts[field.key].source === this.lastEditorDocument).length;
+      return count + " of " + fields.length + " checked " + (fields.length === 1 ? "field uses " : "fields use ") + this.lastEditorDocument + ".";
     },
     editorEdits: function () {
       var edits = {};
