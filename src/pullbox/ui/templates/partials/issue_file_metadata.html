@@ -64,6 +64,7 @@
                         </template>
                         <p class="text-sm text-pb-warning" x-show="editorDrafts[field.key].source === 'clear'">This deliberately removes the value and keeps it empty during refresh.</p>
                         <p class="text-sm text-pb-text-sec" x-show="editorDrafts[field.key].source === 'reset'">Keep the current value now and allow future provider refreshes to update it.</p>
+                        <p class="text-sm text-pb-warning" x-show="editorDrafts[field.key].source === 'reset' && !choicesDirty && preview && (preview.conflicts || []).some(c => c.key === field.key)">This field has conflicting values. Choose which value to keep and apply it first, then remove the override.</p>
                         <div x-show="editorDrafts[field.key].source === 'custom'" class="space-y-2">
                           <label class="field-label" :for="'editor-value-' + field.key" x-text="'New ' + field.label"></label>
                           <template x-if="field.input_type === 'textarea' || field.input_type === 'credits'">
@@ -94,7 +95,8 @@
                 </fieldset>
               </template>
             </div>
-            <p class="text-sm text-pb-text-sec" x-show="preview && preview.unchanged">Both metadata files already match. No file rewrite is needed.</p>
+            <p class="text-sm text-pb-text-sec" x-show="preview && preview.unchanged && !(editor && preview.editor_changed)">Both metadata files already match. No file rewrite is needed.</p>
+            <p class="text-sm text-pb-text-sec" x-show="!choicesDirty && preview && preview.unchanged && editor && preview.editor_changed">Only the manual override will be removed. The comic will not be rewritten. Refresh issue metadata to get the provider's current values.</p>
             <div class="space-y-2 max-h-80 overflow-y-auto" data-testid="file-metadata-changes" x-show="!choicesDirty && preview && preview.ready !== false">
               <template x-for="(change, index) in (preview ? preview.changes : [])" :key="index">
                 <article class="rounded-lg border border-pb-border p-3 space-y-1">
@@ -106,7 +108,7 @@
             </div>
           </div>
           <div x-show="job" class="space-y-3">
-            <p class="text-sm text-pb-text" role="status" x-text="job && (job.state === 'COMPLETED' ? (recovery ? (resolved ? 'Recovery complete. The queue entry has been resolved.' : 'The file job completed. Preview again to verify and finish the remaining recovery.') : 'Both metadata files are up to date.') : job.message)"></p>
+            <p class="text-sm text-pb-text" role="status" x-text="job && (job.state === 'COMPLETED' ? (recovery ? (resolved ? 'Recovery complete. The queue entry has been resolved.' : 'The file job completed. Preview again to verify and finish the remaining recovery.') : job.override_released ? 'Selected fields are back under provider control. The comic was not rewritten.' : 'Both metadata files are up to date.') : job.message)"></p>
             <div class="app-progress">
               <div class="app-progress-track"><div class="app-progress-fill app-progress-fill--interactive" :class="{ 'is-indeterminate': job && job.percent === null }" :style="job && job.percent !== null ? 'width: ' + job.percent + '%' : ''" role="progressbar" aria-label="File metadata progress" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="job ? job.percent : null"></div></div>
               <span class="app-progress-value" x-text="job && job.percent !== null ? Math.round(job.percent) + '%' : ''"></span>

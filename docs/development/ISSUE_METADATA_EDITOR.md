@@ -18,6 +18,13 @@ now but permits later provider refresh to replace it. Selecting an absent source
 cannot erase a nonempty value; the user must choose Clear. Closing before Apply
 does not change library metadata or files.
 
+When every selection removes an override and both canonical XML documents
+already match the preview byte for byte, Apply changes only the selected fields'
+provider-control settings. The comic, file registration, and import rollback
+history stay untouched. The utility item records that result in the same database
+transaction so a restarted worker cannot release a newer override. If the preview
+contains an actual XML change, the normal reviewed archive write still applies.
+
 ## Current Field Inventory
 
 | Field | Type / validation | ComicInfo | MetronInfo | Behavior |

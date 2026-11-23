@@ -996,8 +996,11 @@ The same browser rehearsal edits the title of a managed comic and validates a
 replacement GCD catalog containing both a different title and a new store date.
 Issue and series refresh must retain the manual title while accepting the new
 date. Both XML documents must contain the approved title; refresh and reopening
-the write preview must leave the edited archive unchanged. Check the override
-and date again after native restore.
+the write preview must leave the edited archive unchanged. Explicitly clearing
+the store date must survive refresh. Removing that override when the XML already
+matches must preserve the CBZ bytes, inode, and modification time. Only the next
+provider refresh should restore the date. Check the title override and restored
+date again after native restore.
 
 Story Arc reader bookmarks are unique per user and arc. A bookmark
 stores the stable membership and the issue the user actually read, not a page

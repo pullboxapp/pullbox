@@ -15,6 +15,7 @@ from pullbox.core.file_safety import get_archive_size_limit_bytes
 from pullbox.schemas.issue_file_metadata import FileMetadataReview
 from pullbox.schemas.issue_metadata_editor import IssueMetadataEditorReview
 from pullbox.services.issue_file_metadata import file_metadata_error, write_file_metadata
+from pullbox.services.issue_metadata_override_release import RELEASE_OUTCOME, released_override
 from pullbox.services.operation_progress import (
     OperationItemProgress,
     OperationProgressMeasure,
@@ -172,6 +173,10 @@ class FileMetadataExecutor(JobExecutor):
             if item is None:
                 raise ValueError("Metadata job item was removed")
             job_id = item.job_id
+            if "editor" in job_config and released_override(item):
+                return ProcessedItem(
+                    item.id, ItemResult.COMPLETED, after_state={"outcome": RELEASE_OUTCOME}
+                )
 
         async def check_control() -> None:
             async with factory() as session:

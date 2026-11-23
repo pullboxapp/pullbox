@@ -35,6 +35,7 @@ from pullbox.services.issue_metadata_links import (
     preview_issue_link,
     read_issue_links,
 )
+from pullbox.services.issue_metadata_override_release import released_override
 from pullbox.services.metadata_issue_refresh import refresh_issue_from_sources
 from pullbox.utilities.import_guards import ensure_no_active_import_file_mutation
 from pullbox.utilities.models import JobType, UtilityJob, UtilityJobItem
@@ -250,6 +251,7 @@ async def file_job_status(session: DbSession, job: UtilityJob) -> dict[str, obje
             "id": job.id,
             "state": job.state,
             "percent": progress.overall_percent if progress else job.progress_pct,
+            "override_released": released_override(item),
             "message": progress.message if progress else job.state,
             "error": (item.error_message if item else None) or job.error_message,
         }

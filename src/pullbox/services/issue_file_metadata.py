@@ -348,13 +348,10 @@ def _prepare(
             binding, archive, series, issue, files, editor
         )
         _, _, conflicts = review_metadata_fields(binding, archive, series, issue, {})
-        conflicts = [
-            conflict
-            for conflict in conflicts
-            if not (
-                conflict.key.startswith("issue.") and conflict.key.split(".")[1] in editor.edits
-            )
-        ]
+        chosen_values = {
+            f"issue.{field}" for field, edit in editor.edits.items() if edit.source != "reset"
+        }
+        conflicts = [conflict for conflict in conflicts if conflict.key not in chosen_values]
     else:
         series, issue, conflicts = review_metadata_fields(binding, archive, series, issue, choices)
     shared_choices = shared_xml_choices(choices)
@@ -440,7 +437,7 @@ def _prepare(
     unchanged = (
         canonical_names
         and all(old == new for _, old, new in pairs)
-        and not (editor and editor.edits)
+        and not (editor and any(edit.source != "reset" for edit in editor.edits.values()))
     )
     return PreparedFileMetadata(
         target,
@@ -541,6 +538,12 @@ async def write_file_metadata(
     if prepared.preview.review_key != review_key:
         raise ArchivePublicationError("approval_changed")
     if prepared.preview.unchanged:
+        if editor and editor.edits:
+            from pullbox.services.issue_metadata_override_release import release_issue_overrides
+
+            await check_control()
+            async with factory.begin() as session:
+                return await release_issue_overrides(session, prepared, editor, operation, job_id)
         return "unchanged"
     target, series, issue = prepared.target, prepared.series, prepared.issue
     limit = max(limit, prepared.approved_resource_limit or 0)

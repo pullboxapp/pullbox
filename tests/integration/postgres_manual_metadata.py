@@ -131,5 +131,51 @@ async def exercise(page, library, sql, db):
     await page.get_by_role("button", name="Write file metadata", exact=True).click()
     dialog = page.get_by_role("dialog", name="Write file metadata")
     await expect(dialog.get_by_test_id("file-metadata-changes")).to_contain_text("2024-11-20")
-    await dialog.get_by_role("button", name="Close", exact=True).click()
     assert signature() == edited
+    await dialog.get_by_role("button", name="Write both metadata files").click()
+    await expect(dialog.get_by_text("Both metadata files are up to date.")).to_be_visible(
+        timeout=20000
+    )
+    await dialog.get_by_role("button", name="Close", exact=True).click()
+    with ZipFile(comic) as archive:
+        assert fromstring(archive.read("MetronInfo.xml")).findtext("StoreDate") == "2024-11-20"
+
+    async def review_date(choice):
+        await page.get_by_role("button", name="Edit metadata", exact=True).click()
+        editor = page.get_by_role("dialog", name="Edit issue metadata")
+        await editor.get_by_role("button", name="All fields", exact=True).click()
+        await editor.get_by_label("Update Store date", exact=True).check()
+        await editor.get_by_role("button", name="Value source for Store date").click()
+        await page.get_by_role("option", name=choice, exact=True).click()
+        async with page.expect_response("**/issues/10001/metadata-editor/preview") as pending:
+            await editor.get_by_role("button", name="Update preview").click()
+        result = await pending.value
+        assert result.ok, await result.text()
+        return editor, await result.json()
+
+    editor, preview = await review_date("Clear value")
+    assert preview["ready"] and preview["editor_changed"]
+    await editor.get_by_role("button", name="Apply selected changes").click()
+    await expect(editor.get_by_text("Both metadata files are up to date.")).to_be_visible(
+        timeout=20000
+    )
+    await editor.get_by_role("button", name="Close", exact=True).click()
+    cleared = signature()
+    with ZipFile(comic) as archive:
+        assert fromstring(archive.read("MetronInfo.xml")).find("StoreDate") is None
+        assert {name: archive.read(name) for name in pages} == pages
+    await refresh_issue()
+    assert sql(db, "SELECT store_date IS NULL FROM issues WHERE id=10001") == "t"
+    assert signature() == cleared
+    editor, preview = await review_date("Remove manual override")
+    assert preview["ready"] and preview["unchanged"] and not preview["changes"]
+    await expect(editor.get_by_text("Only the manual override", exact=False)).to_be_visible()
+    await editor.get_by_role("button", name="Apply selected changes").click()
+    await expect(
+        editor.get_by_text("Selected fields are back under provider control.", exact=False)
+    ).to_be_visible(timeout=20000)
+    await editor.get_by_role("button", name="Close", exact=True).click()
+    assert sql(db, "SELECT store_date IS NULL FROM issues WHERE id=10001") == "t"
+    await refresh_issue()
+    verify(sql, db, refreshed=True)
+    assert signature() == cleared

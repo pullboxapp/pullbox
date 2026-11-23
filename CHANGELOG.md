@@ -184,6 +184,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Removing a manual issue metadata override no longer rewrites a comic whose
+  embedded metadata already matches. The editor confirms when only provider
+  control changed; a later refresh can update the library value.
+
 - Completed Mylar imports now show individual identity conflicts in Follow-up
   for existing series. You can open the recorded issue or skip selected
   references without changing neighboring comics.
