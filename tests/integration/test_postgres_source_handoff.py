@@ -19,6 +19,7 @@ from tests.integration import postgres_import_workload as workload
 from tests.integration import postgres_linked_catalog as linked
 from tests.integration import postgres_manual_metadata as manual
 from tests.integration import postgres_native_followup as native
+from tests.integration import postgres_propagation as propagation
 from tests.integration import postgres_series_editor as series_editor
 from tests.integration import test_postgres_stage_review as review
 from tests.integration import test_postgres_transfer_stage as stages
@@ -118,6 +119,7 @@ async def test_recheck_original_source_and_reviewed_target(
         if browser:
             owned_digest = linked.seed(db, imports, comics)
             manual.seed(db, imports)
+            propagation.seed(db, comics)
             db.execute(
                 "INSERT INTO series_external_identities(series_id,identity_namespace,external_id,"
                 "verification_state,evidence_kind) "
@@ -423,7 +425,15 @@ async def test_recheck_original_source_and_reviewed_target(
                 assert sql(db, "SELECT status FROM issues WHERE id=83") == "OWNED"
                 assert sql(db, "SELECT status FROM import_files WHERE id=2") == "FAILED"
                 if expected:
-                    workload.verify(sql, db, copied, imports, expected, mylar_neighbor=browser)
+                    workload.verify(
+                        sql,
+                        db,
+                        copied,
+                        imports,
+                        expected,
+                        mylar_neighbor=browser,
+                        extra_files=propagation.FILES if browser else (),
+                    )
                 if cases:
                     address = docker("port", postgres, "8585/tcp", check=True).stdout.strip()
                     assert address.startswith("127.0.0.1:")
@@ -481,11 +491,13 @@ async def test_recheck_original_source_and_reviewed_target(
                         expected,
                         mylar_neighbor=browser,
                         linked_additions=2 if browser else 0,
+                        extra_files=propagation.FILES if browser else (),
                     )
                 if cases:
                     assert linked.verify(sql, restored) == refreshed_rows
                     manual.verify(sql, restored, refreshed=True)
                     series_editor.verify(sql, restored, copied)
+                    propagation.verify(sql, restored, copied)
                     assert sql(restored, stat_query) == last_run
                 assert (
                     sql(restored, "SELECT name FROM story_arcs WHERE id=55")

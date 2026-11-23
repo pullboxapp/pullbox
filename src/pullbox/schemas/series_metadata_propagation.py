@@ -17,8 +17,8 @@ class PropagationReview(BaseModel):
 class PropagationApproval(BaseModel):
     model_config = ConfigDict(extra="forbid")
     job_id: str = Field(pattern=r"^[a-f0-9]{32}$")
-    issue_ids: list[Annotated[int, Field(gt=0, lt=2**63, strict=True)]] | None = Field(
-        default=None, min_length=1, max_length=10000
+    issue_ids: list[Annotated[int, Field(gt=0, lt=2**63, strict=True)]] = Field(
+        min_length=1, max_length=10000
     )
 
 

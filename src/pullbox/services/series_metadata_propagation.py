@@ -108,6 +108,8 @@ async def approved_plan(
     *,
     retry: bool = False,
 ) -> PropagationPlan:
+    if not retry and not selected:
+        raise ValueError("Select at least one ready issue from this preview.")
     job = await session.get(UtilityJob, job_id)
     if job is None or job.job_type != JobType.FILE_METADATA or KEY not in json.loads(job.config):
         raise ValueError("Open a completed comic metadata preview first.")
@@ -129,11 +131,10 @@ async def approved_plan(
         elif data.get("outcome") == "ready":
             targets.append(original.model_copy(update={"review_key": data["review_key"]}))
     if selected is not None:
-        if len(set(selected)) != len(selected) or not set(selected) <= {
-            t.issue_id for t in targets
-        }:
+        issue_ids = set(selected)
+        if len(issue_ids) != len(selected) or not issue_ids <= {t.issue_id for t in targets}:
             raise ValueError("Select only ready issues from this completed preview.")
-        targets = [target for target in targets if target.issue_id in selected]
+        targets = [target for target in targets if target.issue_id in issue_ids]
     if not targets:
         raise ValueError(
             "No unfinished eligible files are selected. Preview again or review the issue details."

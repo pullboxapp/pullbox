@@ -11,6 +11,9 @@ Saving a series or series.json does not trigger comic-file changes.
 4. Apply the selected files. Progress uses the shared utility operation component.
 5. Review individual failures through **Review issue**, or retry unfinished writes.
 
+Every new write must include the selected issue IDs, even for **Select all**.
+The API rejects an omitted, null, or empty `issue_ids` list without queuing a job.
+
 Preview and write results are paginated inside the scrollable standard modal.
 The modal may be closed while work continues in Background activity and Utilities.
 Cancellation stops unfinished work; a published file finishes journal accounting.

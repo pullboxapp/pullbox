@@ -1009,6 +1009,12 @@ must update the legacy summary and canonical snapshot together, preserve custom
 JSON, and leave every CBZ's contents, inode and modification time untouched.
 Compare the restored PostgreSQL series baseline with the sidecar on disk.
 
+For series-to-comic updates, preview two managed issues and one kept-in-place
+issue. Approve just one managed issue. Both embedded metadata documents must
+change together without altering its pages or any unselected file. A second
+preview must show the edited issue as current, the other managed issue as ready,
+and the kept-in-place issue as ineligible. Recheck ownership after native restore.
+
 Story Arc reader bookmarks are unique per user and arc. A bookmark
 stores the stable membership and the issue the user actually read, not a page
 number or a sequence offset. Progress remains in `issue_reader_states`.

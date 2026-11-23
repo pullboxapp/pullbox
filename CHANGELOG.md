@@ -184,6 +184,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Updating comic files from a series now requires an explicit issue selection.
+  API clients must send a nonempty `issue_ids` list; omitting it no longer approves
+  every ready comic. Retrying a job keeps its original selection.
+
 - Reopening **Edit metadata** on a series after a successful save now shows a
   fresh preview. Unfinished sidecar writes still show their recovery actions.
 

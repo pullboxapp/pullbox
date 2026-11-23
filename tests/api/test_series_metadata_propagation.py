@@ -115,7 +115,7 @@ async def test_changed_approval_is_actionable_without_rewriting(
         original = path.read_bytes()
         response = await authenticated_client.post(
             endpoint + "/write",
-            json={"job_id": report["job"]["id"]},
+            json={"job_id": report["job"]["id"], "issue_ids": report["ready_ids"]},
             headers=csrf(authenticated_client),
         )
         assert response.status_code == 202, response.text
@@ -155,6 +155,31 @@ async def test_only_explicit_shared_fields_are_accepted(authenticated_client, fi
     assert response.status_code == 422
 
 
+async def test_missing_selection_does_not_approve_every_ready_file(
+    authenticated_client, sec_db, tmp_path, queue
+):
+    async with prepared(sec_db, tmp_path) as (path, staged, plan):
+        await seed_pair(sec_db, path, staged, plan)
+        series_id = plan.target.binding.metadata.series.local_id
+        endpoint = f"/api/v1/series/{series_id}/metadata-propagation"
+        await authenticated_client.post(
+            endpoint + "/preview", json={"fields": ["title"]}, headers=csrf(authenticated_client)
+        )
+        await queue.dispatch_next()
+        report = (await authenticated_client.get(endpoint + "/job")).json()
+        assert report["counts"] == {"ready": 1}
+        for selection in ({}, {"issue_ids": None}, {"issue_ids": []}):
+            response = await authenticated_client.post(
+                endpoint + "/write",
+                json={"job_id": report["job"]["id"], **selection},
+                headers=csrf(authenticated_client),
+            )
+            assert response.status_code == 422
+        assert (await authenticated_client.get(endpoint + "/job")).json()["job"]["id"] == report[
+            "job"
+        ]["id"]
+
+
 async def test_cross_series_approval_and_unknown_selection_are_rejected(
     authenticated_client, sec_db, tmp_path, queue
 ):
@@ -172,7 +197,7 @@ async def test_cross_series_approval_and_unknown_selection_are_rejected(
         report = (await authenticated_client.get(endpoint + "/job")).json()
         for url, selected in [
             (endpoint, [99999]),
-            ("/api/v1/series/99999/metadata-propagation", None),
+            ("/api/v1/series/99999/metadata-propagation", report["ready_ids"]),
         ]:
             response = await authenticated_client.post(
                 url + "/write",
@@ -204,7 +229,7 @@ async def test_retry_recovers_published_receipt_without_rewriting(
         report = (await authenticated_client.get(endpoint + "/job")).json()
         await authenticated_client.post(
             endpoint + "/write",
-            json={"job_id": report["job"]["id"]},
+            json={"job_id": report["job"]["id"], "issue_ids": report["ready_ids"]},
             headers=csrf(authenticated_client),
         )
         monkeypatch.setattr(executor, "write_file_metadata", lost_response)
