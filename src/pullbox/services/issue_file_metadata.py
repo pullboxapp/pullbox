@@ -78,6 +78,9 @@ if TYPE_CHECKING:
         IssueMetadataEditorReview,
     )
     from pullbox.schemas.metadata_snapshot import MetadataSnapshot
+    from pullbox.services.archive_metadata_reconciliation import ArchiveMetadataReconciliation
+    from pullbox.services.archive_metadata_rendering import RenderedArchiveMetadata
+    from pullbox.services.metadata_series_refresh_state import SeriesRefreshState
     from pullbox.utilities.executors.archive_subprocess import ControlCheck, ProgressCallback
 
 
@@ -346,17 +349,24 @@ def _fields(payload: bytes | None) -> dict[str, str]:
     return result
 
 
-def _prepare(
-    target: ArchiveMetadataTarget,
+def review_metadata_pair(
+    metadata: SeriesRefreshState,
     files: ArchiveMetadataFiles,
+    archive: ArchiveMetadataReconciliation,
+    series: MetadataSnapshot,
+    issue: MetadataSnapshot,
+    primary: ExternalIdentityRef | None,
     choices: FileMetadataChoices,
-    editor: IssueMetadataEditorReview | None = None,
-) -> PreparedFileMetadata:
-    binding = target.binding
-    converts = target.path.suffix.casefold() in {".cbr", ".cb7", ".pdf"}
-    archive = reconcile_archive_metadata(files)
-    series, issue = assemble_bound_archive_metadata(binding, archive, now=datetime.now(UTC))
-    primary = archive_primary_identity(binding, archive)
+    editor: IssueMetadataEditorReview | None,
+) -> tuple[
+    MetadataSnapshot,
+    MetadataSnapshot,
+    list[IssueMetadataEditorField],
+    list[FileMetadataConflict],
+    SharedXmlChoices,
+    RenderedArchiveMetadata | None,
+]:
+    """Review descriptive fields without requiring ownership of the source archive."""
     editor_fields: list[IssueMetadataEditorField] = []
     if editor is not None:
         from pullbox.services.issue_metadata_editor import prepare_issue_editor
@@ -364,10 +374,10 @@ def _prepare(
         if any(not key.startswith("series.") for key in choices):
             raise ArchiveMetadataRenderError("invalid_choice")
         series, issue, editor_fields = prepare_issue_editor(
-            binding, archive, series, issue, files, editor
+            metadata, archive, series, issue, files, editor
         )
         reviewed_series, _, conflicts = review_metadata_fields(
-            binding, archive, series, issue, choices
+            metadata, archive, series, issue, choices
         )
         if choices:
             series = reviewed_series
@@ -376,7 +386,7 @@ def _prepare(
         }
         conflicts = [conflict for conflict in conflicts if conflict.key not in chosen_values]
     else:
-        series, issue, conflicts = review_metadata_fields(binding, archive, series, issue, choices)
+        series, issue, conflicts = review_metadata_fields(metadata, archive, series, issue, choices)
     shared_choices = shared_xml_choices(choices)
     reviewed_xml_fields = editor.reviewed_xml_fields if editor else frozenset()
     shared_conflicts = review_preserved_fields(files, shared_choices, editor=editor is not None)
@@ -407,18 +417,14 @@ def _prepare(
             )
     conflicts.extend(shared_conflicts)
     ready = all(item.selected is not None for item in conflicts)
-    evidence = TypeAdapter(ArchiveMetadataTarget).dump_json(target)
-    evidence += json.dumps(choices, sort_keys=True, separators=(",", ":")).encode()
-    if editor is not None:
-        evidence += json.dumps(editor.model_dump(), sort_keys=True, separators=(",", ":")).encode()
     try:
         rendered = render_archive_metadata(
             series,
             issue,
             files,
             primary_identity=primary,
-            previous_series=binding.metadata.series.baseline,
-            previous_issue=binding.metadata.issues[0].baseline,
+            previous_series=metadata.series.baseline,
+            previous_issue=metadata.issues[0].baseline,
             shared_choices=shared_choices,
             reviewed_xml_fields=reviewed_xml_fields,
         )
@@ -454,29 +460,12 @@ def _prepare(
         ):
             raise
         rendered = None
-    if not ready:
-        return PreparedFileMetadata(
-            target,
-            series,
-            issue,
-            primary,
-            FileMetadataPreview(
-                file_id=binding.library_file_id,
-                file_name=target.path.name,
-                changes=[],
-                review_key=hashlib.sha256(
-                    evidence + (files.comicinfo.payload or b"") + (files.metroninfo.payload or b"")
-                ).hexdigest(),
-                unchanged=False,
-                ready=False,
-                conflicts=conflicts,
-                converts_to_cbz=converts,
-                editor_fields=editor_fields,
-                editor_changed=bool(editor and editor.edits),
-            ),
-            shared_choices=shared_choices,
-        )
-    assert rendered is not None
+    return series, issue, editor_fields, conflicts, shared_choices, rendered if ready else None
+
+
+def preview_xml_changes(
+    files: ArchiveMetadataFiles, rendered: RenderedArchiveMetadata
+) -> list[FileMetadataChange]:
     changes = []
     pairs = (
         ("ComicInfo.xml", files.comicinfo.payload, rendered.comicinfo),
@@ -501,6 +490,50 @@ def _prepare(
                     document=name, field="Document", before=None, after="Add reconciled metadata"
                 ),
             )
+    return changes[:200]
+
+
+def _prepare(
+    target: ArchiveMetadataTarget,
+    files: ArchiveMetadataFiles,
+    choices: FileMetadataChoices,
+    editor: IssueMetadataEditorReview | None = None,
+) -> PreparedFileMetadata:
+    binding = target.binding
+    converts = target.path.suffix.casefold() in {".cbr", ".cb7", ".pdf"}
+    archive = reconcile_archive_metadata(files)
+    series, issue = assemble_bound_archive_metadata(binding, archive, now=datetime.now(UTC))
+    primary = archive_primary_identity(binding, archive)
+    series, issue, editor_fields, conflicts, shared_choices, rendered = review_metadata_pair(
+        binding.metadata, files, archive, series, issue, primary, choices, editor
+    )
+    evidence = TypeAdapter(ArchiveMetadataTarget).dump_json(target)
+    evidence += json.dumps(choices, sort_keys=True, separators=(",", ":")).encode()
+    if editor is not None:
+        evidence += json.dumps(editor.model_dump(), sort_keys=True, separators=(",", ":")).encode()
+    if rendered is None:
+        return PreparedFileMetadata(
+            target,
+            series,
+            issue,
+            primary,
+            FileMetadataPreview(
+                file_id=binding.library_file_id,
+                file_name=target.path.name,
+                changes=[],
+                review_key=hashlib.sha256(
+                    evidence + (files.comicinfo.payload or b"") + (files.metroninfo.payload or b"")
+                ).hexdigest(),
+                unchanged=False,
+                ready=False,
+                conflicts=conflicts,
+                converts_to_cbz=converts,
+                editor_fields=editor_fields,
+                editor_changed=bool(editor and editor.edits),
+            ),
+            shared_choices=shared_choices,
+        )
+    changes = preview_xml_changes(files, rendered)
     review_key = hashlib.sha256(evidence + rendered.comicinfo + rendered.metroninfo).hexdigest()
     canonical_names = False
     if not converts:
@@ -508,7 +541,8 @@ def _prepare(
             canonical_names = {"ComicInfo.xml", "MetronInfo.xml"} <= set(archive_file.namelist())
     unchanged = (
         canonical_names
-        and all(old == new for _, old, new in pairs)
+        and files.comicinfo.payload == rendered.comicinfo
+        and files.metroninfo.payload == rendered.metroninfo
         and not (editor and any(edit.source != "reset" for edit in editor.edits.values()))
     )
     return PreparedFileMetadata(
@@ -519,7 +553,7 @@ def _prepare(
         FileMetadataPreview(
             file_id=binding.library_file_id,
             file_name=target.path.name,
-            changes=changes[:200],
+            changes=changes,
             review_key=review_key,
             unchanged=unchanged,
             converts_to_cbz=converts,

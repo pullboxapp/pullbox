@@ -71,7 +71,7 @@ override does not authorize overwriting later external changes.
 
 ## Safety Boundary
 
-The editor currently requires one independently bound, managed CBZ/ZIP. Missing,
+The issue-page editor requires one independently bound, managed CBZ/ZIP. Missing,
 referenced/read-only, actively importing and ambiguous files retain the existing
 writer's rejection. Native formats require the separate explicit conversion
 workflow. There is no implicit conversion, rename, move, download or sidecar write.
@@ -84,8 +84,12 @@ has its original verified managed CBZ or ZIP. Choose corrections under
 **All fields**, review any separate series conflicts, then **Update preview**
 and **Finish recovery**. Neither merely opening the editor nor updating its
 preview writes the file. The approved job uses the same retained download
-and the same publication journal. A changed copy, a missing registration,
-a native conversion, or an incomplete issue keeps its existing recovery path.
+and the same publication journal for registered files. If the registration is missing
+and both paired writers are enabled, **Restore and finish recovery** creates a new
+managed copy with the approved XML pair and saves the corrections to the issue.
+The retained source is not modified or downloaded again. A changed source or occupied
+destination stops the restore. A replacement copy, a registered file needing native
+conversion, or an incomplete issue keeps its existing recovery path.
 When only removing an override, the library update and queue resolution commit
 together without rewriting the comic.
 

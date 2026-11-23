@@ -555,7 +555,7 @@ async def test_review_reuses_copy_or_restores_retained_download(
     async with factory() as session:
         prepared = await prepare_direct_metadata_recovery(session, pending_id)
         assert prepared is not None, "Recovery has no retained-file metadata review"
-        assert prepared.preview.editor_available is (not remove_copy and suffix == ".cbz")
+        assert prepared.preview.editor_available is (remove_copy or suffix == ".cbz")
         assert not prepared.preview.editor_fields
         if not prepared.preview.editor_available:
             with pytest.raises(ValueError, match="original managed CBZ"):

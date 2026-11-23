@@ -16,6 +16,8 @@ from pydantic import BaseModel, Field, TypeAdapter
 from sqlalchemy import select
 
 from pullbox.config import get_settings
+from pullbox.core.exceptions import ImportDestinationValidationError
+from pullbox.core.file_safety import get_allowed_extensions
 from pullbox.core.partial_issue import (
     INCOMPLETE_RECOVERY_DISMISSED,
     METADATA_RECOVERY_SUPERSEDED,
@@ -375,6 +377,14 @@ async def _check_source(owner: RecoveryOwner) -> dict[str, int | str] | None:
         ) from exc
 
 
+def _repairable_field_error(exc: ArchiveMetadataRenderError) -> bool:
+    return exc.code in {
+        "rating_override_changed",
+        "label_override_changed",
+        "publisher_required",
+    } or (exc.code == "unsupported_content" and exc.field in {"StoryArc", "StoryArcNumber"})
+
+
 async def prepare_direct_metadata_recovery(
     session: AsyncSession,
     pending_id: int,
@@ -393,24 +403,27 @@ async def prepare_direct_metadata_recovery(
     owner = replace(owner, source_proof=await _check_source(owner))
     prepared = None
     eligible = not owner.superseded and (owner.file_path or "").lower().endswith((".cbz", ".zip"))
+    if owner.file_id is None:
+        kind = owner.source.suffix.lower()
+        allowed = await get_allowed_extensions(session)
+        eligible = kind in {".cbz", ".zip", ".cb7", ".cbr", ".pdf"} and kind in allowed
+        if editor is not None and not eligible:
+            raise DirectMetadataRecoveryError(
+                "The retained file type is not enabled for metadata restoration. "
+                "Review your allowed import formats before retrying."
+            )
     if editor is not None and not eligible:
         raise DirectMetadataRecoveryError(
             "Only the original managed CBZ or ZIP can be edited here. Preview recovery again."
         )
+    can_offer_repair = offer_field_repair and eligible and not choices and editor is None
     if owner.file_id is not None:
         try:
             prepared = await prepare_file_metadata(
                 session, owner.issue_id, choices=choices, editor=editor
             )
         except ArchiveMetadataRenderError as exc:
-            repairable = exc.code in {
-                "rating_override_changed",
-                "label_override_changed",
-                "publisher_required",
-            } or (exc.code == "unsupported_content" and exc.field in {"StoryArc", "StoryArcNumber"})
-            if not (
-                offer_field_repair and repairable and eligible and not choices and editor is None
-            ):
+            if not (can_offer_repair and _repairable_field_error(exc)):
                 raise
             editor = IssueMetadataEditorReview()
             prepared = await prepare_file_metadata(session, owner.issue_id, editor=editor)
@@ -454,7 +467,17 @@ async def prepare_direct_metadata_recovery(
                 "Enable embedded metadata updates and preview again."
             )
         await session.commit()
-        reviewed = await preview_manual_import_metadata(plan, owner.source, choices or {})
+        try:
+            reviewed = await preview_manual_import_metadata(
+                plan, owner.source, choices or {}, editor=editor
+            )
+        except ArchiveMetadataRenderError as exc:
+            if not (can_offer_repair and _repairable_field_error(exc)):
+                raise
+            editor = IssueMetadataEditorReview()
+            reviewed = await preview_manual_import_metadata(plan, owner.source, {}, editor=editor)
+            if reviewed.preview.ready:
+                raise
         preview = DirectMetadataRecoveryPreview(
             issue_id=owner.issue_id,
             file_name=owner.source.name,
@@ -462,6 +485,10 @@ async def prepare_direct_metadata_recovery(
             ready=reviewed.preview.ready,
             conflicts=reviewed.preview.conflicts,
             restores_copy=True,
+            editor_fields=reviewed.editor_fields,
+            editor_changed=bool(editor and editor.edits),
+            editor_available=eligible,
+            changes=reviewed.changes,
             converts_to_cbz=owner.source.suffix.lower() in {".cbr", ".cb7", ".pdf"},
         )
     metadata_key = preview.review_key
@@ -621,16 +648,21 @@ async def run_direct_metadata_recovery(
             plan = await prepare_manual_issue_import(
                 writer, issue_id=owner.issue_id, file_path=str(owner.source), move_to_library=True
             )
-            result = await execute_manual_issue_import(
-                writer,
-                plan,
-                metadata_approval=FileMetadataApproval(
-                    review_key=prepared.metadata_key, choices=choices
-                ),
-                cancellation_check=control,
-                preparation_progress_callback=progress,
-                comicinfo_progress_callback=progress,
-            )
+            try:
+                result = await execute_manual_issue_import(
+                    writer,
+                    plan,
+                    metadata_approval=FileMetadataApproval(
+                        review_key=prepared.metadata_key, choices=choices
+                    ),
+                    recovery_editor=editor,
+                    restore_only=True,
+                    cancellation_check=control,
+                    preparation_progress_callback=progress,
+                    comicinfo_progress_callback=progress,
+                )
+            except ImportDestinationValidationError as exc:
+                raise DirectMetadataRecoveryError(str(exc)) from exc
             await _complete(writer, owner, result.library_file, operation, review_key)
             await writer.commit()
         return "restored"

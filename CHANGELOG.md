@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - In Intervention → Recovery, use **Edit issue fields** to correct a verified
   managed CBZ or ZIP and finish recovery with one approval. Pullbox preserves
   the retained download and will not use this action to edit a replacement copy.
+  If the managed copy is missing, **Restore and finish recovery** can save the
+  same corrections to the issue and restore a new copy without downloading again.
 - Edit a comic's embedded story arcs as name/position pairs without changing
   tracked arc memberships or reading order. Unknown positions stay unknown.
 - Edit or clear a single issue's imprint without changing the series publisher

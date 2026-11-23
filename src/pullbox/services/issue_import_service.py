@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from pullbox.schemas.issue_file_metadata import FileMetadataApproval
+    from pullbox.schemas.issue_metadata_editor import IssueMetadataEditorReview
     from pullbox.services.direct_pack_paired_metadata import StagedPackMember
 
 
@@ -180,6 +181,8 @@ async def execute_manual_issue_import(
     *,
     use_paired_metadata: bool = True,
     metadata_approval: FileMetadataApproval | None = None,
+    restore_only: bool = False,
+    recovery_editor: IssueMetadataEditorReview | None = None,
     staged_pack_member: StagedPackMember | None = None,
     allow_resource_safety_exception: bool = False,
     preparation_progress_callback: Callable[[str, int, int, str], Any] | None = None,
@@ -204,6 +207,12 @@ async def execute_manual_issue_import(
     if metadata_approval is not None and (not paired or staged_pack_member is not None):
         raise ManualIssueImportError(
             status_code=409, detail="Import settings changed; preview metadata again."
+        )
+    if (restore_only and metadata_approval is None) or (
+        recovery_editor is not None and not restore_only
+    ):
+        raise ManualIssueImportError(
+            status_code=409, detail="A current restoration preview is required."
         )
     # Paired metadata imports always copy to the library, even under a Move policy.
     if not paired and prepared.ingest_policy.post_processing_method == "move":
@@ -256,7 +265,7 @@ async def execute_manual_issue_import(
         if metadata_approval is not None:
             try:
                 reviewed = await preview_manual_import_metadata(
-                    plan, prepared.source_path, metadata_approval.choices
+                    plan, prepared.source_path, metadata_approval.choices, editor=recovery_editor
                 )
                 if (
                     not reviewed.preview.ready
@@ -368,6 +377,10 @@ async def execute_manual_issue_import(
         )
 
     existing_library_file = getattr(prepared.issue, "__dict__", {}).get("library_file")
+    if restore_only and existing_library_file is not None:
+        raise ManualIssueImportError(
+            status_code=409, detail="A library copy already exists. Preview recovery again."
+        )
     library_file = await register_library_file(
         session,
         source_path=prepared.source_path,
@@ -384,13 +397,35 @@ async def execute_manual_issue_import(
         converter=converter,
         comicinfo_progress_callback=comicinfo_progress_callback,
         comicinfo_materializer=materialize_cbz_with_progress,
-        replace_existing_library_file=existing_library_file is not None,
+        strict_import_target=restore_only,
+        replace_existing_library_file=not restore_only and existing_library_file is not None,
         replacement_trash_dir=await resolve_configured_utility_trash_dir(session)
         if existing_library_file is not None
         else None,
     )
     if paired:
         library_file.has_comicinfo = True
+
+    if recovery_editor is not None and reviewed is not None and plan is not None:
+        from pullbox.services.archive_metadata_binding import (
+            lock_archive_metadata_binding,
+            read_archive_metadata_binding,
+            revalidate_archive_metadata_binding,
+        )
+        from pullbox.services.archive_metadata_finalization import apply_bound_archive_metadata
+
+        await session.flush()
+        binding = await read_archive_metadata_binding(
+            session, library_file.id, expected_issue_id=prepared.issue_id
+        )
+        await lock_archive_metadata_binding(session, binding)
+        await revalidate_archive_metadata_binding(session, binding)
+        if binding.metadata != plan.metadata:
+            raise ManualIssueImportError(
+                status_code=409,
+                detail="Issue metadata changed after preview. Review the library copy.",
+            )
+        await apply_bound_archive_metadata(session, binding, reviewed.series, reviewed.issue)
 
     return ManualIssueImportResult(
         issue_id=prepared.issue_id,

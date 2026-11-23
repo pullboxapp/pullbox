@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -27,23 +27,23 @@ from pullbox.services.archive_metadata_binding import (
     assemble_archive_metadata_state,
     select_archive_primary_identity,
 )
-from pullbox.services.archive_metadata_preservation import (
-    review_preserved_fields,
-    shared_xml_choices,
-)
 from pullbox.services.archive_metadata_reconciliation import reconcile_archive_metadata
 from pullbox.services.archive_metadata_rendering import (
     ArchiveMetadataRenderError,
-    render_archive_metadata,
 )
-from pullbox.services.issue_file_metadata_review import review_metadata_fields
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from pullbox.core.metadata_identity import ExternalIdentityRef
-    from pullbox.schemas.issue_file_metadata import FileMetadataChoices
+    from pullbox.schemas.issue_file_metadata import FileMetadataChange, FileMetadataChoices
+    from pullbox.schemas.issue_metadata_editor import (
+        EditorXmlField,
+        IssueMetadataEditorField,
+        IssueMetadataEditorReview,
+    )
     from pullbox.schemas.metadata_snapshot import MetadataSnapshot
+    from pullbox.services.archive_metadata_rendering import RenderedArchiveMetadata
     from pullbox.services.manual_paired_metadata import ManualMetadataPlan
 
 
@@ -61,20 +61,32 @@ class ReviewedManualMetadata:
     primary: ExternalIdentityRef | None
     preview: ManualImportMetadataPreview
     shared_choices: SharedXmlChoices | None = None
+    reviewed_xml_fields: frozenset[EditorXmlField] = frozenset()
+    approved_pair: RenderedArchiveMetadata | None = None
+    editor_fields: list[IssueMetadataEditorField] = field(default_factory=list)
+    changes: list[FileMetadataChange] = field(default_factory=list)
 
 
 async def preview_manual_import_metadata(
-    plan: ManualMetadataPlan, source: Path, choices: FileMetadataChoices
+    plan: ManualMetadataPlan,
+    source: Path,
+    choices: FileMetadataChoices,
+    *,
+    editor: IssueMetadataEditorReview | None = None,
 ) -> ReviewedManualMetadata:
     """Read bounded XML off-thread; no publication, database writes or provider calls."""
     try:
-        return await asyncio.to_thread(_preview, plan, source, choices)
+        return await asyncio.to_thread(_preview, plan, source, choices, editor=editor)
     except ArchiveError as exc:
         raise ArchiveMetadataRenderError("archive_unreadable") from exc
 
 
 def _preview(
-    plan: ManualMetadataPlan, source: Path, choices: FileMetadataChoices
+    plan: ManualMetadataPlan,
+    source: Path,
+    choices: FileMetadataChoices,
+    *,
+    editor: IssueMetadataEditorReview | None = None,
 ) -> ReviewedManualMetadata:
     fingerprint = build_file_identity_signature(source)
     kind = source.suffix.lstrip(".").casefold()
@@ -90,32 +102,12 @@ def _preview(
     archive = reconcile_archive_metadata(files)
     series, issue = assemble_archive_metadata_state(plan.metadata, archive, now=datetime.now(UTC))
     primary = select_archive_primary_identity(plan.metadata, archive)
-    series, issue, conflicts = review_metadata_fields(
-        plan.metadata, archive, series, issue, choices
+    from pullbox.services.issue_file_metadata import preview_xml_changes, review_metadata_pair
+
+    series, issue, editor_fields, conflicts, shared_choices, rendered = review_metadata_pair(
+        plan.metadata, files, archive, series, issue, primary, choices, editor
     )
-    shared_choices = shared_xml_choices(choices)
-    conflicts.extend(review_preserved_fields(files, shared_choices))
-    ready = all(item.selected is not None for item in conflicts)
-    try:
-        render_archive_metadata(
-            series,
-            issue,
-            files,
-            primary_identity=primary,
-            previous_series=plan.metadata.series.baseline,
-            previous_issue=plan.metadata.issues[0].baseline,
-            shared_choices=shared_choices,
-        )
-    except ArchiveMetadataRenderError as exc:
-        if (
-            ready
-            or exc.code != "unreconciled_field"
-            or not any(
-                item.key.split(".")[1] == exc.field and item.selected is None for item in conflicts
-            )
-        ):
-            raise
-    for conflict in conflicts:
+    for conflict in conflicts if editor is None else ():
         if conflict.key == "issue.page_count":
             conflict.note = (
                 "Archive page counts can include covers and extras; catalog counts may differ. "
@@ -134,6 +126,10 @@ def _preview(
     evidence += (files.comicinfo.payload or b"") + (files.metroninfo.payload or b"")
     context_key = hashlib.sha256(evidence).hexdigest()
     evidence += json.dumps(choices, sort_keys=True).encode()
+    if editor is not None:
+        evidence += json.dumps(editor.model_dump(mode="json"), sort_keys=True).encode()
+        if rendered is not None:
+            evidence += rendered.comicinfo + rendered.metroninfo
     if build_file_identity_signature(source) != fingerprint:
         raise ArchiveMetadataRenderError("source_changed")
     return ReviewedManualMetadata(
@@ -141,10 +137,16 @@ def _preview(
         issue,
         primary,
         ManualImportMetadataPreview(
-            ready=ready,
+            ready=rendered is not None,
             review_key=hashlib.sha256(evidence).hexdigest(),
             context_key=context_key,
             conflicts=conflicts,
         ),
+        editor_fields=editor_fields,
+        changes=preview_xml_changes(files, rendered)
+        if editor is not None and rendered is not None
+        else [],
         shared_choices=shared_choices,
+        reviewed_xml_fields=editor.reviewed_xml_fields if editor is not None else frozenset(),
+        approved_pair=rendered if editor is not None else None,
     )

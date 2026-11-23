@@ -24,7 +24,6 @@ from pullbox.schemas.metadata_snapshot import (
     field_domain,
     selectable_imprint,
 )
-from pullbox.services.archive_metadata_binding import ArchiveMetadataBinding
 from pullbox.services.archive_metadata_preservation import (
     ArchiveMetadataRenderError,
     editor_arc_value,
@@ -32,7 +31,11 @@ from pullbox.services.archive_metadata_preservation import (
     preserved_roots,
 )
 from pullbox.services.archive_metadata_reconciliation import ArchiveMetadataReconciliation
-from pullbox.services.metadata_series_refresh_state import ISSUE_FIELDS, SERIES_FIELDS
+from pullbox.services.metadata_series_refresh_state import (
+    ISSUE_FIELDS,
+    SERIES_FIELDS,
+    SeriesRefreshState,
+)
 
 EDITABLE_FIELDS = {
     "title": ("Title", "text"),
@@ -144,7 +147,7 @@ def _custom_value(field: str, text: str) -> object:
 
 
 def prepare_issue_editor(
-    binding: ArchiveMetadataBinding,
+    metadata: SeriesRefreshState,
     archive: ArchiveMetadataReconciliation,
     assembled_series: MetadataSnapshot,
     assembled_issue: MetadataSnapshot,
@@ -152,7 +155,7 @@ def prepare_issue_editor(
     review: IssueMetadataEditorReview,
 ) -> tuple[MetadataSnapshot, MetadataSnapshot, list[IssueMetadataEditorField]]:
     """Never use client-supplied source values or adopt unselected descriptive changes."""
-    series_state, issue_state = binding.metadata.series, binding.metadata.issues[0]
+    series_state, issue_state = metadata.series, metadata.issues[0]
     series = assembled_series.model_copy(update={"values": series_state.values})
     issue = assembled_issue.model_copy(update={"values": issue_state.values})
     origins = {origin.field: origin for origin in issue.origins}

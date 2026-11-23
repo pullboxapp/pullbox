@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 
 from pullbox.core.archive import ArchiveReader
-from pullbox.core.archive_metadata import MAX_METADATA_BYTES
+from pullbox.core.archive_metadata import MAX_METADATA_BYTES, read_archive_metadata
 from pullbox.core.file_publication import publish_file_without_overwrite
 from pullbox.core.file_safety import (
     FileSafetyError,
@@ -187,6 +187,15 @@ async def materialize_manual_metadata(
         ) as staged,
         factory() as reader,
     ):
+        if reviewed is not None and reviewed.approved_pair is not None:
+            output = await asyncio.to_thread(
+                read_archive_metadata, staged.path, "cbz", max_solid_scan_bytes=MAX_METADATA_BYTES
+            )
+            if (output.comicinfo.payload, output.metroninfo.payload) != (
+                reviewed.approved_pair.comicinfo,
+                reviewed.approved_pair.metroninfo,
+            ):
+                raise ValueError("Staged metadata differs from the reviewed pair.")
         await _lock_plan(reader, plan)
         if await read_manual_metadata_plan(reader, plan.metadata.issues[0].local_id) != plan:
             raise ValueError("Import metadata or library settings changed; review before retrying.")
@@ -236,6 +245,7 @@ async def stage_manual_metadata(
         metadata_state=plan.metadata if reviewed is None else None,
         primary_identity=reviewed.primary if reviewed is not None else None,
         shared_choices=reviewed.shared_choices if reviewed is not None else None,
+        reviewed_xml_fields=reviewed.reviewed_xml_fields if reviewed is not None else frozenset(),
         previous_series=plan.metadata.series.baseline,
         previous_issue=plan.metadata.issues[0].baseline,
         cancellation_check=cancellation_check,

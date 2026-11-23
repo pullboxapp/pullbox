@@ -27,7 +27,7 @@
               <button type="button" class="btn-ghost" @click="dismissReplacement()" :disabled="busy">Dismiss recovery</button>
             </div>
           </div>
-          <p class="text-sm text-pb-text-sec" x-show="recovery && preview && preview.restores_copy" x-cloak>The library copy is no longer registered. Your approval will restore a managed copy from the retained download, without replacing an existing library file.</p>
+          <p class="text-sm text-pb-text-sec" x-show="recovery && preview && preview.restores_copy" x-cloak>The library copy is missing. Restore creates a managed copy and leaves the retained download unchanged. It will not replace an existing file.</p>
           <p class="text-sm text-pb-text-sec" x-show="recovery && preview && preview.converts_to_cbz" x-cloak>The managed copy will be converted to CBZ with reconciled ComicInfo.xml and MetronInfo.xml. Comic pages are preserved.</p>
           <p class="text-sm text-pb-text-sec" x-show="recovery && preview && preview.superseded" x-cloak>A different, verified library copy now owns this issue. This closes the obsolete recovery entry without changing that copy or marking the earlier transfer successful.</p>
           <p class="text-sm text-pb-error" role="alert" x-show="error || (job && job.error)" x-text="error || (job && job.error)"></p>
@@ -45,6 +45,7 @@
               <p class="text-sm text-pb-text-sec" x-show="!editorFields().length">No differences to review.</p>
               <p class="text-sm text-pb-warning" x-show="preview && preview.ready === false && !recovery">Some existing values disagree. Select the issue fields to resolve. Protected series or XML-only conflicts must first be resolved using Write file metadata.</p>
               <p class="text-sm text-pb-text-sec" x-show="recovery">Choose issue fields to correct. If series values disagree, review those choices separately below. Update the preview before finishing recovery.</p>
+              <p class="text-sm text-pb-text-sec" x-show="recovery && preview && preview.restores_copy">Approved issue corrections are saved to this issue and written to both XML documents in the restored copy.</p>
               <template x-for="field in editorFields()" :key="field.key">
                 <fieldset class="rounded-lg border border-pb-border p-3 space-y-2 min-w-0">
                   <legend class="text-sm font-semibold text-pb-text px-1" x-text="field.label"></legend>
