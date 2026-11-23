@@ -1,12 +1,33 @@
 """Format-specific descriptive fields and exact IDs encountered in ComicInfo text."""
 
 import re
+from enum import StrEnum
 from typing import Literal
 
-type ComicInfoTextField = Literal["review", "scan_information"]
-COMICINFO_TEXT_TAGS: dict[ComicInfoTextField, str] = {
+
+class ColorFlag(StrEnum):
+    UNKNOWN = "Unknown"
+    NO = "No"
+    YES = "Yes"
+
+
+class MangaFlag(StrEnum):
+    UNKNOWN = "Unknown"
+    NO = "No"
+    YES = "Yes"
+    RIGHT_TO_LEFT = "YesAndRightToLeft"
+
+
+FLAG_CHOICES: dict[str, tuple[str, ...]] = {
+    "black_and_white": tuple(ColorFlag),
+    "manga": tuple(MangaFlag),
+}
+type ComicInfoField = Literal["review", "scan_information", "black_and_white", "manga"]
+COMICINFO_ONLY_TAGS: dict[ComicInfoField, str] = {
     "review": "Review",
     "scan_information": "ScanInformation",
+    "black_and_white": "BlackAndWhite",
+    "manga": "Manga",
 }
 TEXT_LIMIT = 20000
 _ISSUE_ID = re.compile(r"(?:4000-|cv_issue_id\s*:\s*)(\d+)", re.I)
@@ -27,3 +48,13 @@ def descriptive_text(raw: str) -> str | None:
     if _LEGACY_ID.search(raw) or any(comicinfo_text_ids(raw)):
         raise ValueError("This field contains a protected comic identifier.")
     return raw.replace("\r\n", "\n").replace("\r", "\n").strip() or None
+
+
+def embedded_comicinfo_value(field: ComicInfoField, raw: str | None) -> str | None:
+    if raw is None:
+        return None
+    text = descriptive_text(raw)
+    if field in FLAG_CHOICES:
+        # Only an empty *present* element takes the XSD default. Don't repair legacy tokens.
+        return raw if raw else "Unknown"
+    return text

@@ -21,7 +21,7 @@ from pullbox.core.archive_metadata import (
     MetadataFile,
     read_archive_metadata,
 )
-from pullbox.core.comicinfo_text import COMICINFO_TEXT_TAGS
+from pullbox.core.comicinfo_text import COMICINFO_ONLY_TAGS
 from pullbox.models import LibraryFile
 from pullbox.models.archive_metadata_publication import PublicationState
 from pullbox.models.library_conversion import LibraryConversion
@@ -112,6 +112,8 @@ def file_metadata_error(exc: BaseException) -> str:
     if code in {"rating_override_changed", "label_override_changed"}:
         field = getattr(exc, "field", "")
         label = {
+            "BlackAndWhite": "black and white",
+            "Manga": "manga",
             "Review": "review",
             "ScanInformation": "scan information",
             "StoryArc": "embedded story arcs",
@@ -425,6 +427,7 @@ def review_metadata_pair(
         )
         incompatible = (
             editor_field != "community_rating"
+            and editor_field not in COMICINFO_ONLY_TAGS
             and any(not o.selectable for o in row.options)
             and (embedded.get("ComicInfo.xml") != embedded.get("MetronInfo.xml"))
         )
@@ -439,7 +442,7 @@ def review_metadata_pair(
                     note=row.reason
                     if missing_publisher or not row.editable
                     else f"Select {row.label} to choose the value to write to ComicInfo.xml."
-                    if editor_field in COMICINFO_TEXT_TAGS
+                    if editor_field in COMICINFO_ONLY_TAGS
                     else f"Select {row.label} to choose the value to write to both documents.",
                 )
             )

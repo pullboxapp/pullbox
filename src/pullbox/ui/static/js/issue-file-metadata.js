@@ -14,6 +14,9 @@ function issueEditorDraftState(fieldIdPrefix) {
       return (this.preview ? this.preview.editor_fields || [] : []).filter(field =>
         this.allFields || field.differs || (this.editorDrafts[field.key] && this.editorDrafts[field.key].selected));
     },
+    editorValueLabel: function (field, value) {
+      return field.key === "issue.manga" && value === "YesAndRightToLeft" ? "Yes (right to left)" : value;
+    },
     editorOptions: function (field) {
       var options = [{ value: "unchanged", label: "Leave unchanged" }];
       for (const option of field.options || []) {

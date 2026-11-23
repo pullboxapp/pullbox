@@ -22,6 +22,16 @@ def test_editor_select_preview_apply_and_validation_retention(
     previews = []
     fields = [
         {
+            "key": "issue.manga",
+            "label": "Manga",
+            "editable": True,
+            "input_type": "text",
+            "xml_conflict_key": "xml.Manga",
+            "options": [{"source": "ComicInfo.xml", "value": "Yes"}],
+            "allowed_values": ["Unknown", "No", "Yes", "YesAndRightToLeft"],
+            "differs": False,
+        },
+        {
             "key": "issue.community_rating",
             "label": "Community rating",
             "xml_conflict_key": "xml.CommunityRating",
@@ -223,6 +233,11 @@ def test_editor_select_preview_apply_and_validation_retention(
     page.get_by_role("option", name="Enter correction", exact=True).click()
     dialog.get_by_role("button", name="New Age rating", exact=True).click()
     page.get_by_role("option", name="Teen", exact=True).click()
+    dialog.get_by_label("Update Manga", exact=True).check()
+    dialog.get_by_role("button", name="Value source for Manga", exact=True).click()
+    page.get_by_role("option", name="Enter correction", exact=True).click()
+    dialog.get_by_role("button", name="New Manga", exact=True).click()
+    page.get_by_role("option", name="Yes (right to left)", exact=True).click(timeout=4000)
     dialog.get_by_label("Update Tags", exact=True).check()
     dialog.get_by_role("button", name="Value source for Tags", exact=True).click()
     page.get_by_role("option", name="Enter correction", exact=True).click()
@@ -262,6 +277,7 @@ def test_editor_select_preview_apply_and_validation_retention(
     dialog.get_by_role("button", name="Update preview", exact=True).click()
     expect(dialog.get_by_role("button", name="Apply selected changes", exact=True)).to_be_enabled()
     selected = {
+        "manga": {"source": "custom", "value": "YesAndRightToLeft"},
         "community_rating": {"source": "custom", "value": "0"},
         "notes": {"source": "ComicInfo.xml"},
         "title": {"source": "custom", "value": "My corrected title"},

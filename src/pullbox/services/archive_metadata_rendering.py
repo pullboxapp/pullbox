@@ -10,7 +10,12 @@ from pullbox.core.archive_metadata_fields import (
 )
 from pullbox.core.archive_metadata_fields import COMICINFO_ROLES, comicinfo_credits
 from pullbox.core.archive_metadata_fields import archive_format_label as _format_text
-from pullbox.core.comicinfo_text import COMICINFO_TEXT_TAGS, comicinfo_text_ids, descriptive_text
+from pullbox.core.comicinfo_text import (
+    COMICINFO_ONLY_TAGS,
+    FLAG_CHOICES,
+    comicinfo_text_ids,
+    embedded_comicinfo_value,
+)
 from pullbox.core.issue_community_rating import annotated_rating, embedded_score
 from pullbox.core.issue_notes import UneditableNotesError, document_notes
 from pullbox.core.issue_numbers import normalize_issue_number_text
@@ -140,8 +145,8 @@ def render_archive_metadata(
     protected = {o.field for o in issue.origins if o.user_override}
     if not reviewed_xml_fields <= protected:
         raise ArchiveMetadataRenderError("invalid_choice")
-    if protected.intersection(COMICINFO_TEXT_TAGS):
-        _render_comicinfo_text(ci, issue.values, protected, reviewed_xml_fields)
+    if protected.intersection(COMICINFO_ONLY_TAGS):
+        _render_comicinfo_fields(ci, issue.values, protected, reviewed_xml_fields)
     if "community_rating" in protected:
         _render_community_rating(
             ci, mi, issue.values.community_rating, "community_rating" in reviewed_xml_fields
@@ -199,7 +204,7 @@ def render_archive_metadata(
     return _validated_pair(ci, mi)
 
 
-def _render_comicinfo_text(
+def _render_comicinfo_fields(
     ci: ET.Element, values: MetadataValues, protected: set[str], reviewed: frozenset[EditorXmlField]
 ) -> None:
     def document_ids() -> tuple[set[str], set[str]]:
@@ -213,16 +218,19 @@ def _render_comicinfo_text(
                 raise ArchiveMetadataRenderError("invalid_output") from exc
         return comicinfo_text_ids(" ".join(root.itertext()))
 
-    for field, tag in COMICINFO_TEXT_TAGS.items():
+    for field, tag in COMICINFO_ONLY_TAGS.items():
         if field not in protected:
             continue
         try:
             raw = ci.findtext(tag)
-            existing = descriptive_text(raw or "")
+            existing = embedded_comicinfo_value(field, raw)
         except ValueError as exc:
             raise ArchiveMetadataRenderError("label_override_changed", tag) from exc
         desired = getattr(values, field)
-        if existing == desired and not (field in reviewed and desired is None and raw is not None):
+        explicit_empty = field in reviewed and (
+            (desired is None and raw is not None) or (field in FLAG_CHOICES and raw == "")
+        )
+        if existing == desired and not explicit_empty:
             continue
         if field not in reviewed:
             raise ArchiveMetadataRenderError("label_override_changed", tag)

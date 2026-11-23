@@ -6,7 +6,7 @@ from typing import Literal, Self
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from pullbox.core.comicinfo_text import descriptive_text
+from pullbox.core.comicinfo_text import ColorFlag, MangaFlag, descriptive_text
 from pullbox.core.issue_community_rating import RATING_HELP, shared_score
 from pullbox.core.issue_notes import NOTES_LIMIT, safe_notes_prose
 from pullbox.core.issue_numbers import normalize_issue_number_text
@@ -78,6 +78,8 @@ class MetadataValues(BaseModel):
     imprint: str | None = Field(default=None, max_length=255, exclude_if=lambda v: v is None)
     notes: str | None = Field(default=None, max_length=NOTES_LIMIT, exclude_if=lambda v: v is None)
     review: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    black_and_white: ColorFlag | None = Field(default=None, exclude_if=lambda v: v is None)
+    manga: MangaFlag | None = Field(default=None, exclude_if=lambda v: v is None)
     scan_information: str | None = Field(default=None, exclude_if=lambda v: v is None)
     genres: IssueLabels | None = Field(default=None, exclude_if=lambda v: v is None)
     characters: IssueLabels | None = Field(default=None, exclude_if=lambda v: v is None)

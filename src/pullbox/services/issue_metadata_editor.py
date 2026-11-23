@@ -6,7 +6,12 @@ from typing import cast
 from pydantic import ValidationError
 
 from pullbox.core.archive_metadata import ArchiveMetadataFiles
-from pullbox.core.comicinfo_text import COMICINFO_TEXT_TAGS, descriptive_text
+from pullbox.core.comicinfo_text import (
+    COMICINFO_ONLY_TAGS,
+    FLAG_CHOICES,
+    descriptive_text,
+    embedded_comicinfo_value,
+)
 from pullbox.core.issue_community_rating import (
     RATING_HELP,
     RATING_LOCKED,
@@ -52,6 +57,8 @@ EDITABLE_FIELDS = {
     "description": ("Summary", "textarea"),
     "review": ("Review", "textarea"),
     "scan_information": ("Scan information", "textarea"),
+    "black_and_white": ("Black and white", "text"),
+    "manga": ("Manga", "text"),
     "notes": ("Notes", "textarea"),
     "cover_date": ("Cover date", "date"),
     "store_date": ("Store date", "date"),
@@ -65,6 +72,9 @@ EDITABLE_FIELDS = {
 }
 
 FIELD_HELP = {
+    "black_and_white": "ComicInfo.xml only. Clear removes the tag; Unknown writes Unknown.",
+    "manga": "ComicInfo.xml only. Yes (right to left) records the reading direction of the book. "
+    "It does not change your reader settings, page order, or the Metron manga volume.",
     "review": "ComicInfo.xml only. This is the reader's review, not the issue summary.",
     "scan_information": "ComicInfo.xml only. Scanner credits and scan details do not change Notes.",
     "notes": "Only the note text changes. Identity markers stay in their original XML document.",
@@ -104,6 +114,8 @@ def display_editor_value(value: object) -> str:
 
 
 def _selectable(field: str, value: object) -> bool:
+    if field in FLAG_CHOICES:
+        return value is None or value in FLAG_CHOICES[field]
     if field == "community_rating":
         return value is None or shared_score(value) is not None
     if field in LABEL_XML_PATHS:
@@ -145,7 +157,12 @@ def _custom_value(field: str, text: str) -> object:
                 "Enter Notes as plain text of up to 4096 characters, without identity markers "
                 "or legacy retailer references."
             )
-    elif field in COMICINFO_TEXT_TAGS:
+    elif field in FLAG_CHOICES:
+        if text not in FLAG_CHOICES[field]:
+            raise IssueMetadataEditError(
+                f"Choose a listed {EDITABLE_FIELDS[field][0]} value or clear it."
+            )
+    elif field in COMICINFO_ONLY_TAGS:
         try:
             value = descriptive_text(text)
         except ValueError as exc:
@@ -222,11 +239,11 @@ def prepare_issue_editor(
             ("MetronInfo.xml", archive.metroninfo, mi),
         ):
             value: object
-            if field in COMICINFO_TEXT_TAGS:
+            if field in COMICINFO_ONLY_TAGS:
                 if root is mi:
                     continue
                 try:
-                    value = descriptive_text(ci.findtext(COMICINFO_TEXT_TAGS[field], ""))
+                    value = embedded_comicinfo_value(field, ci.findtext(COMICINFO_ONLY_TAGS[field]))
                 except ValueError as exc:
                     locked_reason = (
                         f"{label} is read-only. {exc} Leave it unchanged or correct the source."
@@ -257,7 +274,7 @@ def prepare_issue_editor(
         edit = review.edits.get(key)
         if edit and locked_reason:
             raise IssueMetadataEditError(locked_reason)
-        if edit and field in COMICINFO_TEXT_TAGS and edit.source == "MetronInfo.xml":
+        if edit and field in COMICINFO_ONLY_TAGS and edit.source == "MetronInfo.xml":
             raise IssueMetadataEditError(f"{label} is stored in ComicInfo.xml only.")
         # Older select-all clients sent "keep library" even when no source had a value.
         if edit and edit.source == "library" and all(v in (None, "", ()) for v in options.values()):
@@ -284,6 +301,10 @@ def prepare_issue_editor(
                     )
                 if field == "community_rating" and not _selectable(field, options[edit.source]):
                     raise IssueMetadataEditError(RATING_HELP)
+                if field in FLAG_CHOICES and not _selectable(field, options[edit.source]):
+                    raise IssueMetadataEditError(
+                        f"Unrecognized {label} value. Choose a listed correction or clear it."
+                    )
                 if field == "story_arcs" and isinstance(options[edit.source], str):
                     raise IssueMetadataEditError(
                         "These arc names and positions cannot be paired safely. "
@@ -357,11 +378,13 @@ def prepare_issue_editor(
                     )
                     for source, value in options.items()
                 ],
-                allowed_values=tuple(SharedAgeRating) if field == "age_rating" else (),
+                allowed_values=tuple(SharedAgeRating)
+                if field == "age_rating"
+                else FLAG_CHOICES.get(field, ()),
                 overridden=bool(previous and previous.user_override),
                 differs=differs
                 or bool(
-                    (field == "notes" or field in COMICINFO_TEXT_TAGS)
+                    (field == "notes" or field in COMICINFO_ONLY_TAGS)
                     and locked_reason
                     and previous
                     and previous.user_override
@@ -370,7 +393,7 @@ def prepare_issue_editor(
                     field in EDITOR_XML_FIELDS
                     and current is not None
                     and bool(previous and previous.user_override)
-                    and len(options) < (2 if field in COMICINFO_TEXT_TAGS else 3)
+                    and len(options) < (2 if field in COMICINFO_ONLY_TAGS else 3)
                 ),
                 selected=key in review.edits,
                 origin=(

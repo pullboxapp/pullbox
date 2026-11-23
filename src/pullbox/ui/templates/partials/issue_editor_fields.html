@@ -20,9 +20,9 @@
   <fieldset class="rounded-lg border border-pb-border p-3 space-y-2 min-w-0">
     <legend class="text-sm font-semibold text-pb-text px-1" x-text="field.label"></legend>
     <p class="text-xs text-pb-text-sec" x-show="field.overridden">Manual correction</p>
-    <p class="text-sm text-pb-text whitespace-pre-wrap break-words max-h-32 overflow-y-auto" x-text="(field.key.startsWith('xml.') ? 'Embedded: ' : 'Library: ') + (field.current || 'Not set')"></p>
+    <p class="text-sm text-pb-text whitespace-pre-wrap break-words max-h-32 overflow-y-auto" x-text="(field.key.startsWith('xml.') ? 'Embedded: ' : 'Library: ') + (editorValueLabel(field, field.current) || 'Not set')"></p>
     <p class="text-xs text-pb-text-sec" x-show="field.current_source_label" x-text="field.current_source_label ? 'Saved source: ' + field.current_source_label : ''"></p>
-    <p class="text-sm text-pb-text whitespace-pre-wrap break-words max-h-32 overflow-y-auto" x-show="field.selected && !choicesDirty" x-text="'Approved preview: ' + (field.proposed || 'Cleared')"></p>
+    <p class="text-sm text-pb-text whitespace-pre-wrap break-words max-h-32 overflow-y-auto" x-show="field.selected && !choicesDirty" x-text="'Approved preview: ' + (editorValueLabel(field, field.proposed) || 'Cleared')"></p>
     <p class="text-xs text-pb-text-sec" x-show="field.reason" x-text="field.reason"></p>
     <template x-if="field.editable && editorDrafts[field.key]">
       <div class="space-y-2">
@@ -34,7 +34,7 @@
           <label class="field-label" :for="fieldIdPrefix + 'source-' + field.key" x-text="'Value source for ' + field.label"></label>
           {{ dropdown_select(name="issue-editor-source", trigger_id_expression="fieldIdPrefix + 'source-' + field.key", local_model="editorDrafts[field.key].source", options_expression="editorOptions(field)", local_on_change="choicesDirty = true", disabled_expression="busy") }}
           <template x-for="option in field.options" :key="option.source">
-            <p class="text-sm text-pb-text whitespace-pre-wrap break-words max-h-32 overflow-y-auto" x-show="editorDrafts[field.key].source === option.source || option.selectable === false" x-text="option.selectable === false ? option.source + ': ' + option.value + ' (no exact equivalent)' : option.value || 'Not set'"></p>
+            <p class="text-sm text-pb-text whitespace-pre-wrap break-words max-h-32 overflow-y-auto" x-show="editorDrafts[field.key].source === option.source || option.selectable === false" x-text="option.selectable === false ? option.source + ': ' + option.value + ' (no exact equivalent)' : editorValueLabel(field, option.value) || 'Not set'"></p>
           </template>
           <p class="text-sm text-pb-warning" x-show="editorDrafts[field.key].source === 'clear'">This deliberately removes the value and keeps it empty during refresh.</p>
           <p class="text-sm text-pb-text-sec" x-show="editorDrafts[field.key].source === 'reset'">Keep the current value now and allow future provider refreshes to update it.</p>
@@ -61,7 +61,7 @@
               <textarea class="input-pb w-full min-h-24" :id="fieldIdPrefix + 'value-' + field.key" rows="4" x-model="editorDrafts[field.key].value" @input="choicesDirty = true" :disabled="busy"></textarea>
             </template>
             <template x-if="field.allowed_values && field.allowed_values.length">
-              <div>{{ dropdown_select(name="issue-editor-value", trigger_id_expression="fieldIdPrefix + 'value-' + field.key", local_model="editorDrafts[field.key].value", options_expression="field.allowed_values.map(value => ({value: value, label: value}))", local_on_change="choicesDirty = true", disabled_expression="busy") }}</div>
+              <div>{{ dropdown_select(name="issue-editor-value", trigger_id_expression="fieldIdPrefix + 'value-' + field.key", local_model="editorDrafts[field.key].value", options_expression="field.allowed_values.map(value => ({value: value, label: editorValueLabel(field, value)}))", local_on_change="choicesDirty = true", disabled_expression="busy") }}</div>
             </template>
             <template x-if="!(field.allowed_values && field.allowed_values.length) && !['textarea', 'credits', 'arcs'].includes(field.input_type)">
               <input class="input-pb w-full" :id="fieldIdPrefix + 'value-' + field.key" :type="field.input_type" :inputmode="field.key === 'issue.community_rating' ? 'decimal' : null" x-model="editorDrafts[field.key].value" @input="choicesDirty = true" :disabled="busy">

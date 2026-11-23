@@ -250,6 +250,7 @@ async def test_manual_editor_previews_and_applies_only_approved_edits(
                 "tags": {"source": "custom", "value": "Noir"},
                 "notes": {"source": "custom", "value": "Reviewed scan"},
                 "review": {"source": "custom", "value": "Reader review"},
+                "black_and_white": {"source": "custom", "value": "No"},
             }
         },
     }
@@ -312,6 +313,7 @@ async def test_manual_editor_previews_and_applies_only_approved_edits(
                 assert ci.findtext("Notes").startswith("Reviewed scan [CVDB123]")
                 assert mi.findtext("Notes") == "Reviewed scan"
                 assert ci.findtext("Review") == "Reader review" and mi.find("Review") is None
+                assert ci.findtext("BlackAndWhite") == "No" and ci.find("Manga") is None
                 assert archive.read("page-053.jpg") == b"page 53"
     assert source.read_bytes() == original
 
