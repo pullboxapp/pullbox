@@ -6,7 +6,11 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from pullbox.core.metadata_identity import ExternalIdentityRef, MetadataEntityKind
+from pullbox.core.metadata_identity import (
+    ExternalIdentityRef,
+    IdentityNamespace,
+    MetadataEntityKind,
+)
 from pullbox.models import Issue, Series
 from pullbox.models.issue import IssueStatus
 from pullbox.services.metadata_assembly import assemble_metadata
@@ -28,6 +32,7 @@ from pullbox.services.metadata_series_adoption import (
 )
 from pullbox.services.metadata_series_refresh_state import ISSUE_FIELDS, SeriesRefreshState
 from pullbox.services.metadata_service import classify_issue_metadata
+from pullbox.services.series_metadata_links import SOURCE_LABELS
 
 
 class IssueCatalogConflictError(ValueError):
@@ -117,9 +122,21 @@ async def apply_issue_batch(
                 "A provider issue was renumbered. Review the issue match; existing files were kept."
             )
         if existing is None and text in by_number:
+            local = by_number[text]
+            has_provider_id = any(ref.namespace is identity.namespace for ref, _, _ in local.claims)
+            if identity.namespace is IdentityNamespace.COMICVINE and local.comicvine_id is not None:
+                has_provider_id = True
+            if not metadata.cross_identities and not has_provider_id:
+                raise IssueCatalogConflictError(
+                    f"A matching number alone cannot confirm issue #{text}. Open it and choose "
+                    "Link provider under Metadata sources. Compare it with "
+                    f"{SOURCE_LABELS[source]} issue ID {identity.external_id}. "
+                    "Confirm only if they match, then refresh "
+                    "the series again. Your file was not changed."
+                )
             raise IssueCatalogConflictError(
-                "An issue designation already belongs to a different identity. "
-                "Review its match; no issues were reassigned."
+                f"The provider identity for issue #{text} could not be verified. "
+                "Review its provider matches; no issues were reassigned."
             )
         snapshot = assemble_metadata(
             MetadataEntityKind.ISSUE,

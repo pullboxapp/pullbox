@@ -984,6 +984,14 @@ recorded issue and skips one conflict at a time; the neighboring comic and all
 source files must remain unchanged. An import still waiting at Step 3 is a
 preflight blocker, not a resumable PostgreSQL test case.
 
+In the same rehearsal, enable a generated read-only GCD catalog in Settings and
+link it to an existing ComicVine series. A fractional issue with the same number
+but no verified GCD identity must block refresh without partial additions. After
+confirming the issue link in Chromium, refresh twice: the two new lettered issues
+must appear only once, and the original issue, provider ID, file binding and
+comic bytes must survive. Check the same catalog and ownership after a native
+PostgreSQL backup and restore.
+
 Story Arc reader bookmarks are unique per user and arc. A bookmark
 stores the stable membership and the issue the user actually read, not a page
 number or a sequence offset. Progress remains in `issue_reader_states`.

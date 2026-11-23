@@ -179,10 +179,11 @@ async def scan():
     return {"folder": cases, "mylar": mylar}
 
 
-async def exercise(origin, cases, originals, library, db, sql):
+async def exercise(origin, cases, originals, library, db, sql, owned_digest):
     from playwright.async_api import async_playwright, expect
 
     from tests.e2e.accessibility import AXE_SCRIPT, WCAG_AA_TAGS
+    from tests.integration import postgres_linked_catalog as linked
 
     def posted_to(suffix):
         return lambda response: response.request.method == "POST" and response.url.endswith(suffix)
@@ -300,6 +301,7 @@ async def exercise(origin, cases, originals, library, db, sql):
             assert sql(db, "SELECT count(*) FROM library_files WHERE issue_id=10016") == "0"
             assert sql(db, "SELECT count(*) FROM library_files WHERE issue_id=10017") == "1"
             assert all(path.read_bytes() == before for path, before in originals["mylar"].items())
+            return await linked.exercise(page, library, sql, db, owned_digest)
         finally:
             await browser.close()
 

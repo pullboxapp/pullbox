@@ -10,7 +10,7 @@ from pathlib import Path
 from PIL import Image
 
 
-def _comic(path, number):
+def _comic(path, number, series="Harbor Lights"):
     path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(path, "w") as archive:
         for index, color in enumerate(("red", "blue"), 1):
@@ -19,7 +19,7 @@ def _comic(path, number):
                 archive.writestr(f"page-{index}.png", page.getvalue())
         archive.writestr(
             "ComicInfo.xml",
-            f"<ComicInfo><Series>Harbor Lights</Series><Number>{number}</Number></ComicInfo>",
+            f"<ComicInfo><Series>{series}</Series><Number>{number}</Number></ComicInfo>",
         )
     return hashlib.sha256(path.read_bytes()).digest()
 
@@ -159,7 +159,7 @@ assert json.loads(body)['requires_import_retry']
 """
 
 
-def verify(sql, db, library, imports, expected, *, mylar_neighbor=False):
+def verify(sql, db, library, imports, expected, *, mylar_neighbor=False, linked_additions=0):
     for _ in range(50):
         state = sql(db, "SELECT status FROM import_jobs WHERE id=7")
         if state == "COMPLETED":
@@ -176,7 +176,7 @@ def verify(sql, db, library, imports, expected, *, mylar_neighbor=False):
     assert sql(db, "SELECT status FROM import_files WHERE id=2") == "FAILED"
     assert sql(db, "SELECT value FROM system_config WHERE key='post_processing_method'") == "copy"
     assert sql(db, "SELECT count(*) FROM series") == "642"
-    assert sql(db, "SELECT count(*) FROM issues") == "10241"
+    assert sql(db, "SELECT count(*) FROM issues") == str(10241 + linked_additions)
     assert (
         sql(db, "SELECT count(*) FROM issues WHERE id IN (10000,10001) AND status='OWNED'") == "2"
     )

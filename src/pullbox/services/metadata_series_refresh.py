@@ -65,6 +65,7 @@ from pullbox.services.metadata_service import MetadataService
 from pullbox.services.metadata_sources import load_source_runtime
 from pullbox.services.metadata_writer_identity import metadata_write_scope
 from pullbox.services.provider_artwork import ProviderArtworkClient, pending_provider_cover
+from pullbox.services.series_metadata_links import SOURCE_LABELS
 
 logger = structlog.get_logger(__name__)
 
@@ -357,6 +358,7 @@ async def _catalogs(
         identity.namespace for issue in state.issues for identity in issue.identities
     }
     bundles: list[SourceSeriesBundle] = []
+    uncorroborated: MetadataSource | None = None
     loaded_namespaces = set()
     sources = sorted(
         registry.runtime,
@@ -399,6 +401,8 @@ async def _catalogs(
                 if not any(
                     identity in state.series.identities for identity in profile.cross_identities
                 ):
+                    if not profile.cross_identities and uncorroborated is None:
+                        uncorroborated = source
                     continue
             bundle = await fetch_source_series_bundle(
                 registry,
@@ -440,6 +444,15 @@ async def _catalogs(
             "A metadata source reported inconsistent issue counts, and no configured source "
             "could supply a complete catalog. Check source availability in Metadata settings "
             "or retry later. Existing issue matches and files were kept.",
+            outcomes=tuple(failed.values()),
+        )
+    if uncorroborated is not None:
+        label = SOURCE_LABELS[uncorroborated]
+        raise SeriesRefreshError(
+            f"{label} is linked to this series, but none of its issues has been verified. "
+            "Open an issue you recognize in both catalogs. Under Metadata sources, choose "
+            f"Link provider and compare the {label} issue. Confirm only if it matches, then "
+            "refresh this series again. Existing issues and files were kept.",
             outcomes=tuple(failed.values()),
         )
     raise SeriesRefreshError(

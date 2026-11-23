@@ -16,6 +16,7 @@ import pytest
 from sqlalchemy.engine import make_url
 
 from tests.integration import postgres_import_workload as workload
+from tests.integration import postgres_linked_catalog as linked
 from tests.integration import postgres_native_followup as native
 from tests.integration import test_postgres_stage_review as review
 from tests.integration import test_postgres_transfer_stage as stages
@@ -112,6 +113,8 @@ async def test_recheck_original_source_and_reviewed_target(
         )
         if activated:
             expected = workload.seed(db, comics, imports)
+        if browser:
+            owned_digest = linked.seed(db, imports, comics)
     originals = native.make_sources(imports) if browser else {}
     token = tmp_path / "token"
     key = secrets.token_hex(32)
@@ -414,7 +417,9 @@ async def test_recheck_original_source_and_reviewed_target(
                 if cases:
                     address = docker("port", postgres, "8585/tcp", check=True).stdout.strip()
                     assert address.startswith("127.0.0.1:")
-                    await native.exercise("http://" + address, cases, originals, copied, db, sql)
+                    refreshed_rows = await native.exercise(
+                        "http://" + address, cases, originals, copied, db, sql, owned_digest
+                    )
                 if not shared:
                     assert inspect(name, "--compare-checkpoint", checkpoint)["checkpoint_matched"]
                 assert hashlib.sha256(snapshot.read_bytes()).hexdigest() == captured_source.snapshot
@@ -459,9 +464,16 @@ async def test_recheck_original_source_and_reviewed_target(
                 stages.targets._migrate(restore_url, "upgrade", "head")
                 if expected:
                     workload.verify(
-                        sql, restored, copied, imports, expected, mylar_neighbor=browser
+                        sql,
+                        restored,
+                        copied,
+                        imports,
+                        expected,
+                        mylar_neighbor=browser,
+                        linked_additions=2 if browser else 0,
                     )
                 if cases:
+                    assert linked.verify(sql, restored) == refreshed_rows
                     assert sql(restored, stat_query) == last_run
                 assert (
                     sql(restored, "SELECT name FROM story_arcs WHERE id=55")

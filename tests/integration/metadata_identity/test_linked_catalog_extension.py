@@ -267,8 +267,13 @@ async def test_thin_catalog_requires_consistent_detail_identity_and_keeps_atomic
         Source.METRON_API: registration(adapter, capabilities=list(SourceCapability)),
     }
     async with factory() as session:
-        with pytest.raises(SeriesRefreshError):
+        with pytest.raises(SeriesRefreshError) as stopped:
             await refresh_series_catalog_from_sources(session, series_id, registry=registry)
+        if problem == "number_only":
+            assert "#1" in str(stopped.value) and "Link provider" in str(stopped.value)
+            assert "Metron issue ID 200" in str(stopped.value)
+        else:
+            assert "Link provider" not in str(stopped.value)
         await session.commit()
     async with factory() as session:
         assert (await session.get(Series, series_id)).issue_count == 5
@@ -530,6 +535,26 @@ async def test_unverified_series_link_cannot_extend_catalog(linked_catalog):
         assert result.created_issue_ids == () and result.series.issue_count == 5
         await session.commit()
     assert adapters[Source.METRON_API].calls == []
+
+
+@pytest.mark.parametrize("conflicting_parent", [False, True])
+async def test_link_without_catalog_proof_explains_issue_review_only_when_safe(
+    linked_catalog, conflicting_parent
+):
+    factory, series_id, _, _, adapters, registry = linked_catalog
+    del registry.runtime[Source.COMICVINE_API]
+    secondary = adapters[Source.METRON_API]
+    secondary.data.series.cross_identities = (
+        [ExternalIdentityRef(Namespace.COMICVINE, Kind.SERIES, "999")] if conflicting_parent else []
+    )
+    async with factory() as session:
+        with pytest.raises(SeriesRefreshError) as stopped:
+            await refresh_series_catalog_from_sources(session, series_id, registry=registry)
+        assert ("Link provider" in str(stopped.value)) is not conflicting_parent
+        await session.commit()
+    assert not any(call[0] == "issues" for call in secondary.calls)
+    async with factory() as session:
+        assert (await session.get(Series, series_id)).issue_count == 5
 
 
 async def test_later_linked_catalog_cannot_drop_a_previously_verified_member(linked_catalog):
