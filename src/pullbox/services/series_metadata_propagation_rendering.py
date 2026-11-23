@@ -40,7 +40,7 @@ def render_series_propagation(
         raise ArchiveMetadataRenderError("invalid_choice")
     if not files.comicinfo.payload or not files.metroninfo.payload:
         raise ArchiveMetadataRenderError("propagation_pair_required")
-    archive = reconcile_archive_metadata(files)
+    archive = reconcile_archive_metadata(files, story_baseline=issue)
     _identities(series, issue, archive)
     if any(item.code != "unmapped_content" for item in archive.diagnostics):
         raise ArchiveMetadataRenderError("invalid_input")
@@ -102,4 +102,4 @@ def render_series_propagation(
                 raise ArchiveMetadataRenderError("unsupported_content", "Publisher")
             mi.remove(publisher)
         set_text(ci, "Publisher", value)
-    return _validated_pair(ci, mi)
+    return _validated_pair(ci, mi, story_baseline=issue)

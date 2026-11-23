@@ -119,6 +119,7 @@ def file_metadata_error(exc: BaseException) -> str:
             "AlternativeNumber": "alternative issue number",
             "CollectionTitle": "collection title",
             "Reprints": "reprints",
+            "Stories": "story titles",
             "Universes": "universes",
             "MangaVolume": "manga volume",
             "SeriesGroup": "series groups",
@@ -555,7 +556,11 @@ def _prepare(
 ) -> PreparedFileMetadata:
     binding = target.binding
     converts = target.path.suffix.casefold() in {".cbr", ".cb7", ".pdf"}
-    archive = reconcile_archive_metadata(files)
+    archive = reconcile_archive_metadata(
+        files,
+        story_baseline=binding.metadata.issues[0].baseline,
+        reviewing_stories=editor is not None and "story_titles" in editor.reviewed_xml_fields,
+    )
     series, issue = assemble_bound_archive_metadata(binding, archive, now=datetime.now(UTC))
     primary = archive_primary_identity(binding, archive)
     series, issue, editor_fields, conflicts, shared_choices, rendered, effective = (

@@ -57,7 +57,8 @@ before moving it aside. The selected source file is never the replacement target
 
 | Field | Type / validation | ComicInfo | MetronInfo | Behavior |
 | --- | --- | --- | --- | --- |
-| Issue title | Bounded text | Title | Stories/Story | Editable |
+| Issue title | Bounded text | Title | Single Stories/Story when not separately reviewed | Editing the issue title does not replace an anthology's contents. |
+| Story titles | Up to 128 distinct titles, one per line | No native equivalent | Stories/Story | Reorder or correct the contents without renaming the issue. Retained titles keep their IDs. New or renamed titles receive no ID. |
 | Summary | Bounded text | Summary | Summary | Editable |
 | Review, scan information | Separate multiline text fields, up to 20,000 characters each | Review, ScanInformation | No native equivalent | Choose a library or ComicInfo value, enter text, or explicitly clear. Neither field changes the summary, Notes, or MetronInfo. |
 | Main character or team | One printable name, up to 255 characters | MainCharacterOrTeam | No native equivalent | A comma can be part of the name. Does not change the character/team lists or their IDs. |
@@ -85,6 +86,14 @@ before moving it aside. The selected source file is never the replacement target
 | Series title, sort title, publisher, summary, dates, type, archive format, status, count, volume, language, artwork | Series-wide catalog values | Existing series projection | Existing series projection | Read-only; no changes to siblings |
 | Issue imprint | Single-line name, up to 255 characters | Imprint | Publisher/Imprint | Editable for this issue only. A nonempty imprint requires a named publisher; retain its ID only for the same imprint. |
 | Embedded story arcs | Up to 128 unique arc names and optional positive positions | StoryArc and StoryArcNumber | Arcs/Arc/Name and Number | Edit names and positions together. Retained names keep their IDs. Does not create tracked arcs, change memberships, or reorder a reading list. |
+
+An unreviewed Metron file with a single short story still offers that story as
+an issue title, including the usual review if the titles disagree. Multiple
+stories, or a native story title longer than Pullbox's issue title limit, are
+contents rather than an issue title. Choosing **Story titles** records that
+distinction for this issue even if only one story remains or the list is
+cleared. It does not approve a different ComicInfo issue title, change the
+pages, or qualify a story-only extract as complete.
 
 ComicInfo uses one comma-separated list of arc names and one of positions. If
 any position is unknown, Pullbox writes the names but omits the ComicInfo
@@ -114,7 +123,7 @@ does not authorize dropping preserved data or writing to a new field on import.
 
 | Source fields | Remaining decision or workflow |
 | --- | --- |
-| Metron multiple Stories, Prices | Structured entries need controls that preserve story resource IDs and price currencies where present. A list of stories is not a single issue title. |
+| Metron Prices | Price controls must preserve currencies. |
 | ComicInfo Web, GTIN; Metron URLs, GTIN | Distinguish descriptive links from provider identity evidence; keep primary URLs, ISBNs and UPCs distinct. |
 | ComicInfo Pages and attributes; Metron LastModified and nested resource IDs | Page annotations and source timestamps are not descriptive corrections. Resource IDs cannot be assigned by position or inferred from a renamed label. |
 | Metron Series/AlternativeNames and Series/VolumeCount | Series-wide values; do not implement these as issue-only overrides. |

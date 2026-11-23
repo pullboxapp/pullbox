@@ -21,18 +21,18 @@ from tests.integration.metadata_identity.test_issue_metadata_editor import (
 )
 
 
-async def source(factory, plan, path, ci_tags, mi_tags, *, ci_extra="", mi_extra=""):
+async def source(factory, plan, path, ci_tags, mi_tags, *, ci_extra="", mi_extra="", number="50-X"):
     with ZipFile(path, "w") as archive:
         archive.writestr("page.jpg", b"page bytes")
         archive.writestr(
             "ComicInfo.xml",
-            f"<ComicInfo><Number>50-X</Number>{ci_extra}<Tags>{ci_tags}</Tags></ComicInfo>",
+            f"<ComicInfo><Number>{number}</Number>{ci_extra}<Tags>{ci_tags}</Tags></ComicInfo>",
         )
         archive.writestr(
             "MetronInfo.xml",
             '<MetronInfo><IDS><ID source="Metron" primary="true">42</ID></IDS>'
             '<Series id="12"><Name>Example</Name></Series>'
-            f"<Number>50-X</Number>{mi_extra}<Tags>{mi_tags}</Tags></MetronInfo>",
+            f"<Number>{number}</Number>{mi_extra}<Tags>{mi_tags}</Tags></MetronInfo>",
         )
     async with factory.begin() as session:
         row = await session.get(LibraryFile, plan.target.binding.library_file_id)

@@ -126,7 +126,9 @@ def write_cbz_metadata(
                     or metadata_state.issues[0].identities != issue.identities
                 ):
                     raise ValueError("Conversion metadata disagrees with its verified binding")
-                archive = reconcile_archive_metadata(files)
+                archive = reconcile_archive_metadata(
+                    files, story_baseline=metadata_state.issues[0].baseline
+                )
                 series, issue = assemble_archive_metadata_state(
                     metadata_state, archive, now=datetime.now(UTC)
                 )

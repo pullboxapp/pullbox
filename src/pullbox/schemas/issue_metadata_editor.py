@@ -12,6 +12,7 @@ from pullbox.schemas.metadata_issue_universes import (
 )
 
 type EditorConflictField = Literal[
+    "xml.Stories",
     "xml.Universes",
     "xml.Reprints",
     "xml.CollectionTitle",
@@ -39,6 +40,7 @@ type EditorConflictField = Literal[
 ]
 
 type EditableIssueField = Literal[
+    "story_titles",
     "universes",
     "reprints",
     "collection_title",
@@ -71,6 +73,7 @@ type EditableIssueField = Literal[
     "story_arcs",
 ]
 type EditorXmlField = Literal[
+    "story_titles",
     "universes",
     "reprints",
     "collection_title",
@@ -97,6 +100,7 @@ type EditorXmlField = Literal[
     "story_arcs",
 ]
 EDITOR_XML_FIELDS: dict[EditorXmlField, EditorConflictField] = {
+    "story_titles": "xml.Stories",
     "universes": "xml.Universes",
     "reprints": "xml.Reprints",
     "collection_title": "xml.CollectionTitle",
@@ -140,7 +144,7 @@ class IssueMetadataEdit(BaseModel):
 class IssueMetadataEditorReview(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    edits: dict[EditableIssueField, IssueMetadataEdit] = Field(default_factory=dict, max_length=30)
+    edits: dict[EditableIssueField, IssueMetadataEdit] = Field(default_factory=dict, max_length=31)
 
     @field_validator("edits", mode="before")
     @classmethod

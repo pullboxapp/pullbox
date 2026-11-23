@@ -25,7 +25,7 @@ from pullbox.core.metroninfo import MAX_METRONINFO_FIELD_LENGTH
 from pullbox.schemas.metadata_credits import MetadataCredits
 from pullbox.schemas.metadata_issue_arcs import IssueArcList
 from pullbox.schemas.metadata_issue_universes import IssueUniverseList
-from pullbox.schemas.metadata_labels import IssueLabels, ReprintLabels
+from pullbox.schemas.metadata_labels import IssueLabels, MetronTitleList
 from pullbox.schemas.metadata_sources import MetadataDomain
 
 type EmbeddedDocument = Literal["ComicInfo.xml", "MetronInfo.xml"]
@@ -58,10 +58,13 @@ def selectable_imprint(value: object) -> bool:
     )
 
 
+MAX_TITLE_LENGTH = 500
+
+
 class MetadataValues(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    title: str | None = Field(default=None, max_length=500)
+    title: str | None = Field(default=None, max_length=MAX_TITLE_LENGTH)
     sort_title: str | None = Field(default=None, max_length=500)
     publisher: str | None = Field(default=None, max_length=255)
     description: str | None = Field(default=None, max_length=200000)
@@ -91,7 +94,8 @@ class MetadataValues(BaseModel):
     alternate_number: str | None = Field(default=None, exclude_if=lambda v: v is None)
     alternative_number: str | None = Field(default=None, exclude_if=lambda v: v is None)
     collection_title: str | None = Field(default=None, exclude_if=lambda v: v is None)
-    reprints: ReprintLabels | None = Field(default=None, exclude_if=lambda v: v is None)
+    reprints: MetronTitleList | None = Field(default=None, exclude_if=lambda v: v is None)
+    story_titles: MetronTitleList | None = Field(default=None, exclude_if=lambda v: v is None)
     universes: IssueUniverseList | None = Field(default=None, exclude_if=lambda v: v is None)
     manga_volume: str | None = Field(default=None, exclude_if=lambda v: v is None)
     alternate_count: int | None = Field(
@@ -235,6 +239,14 @@ class MetadataSnapshot(BaseModel):
     origins: tuple[FieldOrigin, ...] = ()
     observed_identities: tuple[ExternalIdentityRef, ...] = ()
     diagnostics: tuple[str, ...] = ()
+
+    @property
+    def independent_story_titles(self) -> bool:
+        # A released override no longer owns the list, but it is still not the issue title.
+        return any(
+            o.field == "story_titles" and (o.user_override or o.provider_managed)
+            for o in self.origins
+        )
 
     @model_validator(mode="after")
     def consistent_provenance(self) -> Self:

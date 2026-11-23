@@ -139,7 +139,11 @@ def _preview(
             max_solid_scan_bytes=MAX_METADATA_BYTES if kind in {"cbz", "zip"} else plan.limit,
         )
     )
-    archive = reconcile_archive_metadata(files)
+    archive = reconcile_archive_metadata(
+        files,
+        story_baseline=plan.metadata.issues[0].baseline,
+        reviewing_stories=editor is not None and "story_titles" in editor.reviewed_xml_fields,
+    )
     series, issue = assemble_archive_metadata_state(plan.metadata, archive, now=datetime.now(UTC))
     primary = select_archive_primary_identity(plan.metadata, archive)
     from pullbox.services.issue_file_metadata import preview_xml_changes, review_metadata_pair

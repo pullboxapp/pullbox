@@ -230,11 +230,19 @@ def apply_metron_labels(mi: ET.Element, mi_path: str, values: tuple[str, ...]) -
         mi.remove(parent)
 
 
-def embedded_reprints(mi: ET.Element) -> tuple[str, ...]:
-    parent = mi.find("Reprints")
-    if parent is not None and any(node.tag != "Reprint" or len(node) for node in parent):
-        raise ValueError("Reprints contain an XML annotation.")
-    return embedded_labels(mi, "Reprints/Reprint")
+def embedded_metron_titles(mi: ET.Element, path: str) -> tuple[str, ...]:
+    group, entry = path.split("/")
+    parent = mi.find(group)
+    if parent is not None and (
+        parent.attrib
+        or (parent.text or "").strip()
+        or any(
+            node.tag != entry or len(node) or set(node.attrib) - {"id"} or (node.tail or "").strip()
+            for node in parent
+        )
+    ):
+        raise ValueError(f"{group} contain an XML annotation.")
+    return embedded_labels(mi, path)
 
 
 def _universe_pair(node: ET.Element) -> tuple[str, str | None]:

@@ -34,7 +34,7 @@ from pullbox.schemas.issue_metadata_editor import (
 )
 from pullbox.schemas.metadata_issue_arcs import IssueArcEntry, comicinfo_arcs
 from pullbox.schemas.metadata_issue_universes import IssueUniverseEntry
-from pullbox.schemas.metadata_labels import LABEL_XML_PATHS, selectable_labels
+from pullbox.schemas.metadata_labels import LABEL_XML_PATHS, METRON_TITLE_LISTS, selectable_labels
 from pullbox.schemas.metadata_snapshot import (
     FieldOrigin,
     MetadataSnapshot,
@@ -47,7 +47,7 @@ from pullbox.services.archive_metadata_preservation import (
     ArchiveMetadataRenderError,
     editor_arc_value,
     embedded_labels,
-    embedded_reprints,
+    embedded_metron_titles,
     embedded_universes,
     metron_simple_text,
     preserved_roots,
@@ -73,6 +73,7 @@ EDITABLE_FIELDS = {
     "alternative_number": ("Alternative issue number", "text"),
     "collection_title": ("Collection title", "text"),
     "reprints": ("Reprints", "textarea"),
+    "story_titles": ("Story titles", "textarea"),
     "universes": ("Universes", "universes"),
     "manga_volume": ("Manga volume", "text"),
     "black_and_white": ("Black and white", "text"),
@@ -90,6 +91,8 @@ EDITABLE_FIELDS = {
 }
 
 FIELD_HELP = {
+    "story_titles": "MetronInfo.xml only. Enter the stories in reading order, one title per line. "
+    "This does not rename the issue. Retained titles keep their IDs; new titles get no ID.",
     "universes": "MetronInfo.xml only. A name can appear with different designations. "
     "Reordering keeps IDs; new or changed name/designation pairs get no ID.",
     "reprints": "MetronInfo.xml only. Enter one reprint per line; commas belong to the title. "
@@ -168,8 +171,8 @@ def _selectable(field: str, value: object) -> bool:
         return value is None or value in FLAG_CHOICES[field]
     if field == "community_rating":
         return value is None or shared_score(value) is not None
-    if field in LABEL_XML_PATHS or field in {"series_groups", "reprints"}:
-        return selectable_labels(value, reprints=field == "reprints")
+    if field in LABEL_XML_PATHS or field == "series_groups" or field in METRON_TITLE_LISTS:
+        return selectable_labels(value, metron_titles=field in METRON_TITLE_LISTS)
     if field in {"story_arcs", "universes"}:
         return not isinstance(value, str)
     if field == "imprint":
@@ -221,7 +224,7 @@ def _custom_value(field: str, text: str) -> object:
             raise IssueMetadataEditError(
                 "Enter a whole number from 0 to 2147483647 or -1 for unknown."
             )
-    elif field in SINGLE_DOCUMENT and field not in {"series_groups", "reprints"}:
+    elif field in SINGLE_DOCUMENT and field != "series_groups" and field not in METRON_TITLE_LISTS:
         try:
             value = descriptive_text(text)
         except ValueError as exc:
@@ -235,13 +238,13 @@ def _custom_value(field: str, text: str) -> object:
                 "Catalog page count must be a whole number from 0 to 1000000."
             )
         value = int(text)
-    elif field in LABEL_XML_PATHS or field in {"series_groups", "reprints"}:
+    elif field in LABEL_XML_PATHS or field == "series_groups" or field in METRON_TITLE_LISTS:
         value = tuple(line.strip() for line in text.split("\n") if line.strip())
-        if field == "reprints":
-            if not selectable_labels(value, reprints=True):
+        if field in METRON_TITLE_LISTS:
+            if not selectable_labels(value, metron_titles=True):
                 raise IssueMetadataEditError(
-                    "Enter up to 128 distinct reprints, one per line, with no more than "
-                    f"{MAX_METRONINFO_FIELD_LENGTH} characters per entry."
+                    f"Enter up to 128 distinct {EDITABLE_FIELDS[field][0].lower()}, one per line, "
+                    f"with no more than {MAX_METRONINFO_FIELD_LENGTH} characters per entry."
                 )
         elif not selectable_labels(value):
             raise IssueMetadataEditError(
@@ -327,12 +330,12 @@ def prepare_issue_editor(
                         f"{label} is read-only. {exc} Leave it unchanged or correct the source."
                     )
                     continue
-            elif field in METRON_ONLY_TAGS or field in {"reprints", "universes"}:
+            elif field in METRON_ONLY_TAGS or field in METRON_TITLE_LISTS or field == "universes":
                 try:
                     if field in METRON_ONLY_TAGS:
                         value = metron_simple_text(mi, METRON_ONLY_TAGS[field])
-                    elif field == "reprints":
-                        value = embedded_reprints(mi) or None
+                    elif field in METRON_TITLE_LISTS:
+                        value = embedded_metron_titles(mi, METRON_TITLE_LISTS[field]) or None
                     else:
                         value = embedded_universes(mi)
                 except ValueError as exc:

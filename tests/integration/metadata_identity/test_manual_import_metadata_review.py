@@ -257,6 +257,7 @@ async def test_manual_editor_previews_and_applies_only_approved_edits(
                 "collection_title": {"source": "custom", "value": "Gotham Collection"},
                 "reprints": {"source": "custom", "value": "A, Vol. 1 #2\nGotham #3"},
                 "universes": {"source": "custom", "value": [{"name": "Gotham"}]},
+                "story_titles": {"source": "custom", "value": "Opening\nSecond feature"},
             }
         },
     }
@@ -327,6 +328,11 @@ async def test_manual_editor_previews_and_applies_only_approved_edits(
                 )
                 assert mi.findtext("CollectionTitle") == "Gotham Collection"
                 assert mi.findtext("Universes/Universe/Name") == "Gotham"
+                assert [s.text for s in mi.findall("Stories/Story")] == [
+                    "Opening",
+                    "Second feature",
+                ]
+                assert ci.findtext("Title") not in {"Opening", "Second feature"}
                 assert mi.find("Universes/Universe/Designation") is ci.find("Universes") is None
                 assert [(r.text, r.get("id")) for r in mi.findall("Reprints/Reprint")] == [
                     ("A, Vol. 1 #2", None),

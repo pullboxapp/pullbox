@@ -149,7 +149,7 @@ async def write_imported_archive_metadata(
     files = await asyncio.to_thread(
         read_archive_metadata, target.path, "cbz", max_solid_scan_bytes=MAX_METADATA_BYTES
     )
-    archive = reconcile_archive_metadata(files)
+    archive = reconcile_archive_metadata(files, story_baseline=binding.metadata.issues[0].baseline)
     cv_id = binding.metadata.issues[0].comicvine_id
     cached = prefetched.get(cv_id) if cv_id is not None else None
     candidates: tuple[ProviderIssueRead, ...] = ()

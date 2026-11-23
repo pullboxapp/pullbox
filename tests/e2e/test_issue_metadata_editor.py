@@ -22,6 +22,15 @@ def test_editor_select_preview_apply_and_validation_retention(
     previews = []
     fields = [
         {
+            "key": "issue.story_titles",
+            "label": "Story titles",
+            "input_type": "textarea",
+            "editable": True,
+            "xml_conflict_key": "xml.Stories",
+            "options": [{"source": "MetronInfo.xml", "value": "Opening, Part I\nBackup story"}],
+            "differs": False,
+        },
+        {
             "key": "issue.universes",
             "label": "Universes",
             "editable": True,
@@ -272,6 +281,12 @@ def test_editor_select_preview_apply_and_validation_retention(
     groups = dialog.get_by_label("New Series groups", exact=True)
     expect(groups).to_have_value("Gotham\nClassics")
     groups.fill("Classics\nGotham & Beyond")
+    dialog.get_by_label("Update Story titles", exact=True).check()
+    dialog.get_by_role("button", name="Value source for Story titles", exact=True).click()
+    page.get_by_role("option", name="Enter correction", exact=True).click()
+    stories = dialog.get_by_label("New Story titles", exact=True)
+    expect(stories).to_have_value("Opening, Part I\nBackup story")
+    stories.fill("Backup story\nCorrected opening")
     dialog.get_by_label("Update Universes", exact=True).check()
     dialog.get_by_role("button", name="Value source for Universes", exact=True).click()
     page.get_by_role("option", name="Enter correction", exact=True).click()
@@ -314,6 +329,7 @@ def test_editor_select_preview_apply_and_validation_retention(
     dialog.get_by_role("button", name="Update preview", exact=True).click()
     expect(dialog.get_by_role("button", name="Apply selected changes", exact=True)).to_be_enabled()
     selected = {
+        "story_titles": {"source": "custom", "value": "Backup story\nCorrected opening"},
         "universes": {
             "source": "custom",
             "value": [

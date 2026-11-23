@@ -30,7 +30,7 @@ from pullbox.core.metadata_xml import MetadataXmlError, parse_metadata_xml
 from pullbox.core.metroninfo import MetronInfoData, parse_metroninfo
 from pullbox.core.partial_issue import is_story_extract
 from pullbox.schemas.metadata_credits import MetadataCredit
-from pullbox.schemas.metadata_snapshot import MetadataValues
+from pullbox.schemas.metadata_snapshot import MAX_TITLE_LENGTH, MetadataSnapshot, MetadataValues
 
 _CI_ROLES = COMICINFO_ROLES
 _CV_HOSTS = frozenset(
@@ -84,9 +84,19 @@ class ArchiveMetadataReconciliation:
         return bool(self.identity_conflicts or self.differences or self.diagnostics)
 
 
-def reconcile_archive_metadata(files: ArchiveMetadataFiles) -> ArchiveMetadataReconciliation:
+def reconcile_archive_metadata(
+    files: ArchiveMetadataFiles,
+    *,
+    story_baseline: MetadataSnapshot | None = None,
+    reviewing_stories: bool = False,
+) -> ArchiveMetadataReconciliation:
     """Return shared values and explicit disagreements, never authority or write permission."""
-    metron = _read_document(files.metroninfo, "MetronInfo.xml")
+    metron = _read_document(
+        files.metroninfo,
+        "MetronInfo.xml",
+        independent_stories=reviewing_stories
+        or bool(story_baseline and story_baseline.independent_story_titles),
+    )
     comic = _read_document(files.comicinfo, "ComicInfo.xml", metron.issue.credits)
     differences: list[ArchiveMetadataDifference] = []
     series = _shared_values(comic.series, metron.series, "series", differences)
@@ -172,6 +182,8 @@ def _read_document(
     member: MetadataFile,
     document: str,
     structured_credits: tuple[MetadataCredit, ...] | None = None,
+    *,
+    independent_stories: bool = False,
 ) -> EmbeddedMetadataValues:
     diagnostics = [
         ArchiveMetadataDiagnostic(document, item.value, document) for item in member.diagnostics
@@ -183,7 +195,7 @@ def _read_document(
             diagnostics.append(ArchiveMetadataDiagnostic(document, "unreadable", document))
         return EmbeddedMetadataValues(diagnostics=tuple(diagnostics))
     if document == "MetronInfo.xml":
-        return _metron_values(parse_metroninfo(member.payload), diagnostics)
+        return _metron_values(parse_metroninfo(member.payload), diagnostics, independent_stories)
     try:
         root = parse_metadata_xml(member.payload, root_name="ComicInfo")
     except MetadataXmlError as exc:
@@ -194,7 +206,7 @@ def _read_document(
 
 
 def _metron_values(
-    data: MetronInfoData, diagnostics: list[ArchiveMetadataDiagnostic]
+    data: MetronInfoData, diagnostics: list[ArchiveMetadataDiagnostic], independent_stories: bool
 ) -> EmbeddedMetadataValues:
     document = "MetronInfo.xml"
     diagnostics.extend(
@@ -226,7 +238,14 @@ def _metron_values(
     issue = _values(
         {
             "issue_number_text": (data.number, "Number"),
-            "title": (data.stories[0] if len(data.stories) == 1 else None, "Stories"),
+            "title": (
+                data.stories[0]
+                if not independent_stories
+                and len(data.stories) == 1
+                and len(data.stories[0]) <= MAX_TITLE_LENGTH
+                else None,
+                "Stories",
+            ),
             "description": (data.summary, "Summary"),
             "page_count": (data.page_count, "PageCount"),
             "cover_date": (data.cover_date, "CoverDate"),

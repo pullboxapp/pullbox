@@ -746,6 +746,7 @@ async def test_recovery_offers_editor_for_an_unrenderable_arc_list(identity_prob
                     "alternate_number": {"source": "ComicInfo.xml"},
                     "manga_volume": {"source": "custom", "value": "001.5"},
                     "reprints": {"source": "custom", "value": "Collected, Issue 01"},
+                    "story_titles": {"source": "custom", "value": "The lead feature"},
                     "universes": {
                         "source": "custom",
                         "value": [{"name": "Earth", "designation": "Earth-2"}],
@@ -797,6 +798,13 @@ async def test_recovery_offers_editor_for_an_unrenderable_arc_list(identity_prob
             )
             assert ET.fromstring(archive.read("ComicInfo.xml")).find("Reprints") is None
             universe = ET.fromstring(archive.read("MetronInfo.xml")).find("Universes/Universe")
+            assert (
+                ET.fromstring(archive.read("MetronInfo.xml")).findtext("Stories/Story")
+                == "The lead feature"
+            )
+            assert (
+                ET.fromstring(archive.read("ComicInfo.xml")).findtext("Title") != "The lead feature"
+            )
             assert (
                 universe.findtext("Name"),
                 universe.findtext("Designation"),

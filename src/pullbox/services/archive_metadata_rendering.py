@@ -30,7 +30,7 @@ from pullbox.core.metroninfo_schema import validate_metroninfo_xml
 from pullbox.schemas.issue_file_metadata import SharedXmlChoices
 from pullbox.schemas.issue_metadata_editor import EditorXmlField
 from pullbox.schemas.metadata_issue_arcs import comicinfo_arcs
-from pullbox.schemas.metadata_labels import LABEL_XML_PATHS
+from pullbox.schemas.metadata_labels import LABEL_XML_PATHS, METRON_TITLE_LISTS
 from pullbox.schemas.metadata_snapshot import MetadataSnapshot, MetadataValues
 from pullbox.services.archive_metadata_preservation import (
     ArchiveMetadataRenderError as ArchiveMetadataRenderError,
@@ -43,7 +43,7 @@ from pullbox.services.archive_metadata_preservation import (
     coordinate_preserved_fields,
     editor_arc_value,
     embedded_labels,
-    embedded_reprints,
+    embedded_metron_titles,
     embedded_universes,
     metron_simple_text,
     preserved_roots,
@@ -121,7 +121,7 @@ def render_archive_metadata(
             or not set(previous.identities) <= set(current.identities)
         ):
             raise ArchiveMetadataRenderError("invalid_baseline")
-    archive = reconcile_archive_metadata(files)
+    archive = reconcile_archive_metadata(files, story_baseline=issue)
     _identities(series, issue, archive)
     if any(item.code != "unmapped_content" for item in archive.diagnostics):
         raise ArchiveMetadataRenderError("invalid_input")
@@ -145,7 +145,11 @@ def render_archive_metadata(
             and not _authorized(series, previous_series, field, old_value, replace_managed)
         ):
             raise ArchiveMetadataRenderError("unreconciled_field", field)
-    _render_core(series, issue, ci, mi)
+    native = archive.metroninfo
+    keep_stories = issue.independent_story_titles or bool(
+        native.metron and native.metron.stories and native.issue.title is None
+    )
+    _render_core(series, issue, ci, mi, keep_stories=keep_stories)
     _render_ids(series, issue, ci, mi, primary)
     _render_credits(issue, archive, ci, mi)
     protected = {o.field for o in issue.origins if o.user_override}
@@ -176,17 +180,20 @@ def render_archive_metadata(
                 apply_universes(mi, issue.values.universes or ())
         elif universes != issue.values.universes:
             raise ArchiveMetadataRenderError("label_override_changed", "Universes")
-    if "reprints" in protected:
+    for field, path in METRON_TITLE_LISTS.items():
+        if field not in protected:
+            continue
+        container = path.split("/")[0]
         try:
-            reprints = embedded_reprints(mi)
+            titles = embedded_metron_titles(mi, path)
         except ValueError as exc:
-            raise ArchiveMetadataRenderError("label_override_changed", "Reprints") from exc
-        desired_reprints = issue.values.reprints or ()
-        if "reprints" in reviewed_xml_fields:
-            if reprints != desired_reprints or not desired_reprints:
-                apply_metron_labels(mi, "Reprints/Reprint", desired_reprints)
-        elif reprints != desired_reprints:
-            raise ArchiveMetadataRenderError("label_override_changed", "Reprints")
+            raise ArchiveMetadataRenderError("label_override_changed", container) from exc
+        desired_titles = getattr(issue.values, field) or ()
+        if field in reviewed_xml_fields:
+            if titles != desired_titles or not desired_titles:
+                apply_metron_labels(mi, path, desired_titles)
+        elif titles != desired_titles:
+            raise ArchiveMetadataRenderError("label_override_changed", container)
     if "community_rating" in protected:
         _render_community_rating(
             ci, mi, issue.values.community_rating, "community_rating" in reviewed_xml_fields
@@ -241,7 +248,7 @@ def render_archive_metadata(
     ):
         raise ArchiveMetadataRenderError("label_override_changed", "StoryArc")
     coordinate_preserved_fields(ci, mi, shared_choices)
-    return _validated_pair(ci, mi)
+    return _validated_pair(ci, mi, story_baseline=issue)
 
 
 def _render_comicinfo_fields(
@@ -484,7 +491,12 @@ def _series_separator_key(value: str) -> str:
 
 
 def _render_core(
-    series: MetadataSnapshot, issue: MetadataSnapshot, ci: ET.Element, mi: ET.Element
+    series: MetadataSnapshot,
+    issue: MetadataSnapshot,
+    ci: ET.Element,
+    mi: ET.Element,
+    *,
+    keep_stories: bool,
 ) -> None:
     if not series.values.title or not series.values.title.strip():
         raise ArchiveMetadataRenderError("missing_series_title")
@@ -543,18 +555,17 @@ def _render_core(
         ):
             set_text(ci, tag, value)
     title = issue.values.title
+    set_text(ci, "Title", title)
     stories = mi.find("Stories")
-    if stories is not None and len(stories.findall("Story")) > 1:
-        if title:
-            raise ArchiveMetadataRenderError("unreconciled_field", "title")
-    elif title:
+    if keep_stories:
+        return
+    if title:
         if stories is None:
             stories = ET.SubElement(mi, "Stories")
         set_text(stories, "Story", title)
     elif stories is not None:
         _assert_container_replaceable(stories, "title")
         mi.remove(stories)
-    set_text(ci, "Title", title)
 
 
 def _render_ids(
@@ -647,7 +658,9 @@ def _assert_container_replaceable(node: ET.Element, field: str) -> None:
         raise ArchiveMetadataRenderError("unsupported_content", field)
 
 
-def _validated_pair(ci: ET.Element, mi: ET.Element) -> RenderedArchiveMetadata:
+def _validated_pair(
+    ci: ET.Element, mi: ET.Element, *, story_baseline: MetadataSnapshot | None = None
+) -> RenderedArchiveMetadata:
     result = RenderedArchiveMetadata(
         ET.tostring(ci, encoding="utf-8", xml_declaration=True),
         ET.tostring(mi, encoding="utf-8", xml_declaration=True),
@@ -661,7 +674,8 @@ def _validated_pair(ci: ET.Element, mi: ET.Element) -> RenderedArchiveMetadata:
         ArchiveMetadataFiles(
             MetadataFile("ComicInfo.xml", 1, result.comicinfo),
             MetadataFile("MetronInfo.xml", 1, result.metroninfo),
-        )
+        ),
+        story_baseline=story_baseline,
     )
     if (
         check.differences

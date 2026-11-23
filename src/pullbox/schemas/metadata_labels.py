@@ -27,12 +27,13 @@ type IssueLabels = Annotated[
     AfterValidator(_labels),
 ]
 _LABELS: TypeAdapter[tuple[str, ...]] = TypeAdapter(IssueLabels)
-type ReprintLabels = Annotated[
+type MetronTitleList = Annotated[
     tuple[Annotated[str, Field(min_length=1, max_length=MAX_METRONINFO_FIELD_LENGTH)], ...],
     Field(min_length=1, max_length=128),
     AfterValidator(_distinct_lines),
 ]
-_REPRINTS: TypeAdapter[tuple[str, ...]] = TypeAdapter(ReprintLabels)
+_METRON_TITLES: TypeAdapter[tuple[str, ...]] = TypeAdapter(MetronTitleList)
+METRON_TITLE_LISTS = {"reprints": "Reprints/Reprint", "story_titles": "Stories/Story"}
 
 # ComicInfo stores a single CSV element; MetronInfo stores individual resources.
 LABEL_XML_PATHS = {
@@ -44,11 +45,11 @@ LABEL_XML_PATHS = {
 }
 
 
-def selectable_labels(value: object, *, reprints: bool = False) -> bool:
+def selectable_labels(value: object, *, metron_titles: bool = False) -> bool:
     if value is None:
         return True
     try:
-        (_REPRINTS if reprints else _LABELS).validate_python(value)
+        (_METRON_TITLES if metron_titles else _LABELS).validate_python(value)
     except ValidationError:
         return False
     return True
