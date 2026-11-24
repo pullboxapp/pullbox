@@ -6,10 +6,13 @@ import asyncio
 import dataclasses
 import gc
 import io
+import subprocess
+import sys
 import threading
 import time
 import zipfile
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import psutil
@@ -30,8 +33,6 @@ from pullbox.services.reader_content_service import (
 )
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -372,8 +373,21 @@ async def test_cache_diagnostics_and_clear_are_bounded_to_generated_reader_files
     assert source.is_file()
 
 
-@pytest.mark.asyncio
-async def test_fifty_issue_manifests_keep_server_resources_bounded(tmp_path: Path) -> None:
+def test_fifty_issue_manifests_keep_server_resources_bounded(tmp_path: Path) -> None:
+    # Measure the reader, not the resident pages and pending finalizers of an xdist worker.
+    result = subprocess.run(
+        [sys.executable, __file__, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "reader_resource_scale switches=50" in result.stdout
+    print(result.stdout.rstrip())
+
+
+async def _measure_reader_resources(tmp_path: Path) -> None:
     root = tmp_path / "library"
     root.mkdir()
     service = ReaderContentService(
@@ -431,3 +445,7 @@ def test_content_revision_changes_when_source_changes(tmp_path: Path) -> None:
     second = resolve_reader_source(record)
 
     assert first.revision != second.revision
+
+
+if __name__ == "__main__":
+    asyncio.run(_measure_reader_resources(Path(sys.argv[1])))

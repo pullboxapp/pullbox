@@ -58,14 +58,31 @@ async def _seed(root, namespace, theme, source_type):
         return job.id
 
 
+@pytest.fixture
+def sidecar_job(seeded_server, tmp_path, namespace, theme, source_type):
+    from pullbox.database import get_session_factory
+
+    job_id = _run_async_blocking(_seed(tmp_path, namespace, theme, source_type))
+
+    async def discard_review():
+        async with get_session_factory()() as session:
+            await _service().cancel_job(session, job_id)
+            await session.commit()
+
+    try:
+        yield job_id
+    finally:
+        _run_async_blocking(discard_review())
+
+
 @pytest.mark.parametrize("namespace", ["metron", "gcd"])
 @pytest.mark.parametrize("theme", ["light", "dark", "tron"])
 @pytest.mark.parametrize("source_type", ["filesystem", "mylar3"])
 def test_sidecar_issue_choice_preserves_neighbors_and_review_shell(
-    authed_page, seeded_server, tmp_path, namespace, theme, browser_name, source_type
+    authed_page, seeded_server, sidecar_job, namespace, theme, browser_name, source_type
 ):
     page = authed_page
-    job_id = _run_async_blocking(_seed(tmp_path, namespace, theme, source_type))
+    job_id = sidecar_job
     page.add_init_script(f"localStorage.setItem('pullbox-theme', '{theme}')")
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
