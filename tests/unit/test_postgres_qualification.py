@@ -17,6 +17,11 @@ def test_gate_requires_mixed_folder_rollback_and_stale_conflict_recovery_on_both
         for provider in ("metron", "gcd"):
             assert f"{module}test_conflict_followup[{major}-{provider}]" in nodes
             for in_place in (False, True):
+                for layout in ("only", "mixed", "unmatched"):
+                    assert (
+                        f"{module}test_first_series[{major}-{layout}-{in_place}-{provider}]"
+                        in nodes
+                    )
                 assert f"{module}test_mixed_folder[{major}-True-{in_place}-{provider}]" in nodes
                 assert f"{module}test_recheck_at_placement[{major}-{in_place}-{provider}]" in nodes
                 for state in ("unknown", "foreign_stale"):

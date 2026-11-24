@@ -279,6 +279,7 @@ async def import_orphaned_recovery(
             imported_series=payload["imported_series"],
             native_recovery=payload.get("native_recovery", False),
             mylar_conflicts_only=payload.get("mylar_conflicts_only", False),
+            can_skip_without_assignment=payload.get("can_skip_without_assignment", False),
             issue_options=payload["issue_options"],
             files=payload["files"],
             requires_library_root=payload["requires_library_root"],

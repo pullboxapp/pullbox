@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from pullbox.core.exceptions import ValidationError
-from pullbox.services.import_mylar_followup import mylar_duplicate
+from pullbox.services.import_mylar_followup import needs_mylar_conflict_review
 from pullbox.services.import_orphan_recovery_context import (
     build_orphan_recovery_context,
     load_orphan_recovery_item,
@@ -110,7 +110,7 @@ class ImportServiceRecoveryMixin:
     ) -> ImportedSeries:
         """Persist a chosen ComicVine series and move an unmatched row into recovery."""
         job, item = await self._load_orphan_recovery_item(session, imported_series_id)
-        if mylar_duplicate(job, item):
+        if await needs_mylar_conflict_review(session, job, item):
             raise ValidationError(
                 "This Mylar series is already identified. Review its conflicting files."
             )
@@ -202,7 +202,7 @@ class ImportServiceRecoveryMixin:
     ) -> None:
         """Mark an active unmatched series as SKIPPED so it no longer appears."""
         job, item = await self._load_orphan_recovery_item(session, imported_series_id)
-        if mylar_duplicate(job, item):
+        if await needs_mylar_conflict_review(session, job, item):
             raise ValidationError(
                 "Review the conflicting Mylar files and skip only the files you choose."
             )

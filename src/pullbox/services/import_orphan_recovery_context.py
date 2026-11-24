@@ -19,7 +19,13 @@ from pullbox.models.import_job import (
 )
 from pullbox.models.issue import Issue
 from pullbox.models.library import LibraryRoot
-from pullbox.services.import_mylar_followup import conflict_file, mylar_duplicate, review_rows
+from pullbox.services.import_mylar_followup import (
+    has_mylar_conflict,
+    needs_mylar_conflict_review,
+    recorded_mylar_series,
+    registered_mylar_series,
+    review_rows,
+)
 from pullbox.services.import_mylar_native_identity import (
     load_mylar_native_owners,
     recorded_native_refs,
@@ -59,14 +65,8 @@ async def load_orphan_recovery_item(
                 )
             )
         )
-    if mylar_duplicate(job, item):
-        has_live_issue_recovery = bool(
-            await session.scalar(
-                select(ImportedFile.id)
-                .where(ImportedFile.import_series_id == item.id, conflict_file())
-                .limit(1)
-            )
-        )
+    if item.status == ImportSeriesStatus.DUPLICATE and recorded_mylar_series(job, item):
+        has_live_issue_recovery = await has_mylar_conflict(session, item.id)
     if not is_active_orphan_row(item) and not has_live_issue_recovery:
         raise ValidationError("This import group is not in the active unmatched queue.")
     return job, item
@@ -83,7 +83,7 @@ async def build_orphan_recovery_context(
     if item.cv_id is None and item.series_id is None:
         raise ValidationError("Choose a ComicVine match before starting recovery.")
 
-    if mylar_duplicate(job, item):
+    if await needs_mylar_conflict_review(session, job, item):
         conflicts = await review_rows(session, item)
         disputed_files = [file for file, _ in conflicts]
         owners = await load_mylar_native_owners(session, disputed_files)
@@ -120,6 +120,7 @@ async def build_orphan_recovery_context(
         select(ImportedFile)
         .where(ImportedFile.import_series_id == item.id)
         .order_by(ImportedFile.id.asc())
+        .execution_options(populate_existing=True)
     )
     files = list(files_result.scalars().all())
 
@@ -149,6 +150,7 @@ async def build_orphan_recovery_context(
     return {
         "imported_series": item,
         "native_recovery": native,
+        "can_skip_without_assignment": registered_mylar_series(job, item),
         "issue_options": issue_options,
         "files": file_rows,
         "requires_library_root": requires_library_root,

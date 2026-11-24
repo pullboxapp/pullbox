@@ -18087,7 +18087,7 @@ function orphanedRecoveryModal(config) {
 
       if ((data && data.state) === "completed") {
         window.dispatchEvent(new CustomEvent("import:orphaned-refresh-results"));
-        if ((data && data.result_status) === "imported" || Number(data.files_remaining || 0) === 0) {
+        if (Number(data.files_remaining || 0) === 0) {
           this.closeOrphanedModal();
           this.dispatchToast(
             "Recovery complete. The series has left the active unmatched queue.",
@@ -18235,7 +18235,10 @@ function orphanedRecoveryModal(config) {
       if (cfg.mylarConflictsOnly && decisions.length === 0) {
         return { error: "Select at least one conflicting file to skip." };
       }
-      if (assignCount === 0 && !hasExistingImported && !cfg.nativeRecovery && !cfg.mylarConflictsOnly) {
+      if (
+        assignCount === 0 && !hasExistingImported && !cfg.nativeRecovery &&
+        !cfg.mylarConflictsOnly && !cfg.canSkipWithoutAssignment
+      ) {
         return {
           error: "Assign at least one file before completing recovery.",
         };

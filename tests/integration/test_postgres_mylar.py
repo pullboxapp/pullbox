@@ -6,6 +6,7 @@ import pytest
 
 from pullbox import database
 from pullbox.config import get_settings
+from tests.integration import test_mylar_first_series_followup as first_series
 from tests.integration import test_mylar_native_extras as extras
 from tests.integration import test_mylar_recorded_native_identity as recorded
 from tests.integration.test_database_migration_target import _migrate, disposable_server
@@ -14,6 +15,7 @@ test_mixed_folder = (
     extras.test_unrecorded_native_mylar_file_imports_without_claiming_recorded_neighbors
 )
 test_conflict_followup = recorded.test_completed_mylar_conflict_links_only_current_verified_issue
+test_first_series = first_series.test_first_series_placement_conflict
 test_recheck_at_placement = recorded.test_recorded_mylar_rechecks_native_links_before_placement
 test_recorded_match = (
     recorded.test_recorded_mylar_match_preserved_without_proven_native_disagreement

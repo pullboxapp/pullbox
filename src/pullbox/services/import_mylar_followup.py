@@ -1,4 +1,4 @@
-"""Review recorded Mylar disagreements left behind in an existing library series."""
+"""Review recorded Mylar disagreements without changing established ownership."""
 
 from __future__ import annotations
 
@@ -36,12 +36,37 @@ def conflict_file() -> ColumnElement[bool]:
     )
 
 
-def mylar_duplicate(job: ImportJob, item: ImportedSeries) -> bool:
+def recorded_mylar_series(job: ImportJob, item: ImportedSeries) -> bool:
     return (
         job.source_type == ImportSourceType.MYLAR3
-        and item.status == ImportSeriesStatus.DUPLICATE
         and item.cv_match_method == "mylar3_cv_id"
         and item.series_id is not None
+    )
+
+
+def registered_mylar_series(job: ImportJob, item: ImportedSeries) -> bool:
+    return item.status == ImportSeriesStatus.IMPORTED and recorded_mylar_series(job, item)
+
+
+async def has_mylar_conflict(session: AsyncSession, group_id: int) -> bool:
+    return bool(
+        await session.scalar(
+            select(ImportedFile.id)
+            .where(ImportedFile.import_series_id == group_id, conflict_file())
+            .limit(1)
+        )
+    )
+
+
+async def needs_mylar_conflict_review(
+    session: AsyncSession, job: ImportJob, item: ImportedSeries
+) -> bool:
+    return recorded_mylar_series(job, item) and (
+        item.status == ImportSeriesStatus.DUPLICATE
+        or (
+            item.status == ImportSeriesStatus.IMPORTED
+            and await has_mylar_conflict(session, item.id)
+        )
     )
 
 
@@ -105,7 +130,10 @@ async def skip_conflicts(
                 ImportedSeries.id == item.id,
                 ImportedSeries.import_job_id == job.id,
                 ImportedSeries.series_id == item.series_id,
-                ImportedSeries.status == ImportSeriesStatus.DUPLICATE,
+                ImportedSeries.status == item.status,
+                ImportedSeries.status.in_(
+                    [ImportSeriesStatus.DUPLICATE, ImportSeriesStatus.IMPORTED]
+                ),
                 ImportedSeries.cv_match_method == "mylar3_cv_id",
             )
             .exists(),

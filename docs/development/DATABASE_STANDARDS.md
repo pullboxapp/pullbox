@@ -977,10 +977,12 @@ must not transfer ownership between a Mylar-recorded issue and a neighboring
 Metron/GCD issue. Both copy and keep-in-place must leave unrecognized files
 unclaimed and preserve the original comics and Mylar database through rollback.
 Unknown or stale provider IDs alone cannot displace the recorded match; a
-newly proven conflict at placement must prevent writing. For an existing
-Mylar series this late conflict must be deselected, counted as unresolved and
-available in completed-import Follow-up. Follow-up must hide stale provider
-targets and skip only the disputed file.
+newly proven conflict at placement must prevent writing, both for existing
+series and for series created in this import. The disputed file is deselected
+and counted as unresolved, not failed. Follow-up must hide stale provider
+targets and skip only the selected disputes. Once those are resolved, ordinary
+unmatched files remain available for review, even if no issue has been imported.
+Skipping every file must neither undo series registration nor erase rollback history.
 
 For a disposable first-start rehearsal, set `PULLBOX_TEST_MIGRATION_TARGET_DOCKER=1`
 and `PULLBOX_TEST_SQLITE_SNAPSHOT_IMAGE` to a local Pullbox runtime image, then run

@@ -7,6 +7,7 @@
     importedSeriesId: {{ imported_series.id }},
     nativeRecovery: {{ (native_recovery|default(false))|tojson }},
     mylarConflictsOnly: {{ (mylar_conflicts_only|default(false))|tojson }},
+    canSkipWithoutAssignment: {{ (can_skip_without_assignment|default(false))|tojson }},
     csrfToken: {{ csrf_token|tojson|forceescape }},
     requiresLibraryRoot: {{ requires_library_root|tojson }},
     selectedLibraryRootId: {{ selected_library_root_id|tojson|forceescape }},

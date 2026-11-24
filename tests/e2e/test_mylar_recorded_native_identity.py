@@ -9,10 +9,46 @@ from tests.e2e.accessibility import assert_no_axe_violations
 from tests.e2e.conftest import _run_async_blocking
 from tests.e2e.pages.import_page import ImportPage
 from tests.integration.test_metron_folder_import import _archive
+from tests.integration.test_mylar_first_series_followup import import_first_mylar_series
 from tests.integration.test_mylar_native_extras import seed_mylar_native_extra
 from tests.integration.test_mylar_recorded_native_identity import run_late_mylar_conflict
 
 pytestmark = pytest.mark.e2e
+
+
+def test_new_mylar_series_can_skip_conflicts_then_remaining_unidentified_file(
+    authed_page, seeded_server, tmp_path, browser_name
+):
+    from pullbox.database import get_session_factory
+
+    base = 85000000 + (10000 if browser_name == "firefox" else 0)
+    title = "Winter Orchard" if browser_name == "firefox" else "Lantern Watch"
+
+    async def seed():
+        async with get_session_factory()() as session:
+            _, job, group, files, _, originals = await import_first_mylar_series(
+                session, tmp_path, "metron", False, "unmatched", base=base, admit=False, title=title
+            )
+            return job.id, group.id, {k: v.id for k, v in files.items()}, originals
+
+    job, group, files, originals = _run_async_blocking(seed())
+    page = authed_page
+    page.goto(f"{seeded_server}/import?tab=follow-up&job_id={job}")
+    row = page.get_by_test_id(f"import-orphaned-row-{group}")
+    row.get_by_test_id(f"import-orphaned-recover-{group}").click()
+    dialog = page.get_by_test_id("import-orphaned-recovery-modal")
+    other = files["Unknown.cbz"]
+    expect(dialog.get_by_test_id(f"orphaned-recovery-file-{other}")).to_have_count(0)
+    for name in (f"{title} 001.cbz", f"{title} 002.cbz"):
+        dialog.get_by_test_id(f"orphaned-recovery-skip-{files[name]}").click()
+    dialog.get_by_test_id("orphaned-recovery-save").click()
+    dialog.get_by_test_id(f"orphaned-recovery-skip-{other}").click()
+    dialog.get_by_test_id("orphaned-recovery-save").click()
+    expect(row).to_have_count(0)
+    page.reload()
+    expect(page.get_by_test_id("import-follow-up-job-panel")).to_be_visible()
+    expect(row).to_have_count(0)
+    assert all(path.read_bytes() == content for path, content in originals.items())
 
 
 @pytest.mark.parametrize("namespace", ["metron", "gcd"])

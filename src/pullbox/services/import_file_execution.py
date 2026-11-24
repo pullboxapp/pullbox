@@ -65,7 +65,7 @@ from pullbox.services.import_file_selection import set_review_file_selection
 from pullbox.services.import_folder_adoption import apply_import_series_folder_adoption
 from pullbox.services.import_job_actions import seed_action_sequence_cache
 from pullbox.services.import_metron_matching import revalidate_metron_import_target
-from pullbox.services.import_mylar_followup import mylar_duplicate
+from pullbox.services.import_mylar_followup import recorded_mylar_series
 from pullbox.services.import_mylar_native_identity import mylar_placement_conflict
 from pullbox.services.import_placement_recovery import (
     has_completed_direct_move_placement_record,
@@ -1205,7 +1205,7 @@ async def process_import_series_files(
                 continue
 
             if conflict := await mylar_placement_conflict(session, imp_file, resolved_issue):
-                if not mylar_duplicate(current_job, item):
+                if not recorded_mylar_series(current_job, item):
                     raise ValidationError(conflict["rejection_reason"])
                 # Use the same restricted Follow-up as a conflict proven during scanning.
                 imp_file.status = ImportedFileStatus.NO_MATCH

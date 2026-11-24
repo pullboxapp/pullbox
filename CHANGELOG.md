@@ -186,6 +186,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added review of proven Metron/GCD identity disagreements on recorded Mylar
   files, with linked-record details, source recheck and Skip. Unknown native IDs
   do not invalidate a valid Mylar match or create provider links.
+- If a verified provider link changes after Mylar import review, Pullbox now
+  keeps a newly added series and its good files. The disputed file appears in
+  Follow-up instead of failing the series. Skip it to continue reviewing other
+  unmatched files; no issue assignment is required just to leave a file out.
 - Added folder-import matching for CBZ files with exact Metron identities already
   verified in the library. These files can import without a ComicVine identity;
   conflicting or unlinked identities stay in review and originals remain intact.

@@ -49,6 +49,10 @@ def required_nodes() -> list[str]:
         for provider in ("metron", "gcd"):
             nodes.append(f"{module}test_conflict_followup[{major}-{provider}]")
             for in_place in (False, True):
+                for layout in ("only", "mixed", "unmatched"):
+                    nodes.append(
+                        f"{module}test_first_series[{major}-{layout}-{in_place}-{provider}]"
+                    )
                 nodes.append(f"{module}test_mixed_folder[{major}-True-{in_place}-{provider}]")
                 nodes.append(f"{module}test_recheck_at_placement[{major}-{in_place}-{provider}]")
                 for state in ("unknown", "foreign_stale"):

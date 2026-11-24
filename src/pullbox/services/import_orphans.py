@@ -35,7 +35,13 @@ from pullbox.services.import_file_resolution import load_issue_lookup_for_series
 from pullbox.services.import_file_selection import set_review_file_selection
 from pullbox.services.import_job_actions import build_series_created_action_payload
 from pullbox.services.import_job_execution_items import ensure_target_issue_summary_for_import_file
-from pullbox.services.import_mylar_followup import conflict_file, mylar_duplicate, skip_conflicts
+from pullbox.services.import_mylar_followup import (
+    conflict_file,
+    needs_mylar_conflict_review,
+    recorded_mylar_series,
+    registered_mylar_series,
+    skip_conflicts,
+)
 from pullbox.services.import_retry_helpers import require_retained_import_destination
 from pullbox.services.import_review_recheck import prepare_retryable_failed_sources_for_retry
 from pullbox.services.import_terminal_recovery import allows_terminal_import_recovery
@@ -473,7 +479,7 @@ async def recover_orphan(
     actor_id: int | None = None,
 ) -> dict[str, Any]:
     """Create/reuse the local series and import selected files for delayed recovery."""
-    if mylar_duplicate(job, item):
+    if await needs_mylar_conflict_review(session, job, item):
         skipped = await skip_conflicts(session, job, item, request)
         await recompute_file_counters(session, job, series_ids=[item.id])
         await log_event(
@@ -484,10 +490,14 @@ async def recover_orphan(
             imported_series_id=item.id,
             skipped_count=skipped,
         )
-        remaining = await session.scalar(
-            sa_select(sa_func.count())
-            .select_from(ImportedFile)
-            .where(ImportedFile.import_series_id == item.id, conflict_file())
+        remaining = (
+            item.files_no_match
+            if item.status == ImportSeriesStatus.IMPORTED
+            else await session.scalar(
+                sa_select(sa_func.count())
+                .select_from(ImportedFile)
+                .where(ImportedFile.import_series_id == item.id, conflict_file())
+            )
         )
         return {
             "imported_series_id": item.id,
@@ -517,10 +527,13 @@ async def recover_orphan(
         sa_select(ImportedFile)
         .where(ImportedFile.import_series_id == item.id)
         .order_by(ImportedFile.id.asc())
+        .execution_options(populate_existing=True)
     )
     files = list(files_result.scalars().all())
     active_files = [imp_file for imp_file in files if requires_orphan_issue_decision(imp_file)]
     decision_by_id = {decision.imported_file_id: decision for decision in request.decisions}
+    if recorded_mylar_series(job, item) and decision_by_id.keys() - {f.id for f in active_files}:
+        raise ValidationError("A file is no longer awaiting this decision. Reopen Follow-up.")
 
     missing_ids = [imp_file.id for imp_file in active_files if imp_file.id not in decision_by_id]
     if missing_ids:
@@ -534,7 +547,8 @@ async def recover_orphan(
 
     has_existing_import = any(imp_file.status == ImportedFileStatus.IMPORTED for imp_file in files)
     assign_count = sum(1 for decision in request.decisions if decision.action == "assign")
-    if assign_count == 0 and not has_existing_import and not native:
+    already_registered = registered_mylar_series(job, item)
+    if assign_count == 0 and not (has_existing_import or native or already_registered):
         raise ValidationError("Assign at least one file before completing recovery.")
 
     if item.series_id is not None:
@@ -602,6 +616,7 @@ async def recover_orphan(
         sa_select(ImportedFile)
         .where(ImportedFile.import_series_id == item.id)
         .order_by(ImportedFile.id.asc())
+        .execution_options(populate_existing=True)
     )
     refreshed_files = list(remaining_result.scalars().all())
     summary_files = refreshed_files
@@ -614,12 +629,12 @@ async def recover_orphan(
             not in {ImportedFileStatus.ALREADY_OWNED, ImportedFileStatus.DUPLICATE_FILE}
         ]
     recovery_summary = summarize_orphan_recovery_result(item=item, files=summary_files)
-    if (
-        native
-        and recovery_summary["files_remaining"] == 0
-        and recovery_summary["imported_count"] == 0
+    if (native or already_registered) and not (
+        recovery_summary["files_remaining"] or recovery_summary["imported_count"]
     ):
-        item.status = ImportSeriesStatus.SKIPPED
+        item.status = (
+            ImportSeriesStatus.IMPORTED if already_registered else ImportSeriesStatus.SKIPPED
+        )
         recovery_summary["status"] = item.status
     await log_event(
         session,

@@ -32,6 +32,7 @@ from pullbox.services.import_job_actions import (
     build_series_monitoring_updated_action_payload,
 )
 from pullbox.services.import_job_execution_progress import progress_session_factory_for_runtime
+from pullbox.services.import_mylar_followup import has_mylar_conflict, recorded_mylar_series
 from pullbox.services.import_split_series import apply_import_preferred_series_root
 
 if TYPE_CHECKING:
@@ -86,7 +87,11 @@ async def execute_new_series(
 
     importable_files = await load_importable_files(session, item)
     if not importable_files:
-        if await retain_imported_series_outcome(session, item):
+        if await retain_imported_series_outcome(session, item) or (
+            recorded_mylar_series(job, item) and await has_mylar_conflict(session, item_id)
+        ):
+            item.status = ImportSeriesStatus.IMPORTED
+            item.error_message = None
             await session.flush()
             return 0, 0, imported_count + 1, failed_count, True
         item.status = ImportSeriesStatus.FAILED
@@ -307,7 +312,9 @@ async def execute_new_series(
     if reloaded_item is not None:
         item = reloaded_item
     if files_ok == 0 and files_err == 0:
-        if await has_safety_blocked_files(session, item_id):
+        if await has_safety_blocked_files(session, item_id) or (
+            recorded_mylar_series(job, item) and await has_mylar_conflict(session, item_id)
+        ):
             item.status = ImportSeriesStatus.IMPORTED
             item.series_id = new_series_id
             item.error_message = None

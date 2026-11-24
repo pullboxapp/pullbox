@@ -174,7 +174,7 @@ async def _run_orphan_recovery(
                 state="completed",
                 message=(
                     "Recovery complete."
-                    if payload["status"].value == "imported" or int(payload["files_remaining"]) == 0
+                    if int(payload["files_remaining"]) == 0
                     else "Recovery saved. Some files still need attention."
                 ),
                 current_file_stage=None,
