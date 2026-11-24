@@ -25,7 +25,7 @@
             </div>
             <p class="text-sm text-pb-text-sec" x-show="active()">You can close this window. Work continues in Background activity and Utilities. Cancelling stops unfinished files; completed files stay updated.</p>
             <a class="btn-ghost btn-sm" href="/utilities?tab=queue" x-show="report && report.job && report.job.state === 'PAUSED'">Resume in Utilities</a>
-            <p class="text-sm text-pb-warning" x-show="report && !active() && report.mode === 'preview' && !approved">Field selection changed. Preview again before updating files.</p>
+            <p class="text-sm text-pb-warning" x-show="report && !active() && report.mode === 'preview' && !approved">Preview again before updating files.</p>
             <div class="flex flex-wrap gap-2" x-show="ready() && (report.ready_ids || []).length">
               <button type="button" class="btn-ghost btn-sm" @click="selected = report.ready_ids.slice()">Select all ready files</button>
               <button type="button" class="btn-ghost btn-sm" @click="selected = []">Deselect all</button>
@@ -37,10 +37,25 @@
                     <input type="checkbox" class="checkbox-pb" x-show="ready() && target.outcome === 'ready'" :aria-label="'Update ' + target.label" :checked="selected.includes(target.issue_id)" @change="toggle(target.issue_id)" :disabled="busy">
                     <span class="text-sm font-semibold text-pb-text" x-text="target.label"></span>
                     <span class="text-xs text-pb-text-sec" x-text="label(target.outcome)"></span>
-                    <a class="btn-ghost btn-sm ml-auto" :href="'/issues/' + target.issue_id" x-show="target.outcome === 'attention'">Review issue</a>
+                    <button type="button" class="btn-ghost btn-sm ml-auto" x-show="target.protected_titles && !target.protected_titles.not_shown" @click="editSeriesMetadata()">Edit series metadata</button>
+                    <a class="btn-ghost btn-sm ml-auto" :href="'/issues/' + target.issue_id" x-show="target.outcome === 'attention' && (!target.protected_titles || target.protected_titles.not_shown)">Review issue</a>
                   </div>
                   <p class="text-xs text-pb-text-sec break-all" x-text="target.file_name"></p>
                   <p class="text-sm text-pb-warning break-words" x-show="target.reason" x-text="target.reason"></p>
+                  <template x-if="target.protected_titles">
+                    <div class="space-y-2 text-sm">
+                      <details :open="target.protected_titles.entries.length &lt;= 5">
+                        <summary class="cursor-pointer font-semibold text-pb-text">Protected titles and languages</summary>
+                        <ul class="list-disc pl-5 text-pb-text break-words" aria-label="Titles to keep">
+                          <template x-for="(entry, index) in target.protected_titles.entries" :key="index">
+                            <li x-text="entry.name + ' (' + entry.language + ')'"></li>
+                          </template>
+                        </ul>
+                      </details>
+                      <p class="text-pb-text-sec" x-show="!target.protected_titles.not_shown">In Edit metadata, open All fields and keep these entries under Alternate publication titles. Save the series, then preview comic files again.</p>
+                      <p class="text-pb-warning" x-show="target.protected_titles.not_shown" x-text="'Protected entries outside the series editor limits: ' + target.protected_titles.not_shown + '. Leave this comic out or review its embedded titles separately.'"></p>
+                    </div>
+                  </template>
                   <details x-show="(target.changes || []).length"><summary class="text-sm text-pb-text cursor-pointer">Preview changes</summary>
                     <template x-for="change in target.changes || []" :key="change.document + change.field">
                       <div class="text-sm space-y-1 py-2 break-words"><p class="text-pb-text-sec" x-text="change.document + ' - ' + change.field"></p><p class="text-pb-text" x-text="'Before: ' + (change.before || 'Not set')"></p><p class="text-pb-text" x-text="'After: ' + (change.after || 'Cleared')"></p></div>

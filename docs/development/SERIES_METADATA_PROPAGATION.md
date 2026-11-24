@@ -34,6 +34,11 @@ require a new preview; retry does not silently approve new content.
   is distinct; an omitted embedded language means English. An exact match keeps its
   original resource ID, and a new title never receives a guessed ID. If a replacement
   would discard an ID, or the list is ambiguous or annotated, that comic is left alone.
+  For a blocked ID, **Protected titles and languages** lists the missing title/language
+  pairs, not the IDs. The row opens the series editor without saving or carrying
+  over the previous write selection. Keep those entries there, save, and run a new
+  preview before approving any write. If an entry cannot be shown within the editor's
+  limits, the preview reports how many were omitted; the comic remains blocked.
   An empty library value does not erase embedded titles unless you explicitly cleared
   the field in the series editor. Selecting only this field preserves the original
   `ComicInfo.xml` bytes. It is unrelated to alternate names used for matching downloads.

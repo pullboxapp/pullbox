@@ -29,6 +29,12 @@ function seriesMetadataPropagation(seriesId) {
     active() { return !!this.report && this.report.job && !["COMPLETED","FAILED","CANCELLED"].includes(this.report.job.state); },
     ready() { return this.report && this.report.mode === "preview" && !this.active() && this.approved; },
     invalidate() { this.approved = false; },
+    editSeriesMetadata() {
+      const editor = document.getElementById("series-metadata-edit-" + seriesId);
+      if (!editor || editor.disabled) { this.error = "The series editor is not ready yet. Try again shortly."; return; }
+      this.error = ""; this.invalidate(); this.close();
+      this.$nextTick(() => { editor.focus({preventScroll:true}); editor.click(); });
+    },
     count(key) { return this.report && this.report.counts ? this.report.counts[key] || 0 : 0; },
     summary() {
       const cancelled = this.count("cancelled") ? "; " + this.count("cancelled") + " cancelled" : "";

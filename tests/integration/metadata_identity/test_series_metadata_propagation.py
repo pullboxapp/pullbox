@@ -13,8 +13,39 @@ from pullbox.services.series_metadata_propagation import KEY, job_details, lates
 from pullbox.utilities.executors.file_metadata import FileMetadataExecutor
 from pullbox.utilities.job_queue import JobQueueManager
 from pullbox.utilities.models import JobType
-from tests.api.test_series_metadata_propagation import seed_pair
+from tests.api.test_series_metadata_propagation import seed_pair, seed_protected_titles
 from tests.integration.metadata_identity.test_archive_metadata_publication import prepared
+
+
+async def test_blocked_reason_survives_reopening_preview_on_both_databases(
+    identity_probe_db, tmp_path
+):
+    _, factory, _ = identity_probe_db
+    async with prepared(factory, tmp_path) as (path, staged, plan):
+        await seed_protected_titles(factory, path, staged, plan)
+        series_id = plan.target.binding.metadata.series.local_id
+        manager = JobQueueManager(factory)
+        manager.register_executor(JobType.FILE_METADATA, FileMetadataExecutor)
+        async with factory.begin() as session:
+            batch = await preview_plan(
+                session, series_id, PropagationReview(fields={"publication_titles"})
+            )
+            await manager.create_job(
+                session, JobType.FILE_METADATA, "Preview", {KEY: batch.model_dump(mode="json")}
+            )
+        await manager.dispatch_next()
+        async with factory() as session:
+            job = await latest_job(session, series_id)
+            report = await job_details(session, job, 1)
+            assert report["ready_ids"] == [] and report["counts"] == {"attention": 1}
+            assert report["targets"][0]["protected_titles"] == {
+                "entries": [
+                    {"name": "Le Port", "language": "fr"},
+                    {"name": "Port & Sea", "language": "en"},
+                ],
+                "not_shown": 0,
+            }
+            assert (await job_details(session, job, 2))["targets"] == []
 
 
 @pytest.mark.parametrize("field", ["title", "publication_titles"])

@@ -246,7 +246,7 @@ def test_titles_only_do_not_normalize_unselected_metron_fields():
 @pytest.mark.parametrize(
     ("selected", "explicit_clear", "expected"),
     [
-        ([], False, "Clear value"),
+        ([], False, "identifier"),
         ([], True, "identifier"),
         ([("Port", "fr")], False, "identifier"),
         ([("PORT", "en")], False, "identifier"),
@@ -265,6 +265,40 @@ def test_missing_or_conflicting_title_identity_never_silently_rewrites(
     with pytest.raises(ArchiveMetadataRenderError) as caught:
         render_series_propagation(*args, frozenset({"publication_titles"}))
     assert expected in file_metadata_error(caught.value)
+
+
+def test_unidentified_titles_still_require_an_explicit_clear():
+    from pullbox.services.issue_file_metadata import file_metadata_error
+
+    args = _title_projection(
+        "<AlternativeNames><AlternativeName>Port</AlternativeName></AlternativeNames>", []
+    )
+    with pytest.raises(ArchiveMetadataRenderError) as caught:
+        render_series_propagation(*args, frozenset({"publication_titles"}))
+    assert "Clear value" in file_metadata_error(caught.value)
+
+
+def test_protected_title_evidence_is_bounded_and_only_reports_unmatched_editable_pairs():
+    from pullbox.services.series_metadata_propagation_rendering import (
+        ProtectedPublicationTitlesError,
+    )
+
+    entries = '<AlternativeName id="private-ok" lang="fr">Current</AlternativeName>'
+    entries += '<AlternativeName id="private-bad">4050-12345</AlternativeName>'
+    entries += "<AlternativeName>Unprotected</AlternativeName>"
+    entries += "".join(
+        f'<AlternativeName id="private-{i}">Title {i}</AlternativeName>' for i in range(130)
+    )
+    args = _title_projection(
+        "<AlternativeNames>" + entries + "</AlternativeNames>", [("Current", "fr")]
+    )
+    with pytest.raises(ProtectedPublicationTitlesError) as caught:
+        render_series_propagation(*args, frozenset({"publication_titles"}))
+    assert [(row.name, row.language) for row in caught.value.entries] == [
+        (f"Title {i}", "en") for i in range(128)
+    ]
+    assert caught.value.not_shown == 3
+    assert str(caught.value) == "propagation_titles_identity"
 
 
 def test_explicit_publication_title_clear_only_removes_unidentified_names():

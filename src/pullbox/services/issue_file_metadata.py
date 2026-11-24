@@ -41,6 +41,7 @@ from pullbox.services.archive_metadata_binding import (
     inspect_archive_metadata_target,
     read_archive_metadata_binding,
     require_unowned_metadata_file,
+    revalidate_archive_metadata_binding,
 )
 from pullbox.services.archive_metadata_finalization import finalize_archive_publication
 from pullbox.services.archive_metadata_preservation import (
@@ -339,6 +340,7 @@ async def prepare_file_metadata(
     approved_resource_limit: int | None = None,
     editor: IssueMetadataEditorReview | None = None,
     propagation_fields: frozenset[str] | None = None,
+    expected_series_id: int | None = None,
 ) -> PreparedFileMetadata:
     """Release the clean read transaction before archive I/O; never fetch providers."""
     if session.new or session.dirty or session.deleted:
@@ -353,6 +355,8 @@ async def prepare_file_metadata(
     binding = await read_archive_metadata_binding(
         session, ids[0], expected_issue_id=issue_id, allow_conversion_source=True
     )
+    if expected_series_id is not None and binding.metadata.series.local_id != expected_series_id:
+        raise ArchiveMetadataRenderError("approval_changed")
     if (
         editor is not None or propagation_fields is not None
     ) and not binding.file_path.casefold().endswith((".cbz", ".zip")):
@@ -387,12 +391,21 @@ async def prepare_file_metadata(
         )
         if propagation_fields is not None:
             from pullbox.services.series_metadata_propagation_preview import prepare_projection
+            from pullbox.services.series_metadata_propagation_rendering import (
+                ProtectedPublicationTitlesError,
+            )
 
             if choices or editor is not None:
                 raise ArchiveMetadataRenderError("invalid_choice")
-            prepared = await asyncio.to_thread(
-                prepare_projection, target, files, propagation_fields
-            )
+            try:
+                prepared = await asyncio.to_thread(
+                    prepare_projection, target, files, propagation_fields
+                )
+            except ProtectedPublicationTitlesError:
+                # Evidence returned for a blocked preview must belong to the same file and issue.
+                await asyncio.to_thread(target.check_unchanged)
+                await revalidate_archive_metadata_binding(session, binding)
+                raise
         else:
             prepared = await asyncio.to_thread(_prepare, target, files, choices or {}, editor)
         prepared = replace(prepared, approved_resource_limit=approved_resource_limit)

@@ -188,6 +188,13 @@ async def job_details(session: AsyncSession, job: UtilityJob, page: int) -> dict
                 "file_name": details.get("file_name", ""),
                 "changes": details.get("changes", []),
                 "reason": item.error_message or details.get("reason", ""),
+                **(
+                    {"protected_titles": details["protected_titles"]}
+                    if plan.mode == "preview"
+                    and outcome == "attention"
+                    and "protected_titles" in details
+                    else {}
+                ),
             }
         )
     return {

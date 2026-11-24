@@ -6,6 +6,8 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validat
 
 from pullbox.core.comicinfo_text import descriptive_text
 
+MAX_PUBLICATION_TITLES = 128
+
 
 class SeriesPublicationTitle(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -29,6 +31,6 @@ def _distinct(entries: tuple[SeriesPublicationTitle, ...]) -> tuple[SeriesPublic
 
 type SeriesPublicationTitles = Annotated[
     tuple[SeriesPublicationTitle, ...],
-    Field(min_length=1, max_length=128),
+    Field(min_length=1, max_length=MAX_PUBLICATION_TITLES),
     AfterValidator(_distinct),
 ]

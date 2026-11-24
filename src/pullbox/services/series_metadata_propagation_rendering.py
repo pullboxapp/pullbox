@@ -1,6 +1,9 @@
 """Selected series-field projection into the existing reconciled XML pair."""
 
+from collections.abc import Iterable
 from xml.etree import ElementTree as ET
+
+from pydantic import ValidationError
 
 from pullbox.core.archive_metadata import ArchiveMetadataFiles
 from pullbox.core.archive_metadata_fields import COMICINFO_ONLY_FORMATS, archive_format_label
@@ -8,6 +11,7 @@ from pullbox.core.issue_numbers import normalize_issue_number_text
 from pullbox.core.metadata_xml import MetadataXmlError, parse_metadata_xml
 from pullbox.core.metroninfo_schema import validate_metroninfo_xml
 from pullbox.schemas.metadata_snapshot import MetadataSnapshot
+from pullbox.schemas.series_publication_titles import MAX_PUBLICATION_TITLES, SeriesPublicationTitle
 from pullbox.services.archive_metadata_preservation import (
     preserved_roots,
     review_preserved_fields,
@@ -34,6 +38,23 @@ FIELDS = {
 }
 
 
+class ProtectedPublicationTitlesError(ArchiveMetadataRenderError):
+    """Carry editor-safe evidence for the preview, never XML or IDs in exception text."""
+
+    def __init__(self, keys: Iterable[tuple[str, str]]) -> None:
+        super().__init__("propagation_titles_identity")
+        self.entries: list[SeriesPublicationTitle] = []
+        self.not_shown = 0
+        for name, language in keys:
+            if len(self.entries) < MAX_PUBLICATION_TITLES:
+                try:
+                    self.entries.append(SeriesPublicationTitle(name=name, language=language))
+                    continue
+                except ValidationError:
+                    pass
+            self.not_shown += 1
+
+
 def _publication_titles(parent: ET.Element, series: MetadataSnapshot) -> None:
     group = parent.find("AlternativeNames")
     titles = series.values.publication_titles
@@ -41,12 +62,6 @@ def _publication_titles(parent: ET.Element, series: MetadataSnapshot) -> None:
         return
     if group is None:
         group = ET.SubElement(parent, "AlternativeNames")
-    if (
-        not titles
-        and len(group)
-        and not any(o.field == "publication_titles" and o.user_override for o in series.origins)
-    ):
-        raise ArchiveMetadataRenderError("propagation_titles_unset")
     existing: dict[tuple[str, str], ET.Element] = {}
     for node in group:
         if node.tag != "AlternativeName" or len(node):
@@ -63,8 +78,15 @@ def _publication_titles(parent: ET.Element, series: MetadataSnapshot) -> None:
             match = ET.Element("AlternativeName", lang=title.language)
             match.text = title.name
         ordered.append(match)
-    if any("id" in node.attrib for node in existing.values()):
-        raise ArchiveMetadataRenderError("propagation_titles_identity")
+    protected = [key for key, node in existing.items() if "id" in node.attrib]
+    if protected:
+        raise ProtectedPublicationTitlesError(protected)
+    if (
+        not titles
+        and len(group)
+        and not any(o.field == "publication_titles" and o.user_override for o in series.origins)
+    ):
+        raise ArchiveMetadataRenderError("propagation_titles_unset")
     if ordered:
         group[:] = ordered
     elif len(group):

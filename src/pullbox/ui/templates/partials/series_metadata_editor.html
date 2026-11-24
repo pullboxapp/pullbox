@@ -1,6 +1,6 @@
 {% from "components/dropdown_select.html" import dropdown_select %}
 <div x-data="seriesMetadataEditor({{ series.id }})" data-testid="series-metadata-editor">
-  <button type="button" class="btn-ghost btn-sm" @click="show()" :disabled="checkingJob">Edit metadata</button>
+  <button type="button" id="series-metadata-edit-{{ series.id }}" class="btn-ghost btn-sm" @click="show()" :disabled="checkingJob">Edit metadata</button>
   <template x-teleport="body">
     <div class="modal-shell" x-show="open" x-cloak @keydown.escape.window.capture="escape($event)" @keydown.tab.window="trapFocus($event)">
       <div class="modal-backdrop" @click="close()"></div>

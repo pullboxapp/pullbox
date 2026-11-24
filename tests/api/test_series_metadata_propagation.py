@@ -7,7 +7,7 @@ from zipfile import ZipFile
 import pytest
 
 from pullbox.models import Issue, LibraryFile, Series
-from pullbox.models.metadata_identity import IssueExternalIdentity
+from pullbox.models.metadata_identity import IssueExternalIdentity, SeriesExternalIdentity
 from pullbox.schemas.series_metadata_editor import SeriesMetadataEditorReview
 from pullbox.services.series_metadata_editor import prepare_series_editor, save_series_editor
 from pullbox.utilities.executors.file_metadata import FileMetadataExecutor
@@ -249,6 +249,140 @@ async def test_publication_title_write_changes_only_the_selected_ready_comic(
             assert archive.read("page.jpg") == b"page bytes"
         assert (await preview())["counts"] == {"ready": 1, "current": 1}
         assert (sibling.read_bytes(), sibling.stat().st_mtime_ns) == other_prior
+
+
+async def seed_protected_titles(factory, path, staged, plan, *, without_native_ids=False):
+    with ZipFile(staged.path) as original, ZipFile(path, "w") as replacement:
+        for member in original.namelist():
+            content = original.read(member)
+            if without_native_ids and member == "ComicInfo.xml":
+                content = b"<ComicInfo><Series>Example</Series><Number>50-X</Number></ComicInfo>"
+            if member == "MetronInfo.xml":
+                root = ET.fromstring(
+                    b"<MetronInfo><Series><Name>Example</Name></Series><Number>50-X</Number></MetronInfo>"
+                    if without_native_ids
+                    else content
+                )
+                group = ET.SubElement(root.find("Series"), "AlternativeNames")
+                ET.SubElement(group, "AlternativeName", id="private-a", lang="fr").text = "Le Port"
+                ET.SubElement(group, "AlternativeName", id="private-b").text = "Port & Sea"
+                ET.SubElement(group, "AlternativeName").text = "Unprotected title"
+                content = ET.tostring(root)
+            replacement.writestr(member, content)
+    async with factory.begin() as session:
+        file = await session.get(LibraryFile, plan.target.binding.library_file_id)
+        file.file_size = path.stat().st_size
+        file.file_modified_at = datetime.fromtimestamp(path.stat().st_mtime, UTC)
+
+
+@pytest.mark.parametrize("stale", [None, "file", "parent"])
+async def test_blocked_preview_identifies_titles_and_a_fresh_review_preserves_resource_ids(
+    authenticated_client, sec_db, tmp_path, queue, monkeypatch, stale
+):
+    async with prepared(sec_db, tmp_path) as (path, staged, plan):
+        await seed_protected_titles(
+            sec_db, path, staged, plan, without_native_ids=stale == "parent"
+        )
+        issue_id = plan.target.binding.metadata.issues[0].local_id
+        series_id = plan.target.binding.metadata.series.local_id
+        endpoint = f"/api/v1/series/{series_id}/metadata-propagation"
+        titles = [{"name": "Le Port", "language": "fr"}, {"name": "Port & Sea", "language": "en"}]
+        prior = path.read_bytes(), path.stat().st_mtime_ns
+
+        async def preview():
+            response = await authenticated_client.post(
+                endpoint + "/preview",
+                json={"fields": ["publication_titles"]},
+                headers=csrf(authenticated_client),
+            )
+            assert response.status_code == 202, response.text
+            if stale == "parent":
+                async with sec_db.begin() as session:
+                    other = Series(title="Other series", sort_title="Other series", year_start=1992)
+                    session.add(other)
+                    await session.flush()
+                    session.add(
+                        SeriesExternalIdentity(
+                            series_id=other.id,
+                            identity_namespace="metron",
+                            external_id="99",
+                            verification_state="verified",
+                            evidence_kind="provider_result",
+                        )
+                    )
+                    (await session.get(Issue, issue_id)).series_id = other.id
+            if stale == "file":
+                from pullbox.services.archive_metadata_binding import (
+                    ArchiveMetadataBindingError,
+                    ArchiveMetadataTarget,
+                )
+
+                def replaced(self):
+                    raise ArchiveMetadataBindingError("source_changed")
+
+                monkeypatch.setattr(ArchiveMetadataTarget, "check_unchanged", replaced)
+            await queue.dispatch_next()
+            return (await authenticated_client.get(endpoint + "/job")).json()
+
+        blocked = await preview()
+        row = blocked["targets"][0]
+        if stale:
+            assert row["outcome"] == "attention" and "protected_titles" not in row, row
+            assert "Preview again" in row["reason"]
+            assert (path.read_bytes(), path.stat().st_mtime_ns) == prior
+            return
+        assert row.get("protected_titles") == {"entries": titles, "not_shown": 0}, row
+        assert blocked["ready_ids"] == [] and blocked["counts"] == {"attention": 1}
+        assert "Clear value" not in row["reason"]
+        assert "private-" not in str(blocked)
+        assert "Unprotected title" not in str(blocked)
+        write = await authenticated_client.post(
+            endpoint + "/write",
+            json={"job_id": blocked["job"]["id"], "issue_ids": [issue_id]},
+            headers=csrf(authenticated_client),
+        )
+        assert write.status_code == 409
+        assert (path.read_bytes(), path.stat().st_mtime_ns) == prior
+
+        review = SeriesMetadataEditorReview.model_validate(
+            {
+                "mode": "library_only",
+                "edits": {
+                    "publication_titles": {
+                        "action": "set",
+                        "value": row["protected_titles"]["entries"],
+                    }
+                },
+            }
+        )
+        async with sec_db() as session:
+            key = (await prepare_series_editor(session, series_id, review)).preview.review_key
+        async with sec_db() as session:
+            await save_series_editor(session, series_id, review, key)
+            await session.commit()
+        ready = await preview()
+        assert ready["ready_ids"] == [issue_id]
+        assert (path.read_bytes(), path.stat().st_mtime_ns) == prior
+        write = await authenticated_client.post(
+            endpoint + "/write",
+            json={"job_id": ready["job"]["id"], "issue_ids": [issue_id]},
+            headers=csrf(authenticated_client),
+        )
+        assert write.status_code == 202
+        await queue.dispatch_next()
+        assert (await authenticated_client.get(endpoint + "/job")).json()["counts"] == {
+            "written": 1
+        }
+        with ZipFile(path) as archive, ZipFile(staged.path) as original:
+            assert archive.read("ComicInfo.xml") == original.read("ComicInfo.xml")
+            assert archive.read("page.jpg") == original.read("page.jpg")
+            nodes = ET.fromstring(archive.read("MetronInfo.xml")).findall(
+                "Series/AlternativeNames/AlternativeName"
+            )
+            assert [(n.text, n.attrib) for n in nodes] == [
+                ("Le Port", {"id": "private-a", "lang": "fr"}),
+                ("Port & Sea", {"id": "private-b"}),
+            ]
 
 
 @pytest.mark.parametrize("change", ["series", "file"])
