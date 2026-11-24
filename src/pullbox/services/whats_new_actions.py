@@ -183,6 +183,28 @@ def available_release_series_ids(payload: dict[str, object], *, as_of: date) -> 
     return available
 
 
+def watched_release_id(payload: dict[str, object], identity: str) -> int | None:
+    """Pick a representative release only from the exact watched series."""
+    for release, _ in _release_rows(payload):
+        series = release.get("series")
+        if not isinstance(series, dict):
+            continue
+        ids = [
+            positive_id(value)
+            for value in (series.get("locg_series_id"), release.get("locg_series_id"))
+            if value is not None
+        ]
+        if identity not in ids:
+            continue
+        if any(value != identity for value in ids):
+            raise WhatsNewSelectionError(
+                "This release has conflicting series IDs. Refresh What's New and try again."
+            )
+        if identifier := positive_id(release.get("locg_issue_id")):
+            return int(identifier)
+    return None
+
+
 def published_watch_evidence(
     *payloads: dict[str, object], as_of: date
 ) -> dict[str, dict[IdentityNamespace, str]]:

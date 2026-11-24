@@ -31,6 +31,7 @@ from pullbox.services.series_interest import (
     ACTIVE_STATES,
     cancel_watch,
     find_watch,
+    resolve_watched_release,
     save_watch,
     watch_response,
 )
@@ -45,6 +46,7 @@ from pullbox.services.whats_new_refresh_queue import (
 
 if TYPE_CHECKING:
     from pullbox.models.whats_new import WhatsNewReleaseCache
+    from pullbox.services.whats_new_actions import ReleaseSelection
 
 router = APIRouter(prefix="/whats-new", tags=["whats-new"], include_in_schema=False)
 refresh_coordinator = WhatsNewRefreshCoordinator(runner=run_whats_new_refresh)
@@ -150,6 +152,27 @@ async def resolve_release_context(
         context = await load_release_selection(session, cache_id, release_id)
     except WhatsNewSelectionError as exc:
         raise HTTPException(409, str(exc)) from exc
+    return await _release_context_response(session, context)
+
+
+@router.get("/watch/{interest_id}/resolve")
+async def resolve_watch_context(
+    interest_id: Annotated[int, Path(gt=0, le=2**31 - 1)],
+    session: DbSession,
+    _user: InteractiveOperatorUser,
+) -> dict[str, object]:
+    if not get_settings().metadata_whats_new_actions_enabled:
+        raise HTTPException(404, "Release discovery actions are not enabled.")
+    try:
+        context = await resolve_watched_release(session, interest_id)
+    except WhatsNewSelectionError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return await _release_context_response(session, context, interest_id=interest_id)
+
+
+async def _release_context_response(
+    session: DbSession, context: ReleaseSelection, *, interest_id: int | None = None
+) -> dict[str, object]:
     watch_roots = await available_add_series_roots(session, require_default=False)
     default_id = (
         watch_roots[0]["id"]
@@ -158,6 +181,10 @@ async def resolve_release_context(
     )
     roots = watch_roots if default_id else []
     interest = await find_watch(session, context.locg_series_id) if context.locg_series_id else None
+    if interest_id is not None and (
+        interest is None or interest.id != interest_id or interest.state not in ACTIVE_STATES
+    ):
+        raise HTTPException(409, "This Watch is no longer active. Reload the Pull List.")
     if interest is not None and interest.state in ACTIVE_STATES:
         roots = [root for root in watch_roots if root["id"] == interest.target_library_root_id]
     return {

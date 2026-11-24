@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import select, update
@@ -16,7 +16,14 @@ from pullbox.models.metadata_identity import SeriesExternalIdentity
 from pullbox.models.series import Series
 from pullbox.models.series_interest import SeriesInterest, SeriesInterestState
 from pullbox.services.library_root_management import available_add_series_roots
-from pullbox.services.whats_new_actions import WhatsNewSelectionError, validate_release_selection
+from pullbox.services.whats_new_actions import (
+    ReleaseSelection,
+    WhatsNewSelectionError,
+    load_release_selection,
+    validate_release_selection,
+    watched_release_id,
+)
+from pullbox.services.whats_new_cache_service import WhatsNewCacheService
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -26,6 +33,37 @@ if TYPE_CHECKING:
     from pullbox.schemas.whats_new import WhatsNewWatchRequest
 
 ACTIVE_STATES = (SeriesInterestState.WATCHING, SeriesInterestState.NEEDS_CONFIRMATION)
+
+
+async def resolve_watched_release(session: AsyncSession, interest_id: int) -> ReleaseSelection:
+    """Resolve one clicked Watch from the two live feeds, never historical title matches."""
+    interest = await session.get(SeriesInterest, interest_id)
+    if interest is None or interest.state not in ACTIVE_STATES:
+        raise WhatsNewSelectionError("This Watch is no longer active. Reload the Pull List.")
+    cache = WhatsNewCacheService()
+    readers = (
+        (cache.get_upcoming, cache.get_latest_current_week)
+        if interest.state is SeriesInterestState.WATCHING
+        else (cache.get_latest_current_week, cache.get_upcoming)
+    )
+    for read in readers:
+        row = await read(session)
+        if row is None or cache.is_stale(row) or row.fetched_at > datetime.now(UTC):
+            continue
+        release_id = watched_release_id(row.payload, interest.source_series_id)
+        if release_id is None:
+            continue
+        context = await load_release_selection(session, row.id, release_id)
+        if (
+            context.locg_series_id != interest.source_series_id
+            or cache.is_stale(row)
+            or row.fetched_at > datetime.now(UTC)
+        ):
+            raise WhatsNewSelectionError("This release changed. Refresh What's New and try again.")
+        return context
+    raise WhatsNewSelectionError(
+        "No fresh release matches this Watch. Refresh What's New, then try Find & Add again."
+    )
 
 
 def _check_repeat_destination(interest: SeriesInterest, root_id: int) -> SeriesInterest:

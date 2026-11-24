@@ -12,6 +12,7 @@
     </div>
     <div class="modal-body p-5 space-y-4">
       <p class="text-sm text-pb-text-sec">Choose the series this release belongs to, then review the Add preview. This uses your normal Add Series and Search on Add settings.</p>
+      <p x-show="releaseContext" class="text-sm text-pb-text-sec" x-text="releaseContext ? [releaseContext.title, releaseContext.publisher, releaseContext.year].filter(Boolean).join(' · ') : ''"></p>
       <p x-show="releaseContext && !releaseContext.can_link" class="inline-alert inline-alert-warning">This release has no stable series ID. You can add a series, but this release will not be marked Tracked.</p>
       <form hx-boost="false" @submit.prevent="searchReleaseSeries()" class="space-y-3">
         <label for="whats-new-find-query" class="text-sm font-medium">Series title</label>
@@ -31,6 +32,7 @@
         Searching metadata sources...
       </div>
       <div x-show="findError" x-cloak class="inline-alert inline-alert-danger" role="alert" x-text="findError"></div>
+      {% if from_watch %}<a x-show="findError && !releaseContext" class="btn-ghost btn-sm" href="/whats-new">Open What's New</a>{% endif %}
       <template x-for="message in findMessages" :key="message"><p class="text-sm text-pb-text-sec" x-text="message"></p></template>
       <div class="add-series-results-list" :aria-busy="findBusy">
         <template x-for="result in findResults" :key="result.source + ':' + result.external_id">

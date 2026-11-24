@@ -282,17 +282,55 @@ def test_refresh_confirmation_has_actionable_release_link_and_cancel(
     expect(watched).not_to_contain_text("Next release 2099")
     page.get_by_test_id("pull-list-series-link").first.hover()
     assert_no_axe_violations(page, name=f"watch-confirmation-{theme}-{width}")
-    watched.get_by_role("link", name="Find & Add", exact=True).click()
-    expect(page.get_by_test_id("whats-new-current-release-table")).to_be_visible()
-    row.get_by_test_id("whats-new-find-add").click()
+    opener = watched.get_by_role("button", name="Find & Add", exact=True)
+    opener.click(timeout=3500)
     finder = page.get_by_test_id("whats-new-find-dialog")
     expect(finder.get_by_label("Series title")).to_have_value("Atlas Deluxe")
+    expect(page).to_have_url(f"{seeded_server}/pull-list")
+    assert_no_axe_violations(
+        page,
+        name=f"watched-finder-{theme}-{width}",
+        include=["[data-testid='whats-new-find-dialog']"],
+    )
     finder.get_by_role("button", name="Cancel", exact=True).click()
-    row.get_by_role("button", name="Cancel Watch", exact=True).click()
-    expect(row).not_to_contain_text("Needs confirmation")
-    expect(row.get_by_role("button", name="Watch", exact=True)).to_have_count(0)
+    expect(opener).to_be_focused()
+    watched.get_by_role("button", name="Cancel Watch", exact=True).click()
+    expect(watched).not_to_be_visible()
     page.reload()
-    expect(row.get_by_role("button", name="Cancel Watch", exact=True)).to_have_count(0)
+    expect(watched).not_to_be_visible()
+
+
+def test_missing_watched_release_does_not_search_for_another_series(watch_page, seeded_server):
+    page = watch_page
+    page.goto(f"{seeded_server}/whats-new")
+    row = page.get_by_test_id("whats-new-release-row").filter(has_text="Atlas Deluxe")
+    row.get_by_role("button", name="Watch", exact=True).click()
+    expect(row).to_contain_text("Watching")
+    page.goto(f"{seeded_server}/pull-list")
+
+    async def evict():
+        async with get_session_factory().begin() as session:
+            await session.execute(delete(WhatsNewReleaseCache))
+
+    _run_async_blocking(evict())
+    searches = []
+    page.on(
+        "request",
+        lambda req: searches.append(req.url) if "/whats-new/find-series/" in req.url else None,
+    )
+    watched = page.get_by_test_id("pull-list-watch-row").filter(has_text="Atlas Deluxe")
+    watched.get_by_role("button", name="Find & Add", exact=True).click()
+    finder = page.get_by_test_id("whats-new-find-dialog")
+    expect(finder).to_contain_text("No fresh release matches this Watch")
+    expect(finder.get_by_role("link", name="Open What's New")).to_have_attribute(
+        "href", "/whats-new"
+    )
+    expect(finder.get_by_role("button", name="Search", exact=True)).to_be_disabled()
+    finder.get_by_role("button", name="Cancel", exact=True).click()
+    expect(watched.get_by_role("button", name="Cancel Watch")).to_be_enabled()
+    assert not searches
+    page.reload()
+    expect(watched).to_be_visible()
 
 
 @pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 390), ("monitor", 320)])
@@ -385,9 +423,12 @@ def test_real_watched_series_find_add_enables_monitoring_and_leaves_watch_list(
     expect(row.get_by_role("button", name="Cancel Watch", exact=True)).to_be_enabled()
     if available:
         _run_async_blocking(publish_watched_fixture())
-        page.reload()
-        expect(row).to_contain_text("Needs confirmation")
-    row.get_by_test_id("whats-new-find-add").click()
+        page.goto(f"{seeded_server}/pull-list")
+        watched = page.get_by_test_id("pull-list-watch-row").filter(has_text="Atlas Deluxe")
+        expect(watched).to_contain_text("Needs confirmation")
+        watched.get_by_role("button", name="Find & Add", exact=True).click()
+    else:
+        row.get_by_test_id("whats-new-find-add").click()
     finder = page.get_by_test_id("whats-new-find-dialog")
     query = finder.get_by_label("Series title")
     expect(query).to_have_value("Atlas Deluxe")
@@ -423,6 +464,11 @@ def test_real_watched_series_find_add_enables_monitoring_and_leaves_watch_list(
 
     request.addfinalizer(cleanup)
     assert record["monitored"] is True and bus.emit.await_count == 1
+    if available:
+        expect(page).to_have_url(f"{seeded_server}/pull-list")
+        expect(watched).to_have_count(0)
+        expect(page.get_by_test_id(f"pull-list-row-{record['id']}")).to_be_visible()
+        page.goto(f"{seeded_server}/whats-new")
     expect(row).to_contain_text("Tracked")
     page.reload()
     expect(row).to_contain_text("Tracked")

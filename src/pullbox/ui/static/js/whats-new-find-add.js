@@ -72,7 +72,7 @@ function seriesWatchActions() {
       this.pendingWatch = null;
       this.watchFeedback = data.state === 'needs_confirmation'
         ? 'Needs confirmation. Use Find & Add to choose the series.'
-        : 'Watching. Refresh checks release dates; use Find & Add to confirm the series.';
+        : 'Watching. Refresh checks for publication and an exact series match.';
     },
 
     async confirmWatchRoot() {
@@ -185,7 +185,15 @@ function whatsNewFindAdd() {
     findSources: [['all', 'All enabled sources']], findRevisions: {}, findSequence: 0, findController: null,
     releaseContext: null, releaseTrigger: null, releaseCompleted: false,
 
-    async findRelease(cacheId, releaseId, trigger) {
+    findRelease(cacheId, releaseId, trigger) {
+      return this.openReleaseFinder(`/api/v1/whats-new/resolve/${cacheId}/${releaseId}`, trigger);
+    },
+
+    findWatched(interestId, trigger) {
+      return this.openReleaseFinder(`/api/v1/whats-new/watch/${interestId}/resolve`, trigger);
+    },
+
+    async openReleaseFinder(url, trigger) {
       if (this.adding) return;
       this.findController?.abort();
       const sequence = ++this.findSequence;
@@ -199,6 +207,7 @@ function whatsNewFindAdd() {
       this.findError = '';
       this.findResults = [];
       this.findMessages = [];
+      this.findTotal = 0;
       this.findSource = 'all';
       this.findQuery = '';
       this.$nextTick(() => requestAnimationFrame(() => {
@@ -206,7 +215,7 @@ function whatsNewFindAdd() {
       }));
       const timeout = setTimeout(() => controller.abort(), 30000);
       try {
-        const response = await fetch(`/api/v1/whats-new/resolve/${cacheId}/${releaseId}`, { signal: controller.signal });
+        const response = await fetch(url, { signal: controller.signal, cache: 'no-store' });
         const data = await response.json();
         if (sequence !== this.findSequence || this.disposed || !this.findOpen) return;
         if (!response.ok) throw new Error(data.detail || data.error?.message || 'Reload the release list and retry.');
@@ -293,6 +302,14 @@ function whatsNewFindAdd() {
         this.findOpen = true;
         this.$nextTick(() => this.$refs.findQuery.focus({ preventScroll: true }));
       } else {
+        if (this.$refs.watchHeading) {
+          // Re-read the saved Watch and monitored series without resubmitting Add.
+          this.$refs.watchHeading.focus({ preventScroll: true });
+          htmx.ajax('GET', window.location.pathname + window.location.search, {target:'#pull-list-results-body', swap:'outerHTML'})
+            .then(() => document.querySelector('[data-testid="pull-list-watching"] h3')?.focus({preventScroll:true}))
+            .catch(() => { this.watchFeedback = 'Series added. Reload the Pull List to see its saved state.'; });
+          return;
+        }
         const focus = this.$root.querySelector('[data-testid="whats-new-local-series"]') || this.releaseTrigger;
         focus?.isConnected && focus.focus({ preventScroll: true });
       }

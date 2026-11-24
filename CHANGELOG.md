@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Open **Find & Add** directly from a watched series on the Pull List. The
+  finder uses the Watch's exact series ID, even when a release title changes.
+  You still choose the provider result and approve Add before the library changes.
+
 - Add alternate publication titles and their languages in the series metadata
   editor. Save them to the library alone or include them in `series.json`.
   To update selected comics, use **Update comic metadata** and preview the

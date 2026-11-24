@@ -1,7 +1,7 @@
 """Watch is cache-independent intent, not a placeholder library or download."""
 # ruff: noqa: F811 - fixtures imported from the owning discovery tests.
 
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 from sqlalchemy import func, select
@@ -44,6 +44,53 @@ async def watch(client, cache_id, root_id=None):
     if root_id is not None:
         body["library_root_id"] = root_id
     return await client.post("/api/v1/whats-new/watch", json=body, headers=csrf(client))
+
+
+@pytest.mark.parametrize(
+    "case", ["same_title", "renamed", "absent", "stale", "conflicting", "cancelled"]
+)
+async def test_find_watched_series_resolves_identity_not_title(
+    authenticated_client, source_add_setup, future_release, sec_db, case
+):
+    saved = (await watch(authenticated_client, future_release)).json()
+    url = f"/api/v1/whats-new/watch/{saved['id']}/resolve"
+    async with sec_db.begin() as session:
+        row = await session.get(WhatsNewReleaseCache, future_release)
+        original = row.payload["issues"][0]
+        other = {
+            **original,
+            "locg_series_id": 55,
+            "series": {**original["series"], "locg_series_id": 55},
+        }
+        moved = {
+            **original,
+            "locg_issue_id": 72,
+            "series": {**original["series"], "title": "Renamed series"},
+        }
+        if case == "same_title":
+            moved["series"] = original["series"]
+        if case == "conflicting":
+            moved["locg_series_id"] = 55
+        row.payload = {**row.payload, "issues": [other] + ([] if case == "absent" else [moved])}
+        if case == "stale":
+            row.fetched_at -= timedelta(days=2)
+    if case == "cancelled":
+        await authenticated_client.post(
+            url.replace("/resolve", "/cancel"), headers=csrf(authenticated_client)
+        )
+    response = await authenticated_client.get(url)
+    if case in {"renamed", "same_title"}:
+        assert response.status_code == 200, response.text
+        resolved = response.json()
+        assert resolved["title"] == ("Renamed series" if case == "renamed" else "Absolute Flash")
+        assert resolved["locg_series_id"] == "180901"
+        assert resolved["selection"]["release_id"] == 72
+        assert [root["id"] for root in resolved["roots"]] == [saved["library_root_id"]]
+    else:
+        assert response.status_code == 409, response.text
+        assert "selection" not in response.json()
+    assert not source_add_setup["calls"] and not source_add_setup["events"]
+    assert not list(source_add_setup["root"].iterdir())
 
 
 async def test_watch_repeat_cache_eviction_cancel_and_pull_list_are_durable(
@@ -158,12 +205,18 @@ async def test_watch_requires_interactive_auth_csrf_and_feature_flag(
         "/api/v1/whats-new/watch", json=body, headers={"X-API-Key": sec_api_key}
     )
     assert denied.status_code in {401, 403}
+    lookup = "/api/v1/whats-new/watch/1/resolve"
+    assert (await unauthenticated_client.get(lookup)).status_code in {401, 403}
+    assert (
+        await unauthenticated_client.get(lookup, headers={"X-API-Key": sec_api_key})
+    ).status_code in {401, 403}
     monkeypatch.setenv("PULLBOX_METADATA_WHATS_NEW_ACTIONS_ENABLED", "false")
     get_settings.cache_clear()
     result = await authenticated_client.post(
         "/api/v1/whats-new/watch", json=body, headers=csrf(authenticated_client)
     )
     assert result.status_code == 404
+    assert (await authenticated_client.get(lookup)).status_code == 404
 
 
 async def test_cancel_during_provider_fetch_does_not_force_monitoring(

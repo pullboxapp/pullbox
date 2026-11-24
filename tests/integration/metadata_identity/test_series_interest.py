@@ -14,8 +14,8 @@ from sqlalchemy import Column, Integer, MetaData, Table, func, select
 from pullbox.models import LibraryRoot, Series, SeriesInterest, SeriesInterestState, User
 from pullbox.models.whats_new import WhatsNewCacheKind, WhatsNewReleaseCache
 from pullbox.schemas.whats_new import WhatsNewWatchRequest
-from pullbox.services.series_interest import cancel_watch, save_watch
-from pullbox.services.whats_new_actions import load_release_selection
+from pullbox.services.series_interest import cancel_watch, resolve_watched_release, save_watch
+from pullbox.services.whats_new_actions import WhatsNewSelectionError, load_release_selection
 from tests.ui.test_whats_new_ui_routes import _issue_summary
 
 
@@ -93,6 +93,24 @@ async def test_root_deletion_preserves_watch_and_it_can_still_be_cancelled(
         assert interest.state is SeriesInterestState.WATCHING
         cancelled = await cancel_watch(session, interest_id, user)
         assert cancelled.state is SeriesInterestState.CANCELLED
+
+
+async def test_watch_finder_uses_current_unfiltered_cache_not_obsolete_row(
+    identity_probe_db, tmp_path
+):
+    _, factory, _ = identity_probe_db
+    _, user, (old, fresh) = await prepare(factory, tmp_path / "root")
+    async with factory.begin() as session:
+        interest = await save_watch(session, WhatsNewWatchRequest(selection=old.selection), user)
+        interest_id = interest.id
+        row = await session.get(WhatsNewReleaseCache, fresh.selection.cache_id)
+        row.cache_key = "upcoming:all"
+    async with factory.begin() as session:
+        assert await resolve_watched_release(session, interest_id) == fresh
+        await cancel_watch(session, interest_id, user)
+    async with factory() as session:
+        with pytest.raises(WhatsNewSelectionError, match="no longer active"):
+            await resolve_watched_release(session, interest_id)
 
 
 def revision(connection):
