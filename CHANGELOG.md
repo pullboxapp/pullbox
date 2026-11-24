@@ -215,6 +215,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The supplied Docker Compose files now pass v2 metadata flags from `.env` to
+  Pullbox. What's New actions and each paired XML writer can be enabled
+  independently; all remain off by default.
+
 - Refresh Metadata now reports how many series folders received an updated
   `series.json`, were already current, or were not written. Use **Review
   series.json folders** to see the reasons and retry after fixing a folder.

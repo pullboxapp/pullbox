@@ -119,30 +119,9 @@ IMPORTS_PATH=/path/to/imports
 IMPORTS_DROP_PATH=/path/to/imports/remote-drop
 ```
 
-Use the below example to create a Docker Compose file:
-
-```yaml
-services:
-  pullbox:
-    image: ghcr.io/pullboxapp/pullbox:latest
-    container_name: pullbox
-    restart: unless-stopped
-    ports:
-      - "${PULLBOX_HOST_PORT}:8585"
-    environment:
-      TZ: ${TZ}
-      PULLBOX_DB_URL: sqlite+aiosqlite:////data/pullbox.db
-      PULLBOX_SQLITE_JOURNAL_MODE: WAL
-      PULLBOX_LIBRARY_ROOT: /comics
-      PULLBOX_COVERS_DIR: /comics/.covers
-    volumes:
-      - ${PULLBOX_DATA_PATH}:/data
-      - ${COMICS_PATH}:/comics
-      - ${DOWNLOADS_PATH}:/downloads
-      - ${IMPORTS_PATH}:/imports
-```
-
-To start pullbox:
+Use the [supplied Compose file](docker/docker-compose.yml). In a stack editor
+such as Portainer, paste its contents and set the same variables for the stack.
+From the command line, start Pullbox with:
 
 ```bash
 docker compose -f docker/docker-compose.yml --env-file .env up -d
@@ -215,6 +194,11 @@ read-only or runtime-managed inside Pullbox.
 | `PULLBOX_COMICVINE_API_KEY` | unset | Optional ComicVine API key bootstrap value. The UI is preferred after setup. |
 | `PULLBOX_COMICVINE_RATE_LIMIT` | `200` | ComicVine request budget per hour. |
 | `PULLBOX_METADATA_WHATS_NEW_ACTIONS_ENABLED` | `false` | Enable Find & Add, Watch and issue actions in What's New. Does not enable automatic file metadata writing. |
+| `PULLBOX_METADATA_PAIRED_IMPORT_WRITER_ENABLED` | `false` | Write reconciled ComicInfo.xml and MetronInfo.xml on eligible managed import copies when the import policy calls for embedded metadata. |
+| `PULLBOX_METADATA_PAIRED_CONVERSION_WRITER_ENABLED` | `false` | Use both XML formats when converting a matched library file to CBZ. In Mass Convert to CBZ, select the metadata step. |
+| `PULLBOX_METADATA_PAIRED_DOWNLOAD_WRITER_ENABLED` | `false` | Use both XML formats when eligible download-client jobs finish and the ingest policy calls for embedded metadata. |
+| `PULLBOX_METADATA_PAIRED_DIRECT_WRITER_ENABLED` | `false` | Use both XML formats for eligible direct downloads, including supported packs. Separate from download-client jobs. |
+| `PULLBOX_METADATA_GCD_API_V2_ENABLED` | `false` | Experimental remote GCD API controls. Leave off for normal installs. GCD Local does not use this flag. |
 | `PULLBOX_DATA_API_BASE_URL` | `https://api.pullbox.app` | Pullbox Data API base URL. Leave default unless testing a private deployment. |
 | `PULLBOX_METADATA_REFRESH_DAYS` | `30` | Metadata refresh age threshold. |
 | `PULLBOX_SEARCH_INTERVAL_HOURS` | `6` | Automatic wanted-search scheduler cadence. |
@@ -244,7 +228,7 @@ read-only or runtime-managed inside Pullbox.
 ## Features
 
 - Comic series and issue management.
-- ComicVine metadata integration.
+- ComicVine, Metron and GCD Local metadata sources.
 - Newznab, Torznab, Prowlarr, and Jackett indexer support.
 - SABnzbd, NZBGet, qBittorrent, Transmission, and Deluge download clients.
 - Manual and automated wanted-issue search.
@@ -255,6 +239,29 @@ read-only or runtime-managed inside Pullbox.
 - Intervention queue for ambiguous matches.
 - Health checks, diagnostics, logs, backups, and audit trail.
 - Server-rendered UI with HTMX, Alpine.js, and Tailwind CSS.
+
+### Try v2 metadata without rewriting comics
+
+On a v2 build, open **Settings > Metadata**. Enable Metron with your token, or
+mount an official GCD SQLite dump read-only, enter its **container** path and
+choose **Validate and enable GCD**. Set the source priority, then use **Add
+Series** to search the enabled sources and preview a result. Searching and
+previewing do not add a series or rewrite files. No writer flags are required.
+
+To try **What's New > Find & Add** and **Watch**, set just
+`PULLBOX_METADATA_WHATS_NEW_ACTIONS_ENABLED=true` in your Compose `.env`.
+With the supplied Compose file, apply it with
+`docker compose -f docker/docker-compose.yml --env-file .env up -d pullbox`.
+If you maintain an older or custom stack, copy the matching variable line
+into its `environment` block first. A container restart alone does not apply
+changed environment variables.
+
+The four paired-writer flags above are independent. They do not start a bulk
+rewrite, change source priority, or override import safety checks. For managed
+imports, also check **Settings > Media Management > Update Embedded ComicInfo.xml
+on Import**. Writing `series.json` on manual refresh has its own switch in
+**Settings > Metadata**, separate from comic archive writing. To turn a flag
+off, set it to `false` and recreate Pullbox; this does not undo previous writes.
 
 ### Watching an upcoming series
 
