@@ -1937,21 +1937,13 @@ class TestUtilitiesPage:
         styles = converter.page.evaluate(
             """
             () => {
-              const resolveStyles = (declarations) => {
+              const resolveStyles = (declarations, readStyles = read) => {
                 const probe = document.createElement('div');
                 probe.style.position = 'absolute';
                 probe.style.visibility = 'hidden';
                 Object.assign(probe.style, declarations);
                 document.body.appendChild(probe);
-                const computed = window.getComputedStyle(probe);
-                const result = {
-                  fontFamily: computed.fontFamily,
-                  fontSize: computed.fontSize,
-                  fontWeight: computed.fontWeight,
-                  letterSpacing: computed.letterSpacing,
-                  textTransform: computed.textTransform,
-                  lineHeight: computed.lineHeight,
-                };
+                const result = readStyles(probe);
                 probe.remove();
                 return result;
               };
@@ -2012,13 +2004,11 @@ class TestUtilitiesPage:
                   fontWeight: '600',
                 }),
                 actionFooter: readLayout(actionFooter),
-                actionFooterExpected: {
+                actionFooterExpected: resolveStyles({
+                  display: 'flex',
                   justifyContent: 'flex-end',
-                  paddingTop: '12px',
-                  paddingRight: '0px',
-                  paddingBottom: '0px',
-                  paddingLeft: '0px',
-                },
+                  padding: '12px 0 0',
+                }, readLayout),
               };
             }
             """
