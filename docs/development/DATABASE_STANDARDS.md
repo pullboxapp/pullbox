@@ -951,6 +951,25 @@ not suppress failures in those checks.
 For the operator-facing, read-only source check, see
 [Check a SQLite backup before a PostgreSQL migration](../sqlite-postgresql-migration.md).
 
+`make ci-full` runs `make postgres-qualification` on its production image after
+the SQLite smoke test. To repeat only this gate, set `POSTGRES_QUALIFICATION_IMAGE`
+to the local production build. Use a Docker host with Compose, local bind-mount
+support and the project's Python environment and Chromium installed. The gate
+fetches missing official PostgreSQL 16/18 images, creates disposable databases,
+and runs serially. It never accepts a URL for an existing database. It prints
+the image revision, PostgreSQL and host driver versions. A skipped, absent or
+deselected required case is a failure.
+
+Trusted Docker validation runs the same gate on the scanned image, without
+publishing or copying it to another runner. The migrated application in this
+gate uses the image's packaged Python code and Alembic files, not source-tree
+overlays used for developer rehearsals. **PostgreSQL Install and Migration**
+reports that step's actual outcome independently. Forks retain the existing
+untrusted sanity path; that path is not PostgreSQL release evidence. These checks
+cover fresh setup and restart, schema upgrade/backfill and downgrade protection,
+interrupted transfer, reviewed cutover, migrated browser workflows and native
+restore. They are not a substitute for broader backend parity testing.
+
 For a disposable first-start rehearsal, set `PULLBOX_TEST_MIGRATION_TARGET_DOCKER=1`
 and `PULLBOX_TEST_SQLITE_SNAPSHOT_IMAGE` to a local Pullbox runtime image, then run
 `pytest tests/integration/test_postgres_first_start.py`. The test uses the current

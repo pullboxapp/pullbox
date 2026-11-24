@@ -166,7 +166,8 @@ Key gates:
 |---|---|
 | `make validate` | CSS build, lint, format, typecheck, and non-E2E tests |
 | `make ci-local` | GitHub-aligned local CI shape |
-| `make ci-full` | CI-local, security, current-tree/history secret scans, container runtime/Grype checks, and Docker smoke validation |
+| `make ci-full` | CI-local, security, current-tree/history secret scans, container runtime/Grype checks, Docker smoke, and required PostgreSQL install/migration validation |
+| `make postgres-qualification` | Run the PostgreSQL 16/18 install, upgrade, cutover and restore checks on the local production image; missing or skipped cases fail the gate |
 | `make secret-scan` | Blocking Gitleaks scan of current files and the PR commit range |
 | `make docker-security-check` | Build the production image, verify its security runtime, and run Grype with the blocking High cutoff |
 | `make test-a11y` | Contrast gate plus accessibility browser checks |

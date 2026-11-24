@@ -83,6 +83,12 @@ async def test_recheck_original_source_and_reviewed_target(
     if not image:
         pytest.skip("requires the disposable source image")
     browser = start == "browser"
+    packaged = os.environ.get("PULLBOX_TEST_PACKAGED_POSTGRES") == "1"
+    source_code_mount = (
+        []
+        if packaged
+        else ["--mount", f"type=bind,src={stages.ROOT / 'src'},dst=/candidate/src,readonly"]
+    )
     if browser and os.environ.get("PULLBOX_TEST_MIGRATION_BROWSER") != "1":
         pytest.skip("opt in to the disposable Chromium cutover rehearsal")
     activated = start in {"activate", "browser"}
@@ -179,8 +185,7 @@ async def test_recheck_original_source_and_reviewed_target(
                     f"type=bind,src={imports},dst=/imports,readonly",
                     "--mount",
                     f"type=bind,src={watch_shelf},dst=/watch-shelf",
-                    "--mount",
-                    f"type=bind,src={stages.ROOT / 'src'},dst=/candidate/src,readonly",
+                    *source_code_mount,
                     "--mount",
                     f"type=bind,src={native.__file__},dst=/scan.py,readonly",
                     "--user",
@@ -198,8 +203,12 @@ async def test_recheck_original_source_and_reviewed_target(
             "--entrypoint=python",
             image,
             "-c",
-            "import sys,runpy; sys.path.insert(0,'/candidate/src'); "
-            "runpy.run_path('/scan.py',run_name='__main__')"
+            (
+                "import runpy; "
+                if packaged
+                else "import sys,runpy; sys.path.insert(0,'/candidate/src'); "
+            )
+            + "runpy.run_path('/scan.py',run_name='__main__')"
             if browser
             else "pass",
             env={**os.environ, "PULLBOX_SECRET_KEY": "" if xml else key},
@@ -291,17 +300,26 @@ async def test_recheck_original_source_and_reviewed_target(
                 shutil.copytree(watch_shelf, target_shelf)
             if not shared:
                 shutil.copytree(comics, copied)
-            packages = docker(
-                "run",
-                "--rm",
-                "--network=none",
-                "--pull=never",
-                "--entrypoint=python",
-                image,
-                "-c",
-                "import os;print(os.getenv('PYTHONPATH',''))",
-                check=True,
-            ).stdout.strip()
+            dev_mounts = []
+            if not packaged:
+                packages = docker(
+                    "run",
+                    "--rm",
+                    "--network=none",
+                    "--pull=never",
+                    "--entrypoint=python",
+                    image,
+                    "-c",
+                    "import os;print(os.getenv('PYTHONPATH',''))",
+                    check=True,
+                ).stdout.strip()
+                dev_mounts = [
+                    *source_code_mount,
+                    "--mount",
+                    f"type=bind,src={stages.ROOT / 'alembic'},dst=/app/alembic,readonly",
+                    "-e",
+                    f"PYTHONPATH=/candidate/src:{packages}",
+                ]
             process = await asyncio.create_subprocess_exec(
                 "docker",
                 "run",
@@ -326,10 +344,7 @@ async def test_recheck_original_source_and_reviewed_target(
                     if browser
                     else []
                 ),
-                "--mount",
-                f"type=bind,src={stages.ROOT / 'src'},dst=/candidate/src,readonly",
-                "--mount",
-                f"type=bind,src={stages.ROOT / 'alembic'},dst=/app/alembic,readonly",
+                *dev_mounts,
                 "--mount",
                 f"type=bind,src={copied},dst=/comics",
                 *(
@@ -343,8 +358,6 @@ async def test_recheck_original_source_and_reviewed_target(
                 f"type=bind,src={approval},dst=/run/approval,readonly",
                 "--mount",
                 f"type=bind,src={recovered},dst=/run/backup.db,readonly",
-                "-e",
-                f"PYTHONPATH=/candidate/src:{packages}",
                 "-e",
                 "PULLBOX_SECRET_KEY",
                 "-e",

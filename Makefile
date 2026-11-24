@@ -21,6 +21,7 @@ ACTIONLINT := $(TOOLS_DIR)/actionlint
 GITLEAKS := $(TOOLS_DIR)/gitleaks
 GRYPE := $(TOOLS_DIR)/grype
 SECRET_SCAN_BASE ?= origin/develop
+POSTGRES_QUALIFICATION_IMAGE ?= pullbox:local
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -330,12 +331,25 @@ docker-smoke: docker-security-check ## Run Docker smoke tests after runtime secu
 	@echo ""
 	@echo "\033[32m✅ Docker smoke tests passed.\033[0m"
 
-ci-full: ## Full local gate: GitHub-aligned CI + security + Docker smoke
+.PHONY: postgres-qualification
+postgres-qualification: ## Qualify fresh installs and migrated libraries on PostgreSQL 16 and 18
+	@docker compose version
+	@docker image inspect --format 'Pullbox {{.Id}} revision {{index .Config.Labels "org.opencontainers.image.revision"}}' "$(POSTGRES_QUALIFICATION_IMAGE)"
+	@for major in 16 18; do \
+		image="postgres:$$major-bookworm"; \
+		docker image inspect "$$image" >/dev/null 2>&1 || docker pull "$$image" || exit 1; \
+		docker run --rm --network none --entrypoint postgres "$$image" --version || exit 1; \
+	done
+	@$(PYTHON) -c 'import asyncpg; print("Host asyncpg", asyncpg.__version__)'
+	$(SECRET) PULLBOX_TEST_SQLITE_SNAPSHOT_IMAGE="$(POSTGRES_QUALIFICATION_IMAGE)" $(PYTHON) -m scripts.run_postgres_qualification
+
+ci-full: ## Full local gate: GitHub-aligned CI + security + Docker and PostgreSQL
 	@$(MAKE) workflow-hygiene
 	@$(MAKE) secret-scan
 	@$(MAKE) security-ci
 	@$(MAKE) ci-local
 	@$(MAKE) docker-smoke
+	@$(MAKE) postgres-qualification
 	@echo ""
 	@echo "\033[32m✅ Full CI pipeline passed (including Docker).\033[0m"
 

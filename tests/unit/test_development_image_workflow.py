@@ -160,6 +160,17 @@ def test_aggregate_success_cannot_substitute_for_actual_validation(
         validator.validate_evidence("ci.yml", _run(), _suite(), jobs, REPOSITORY, SHA)
 
 
+def test_docker_smoke_without_postgres_qualification_cannot_authorize_publish(validator: Any):
+    workflow = "docker-validate.yml"
+    jobs = _jobs(workflow, validator)
+    trusted = next(job for job in jobs if job["name"] == "Production Docker Validate (trusted)")
+    trusted["steps"] = [
+        step for step in trusted["steps"] if step["name"] != "Qualify PostgreSQL 16 and 18"
+    ]
+    with pytest.raises(validator.ValidationError):
+        validator.validate_evidence(workflow, _run(workflow), _suite(), jobs, REPOSITORY, SHA)
+
+
 def test_latest_failed_run_is_not_replaced_with_older_success(validator: Any) -> None:
     latest = validator.latest_run([_run(id=100), _run(id=101, conclusion="failure")])
     assert latest["id"] == 101

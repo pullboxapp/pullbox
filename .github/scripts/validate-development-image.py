@@ -49,7 +49,9 @@ REQUIRED_JOBS: dict[str, dict[str, tuple[str, ...]]] = {
             "Run Grype scan",
             "Verify packaged static assets",
             "Wait for healthy",
+            "Qualify PostgreSQL 16 and 18",
         ),
+        "PostgreSQL Install and Migration": ("Require completed PostgreSQL 16 and 18 tests",),
         "Docker Validate Required": (),
     },
 }

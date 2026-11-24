@@ -120,7 +120,9 @@ jobs:
     needs: [release_sync_check, full_ci_check]
     if: needs.release_sync_check.outputs.is_sync != 'true' && needs.full_ci_check.outputs.trusted_full == 'true'
     runs-on: [self-hosted, Linux, X64, docker]
-    timeout-minutes: 35
+    timeout-minutes: 60
+    outputs:
+      postgres_result: ${{ steps.postgres.outcome }}
     permissions:
       contents: read
     steps:
@@ -222,6 +224,20 @@ jobs:
           docker logs pullbox-validate
           exit 1
 
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_DEFAULT }}
+
+      - name: Prepare PostgreSQL test dependencies
+        run: .github/scripts/setup-runner-venv.sh "dev,e2e"
+
+      - name: Install Chromium for PostgreSQL qualification
+        run: playwright install chromium
+
+      - name: Qualify PostgreSQL 16 and 18
+        id: postgres
+        run: make postgres-qualification VENV="$VENV_PATH" POSTGRES_QUALIFICATION_IMAGE=pullbox:validate
+
       - name: Write Docker validation summary
         if: always()
         run: |
@@ -231,6 +247,7 @@ jobs:
             echo "- Production image build: pullbox:validate"
             echo "- Grype scan: high severity gate"
             echo "- Smoke test: /ping health check"
+            echo "- PostgreSQL 16/18 install, cutover and restore: ${{ steps.postgres.outcome }}"
             echo "- Publish: disabled for validation workflow"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -255,6 +272,25 @@ jobs:
           docker rm -f pullbox-validate || true
           docker image rm -f pullbox:validate || true
 
+  postgres-qualification:
+    name: PostgreSQL Install and Migration
+    needs: [release_sync_check, full_ci_check, trusted-production-validate]
+    if: always() && needs.release_sync_check.outputs.is_sync != 'true' && needs.full_ci_check.outputs.trusted_full == 'true'
+    runs-on: ubuntu-latest
+    permissions: {}
+    timeout-minutes: 5
+    steps:
+      # The actual databases must use the already-scanned image on the builder.
+      - name: Require completed PostgreSQL 16 and 18 tests
+        env:
+          POSTGRES_RESULT: ${{ needs.trusted-production-validate.outputs.postgres_result }}
+        run: |
+          if [ "$POSTGRES_RESULT" != success ]; then
+            echo "::error::PostgreSQL install and migration did not pass ($POSTGRES_RESULT)."
+            exit 1
+          fi
+          echo "PostgreSQL 16 and 18 passed fresh installation, migration and restore."
+
   docker-validate-required:
     name: Docker Validate Required
     runs-on: ubuntu-latest
@@ -263,6 +299,7 @@ jobs:
       - full_ci_check
       - untrusted-sanity
       - trusted-production-validate
+      - postgres-qualification
     if: always()
     timeout-minutes: 5
     permissions:
@@ -313,10 +350,11 @@ jobs:
               sys.exit(1)
 
           if trusted_full:
-              result = needs.get("trusted-production-validate", {}).get("result")
-              if result != "success":
-                  print(f"Trusted Docker validation did not pass: {result}", file=sys.stderr)
-                  sys.exit(1)
+              for name in ("trusted-production-validate", "postgres-qualification"):
+                  result = needs.get(name, {}).get("result")
+                  if result != "success":
+                      print(f"{name} did not pass: {result}", file=sys.stderr)
+                      sys.exit(1)
               print("Trusted Docker validation passed.")
               sys.exit(0)
 
