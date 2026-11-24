@@ -187,6 +187,7 @@ async def exercise(origin, cases, originals, library, db, sql, owned_digest, pos
     from tests.integration import postgres_manual_metadata as manual
     from tests.integration import postgres_propagation as propagation
     from tests.integration import postgres_series_editor as series_editor
+    from tests.integration import postgres_watches as watches
 
     def posted_to(suffix):
         return lambda response: response.request.method == "POST" and response.url.endswith(suffix)
@@ -202,6 +203,8 @@ async def exercise(origin, cases, originals, library, db, sql, owned_digest, pos
             await expect(page.get_by_role("complementary", name="Sidebar")).to_be_visible()
             await page.get_by_test_id("usage-stats-modal-disable").click()
             await expect(page.get_by_test_id("usage-stats-modal")).to_be_hidden()
+            await watches.exercise(page)
+            watches.verify(sql, db)
             for ns, job, issue, file, unverified in cases["folder"]:
                 comic, original, unknown, untouched = originals[ns]
                 await page.goto(f"/import?tab=follow-up&job_id={job}")

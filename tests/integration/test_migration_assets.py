@@ -143,6 +143,38 @@ def test_wrong_key_and_plaintext_are_not_reported_as_verified(assets):
     assert "legacy-token" not in str(report)
 
 
+def test_unmapped_source_root_reports_its_id_without_certifying_or_disclosing_paths(assets):
+    from pullbox.services.migration_assets import check_assets
+
+    db, library = assets
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.execute(
+            "INSERT INTO library_roots(id,path,name,enabled) VALUES(78,'/private-shelf','shelf',1)"
+        )
+
+    def map_original(path):
+        if path.as_posix() == "/comics":
+            return library
+        raise ValueError(f"No host-readable bind mount for {path}")
+
+    report = check_assets(
+        db,
+        digest(db),
+        None,
+        compare=None,
+        all_files=False,
+        configured_url="sqlite:///:memory:",
+        config_path=library / "unused.xml",
+        verified_key="ab7c" * 16,
+        root_on_host=map_original,
+    )
+    assert report.blockers == {"source_root_not_mapped": 1}
+    assert report.root_problems == {78: "source_root_not_mapped"}
+    assert "root ID 78" in report.next_step and "bind mount" in report.next_step
+    assert "/private-shelf" not in str(report) + report.next_step
+    assert not report.checks_passed and not report.sample_sha256 and not report.cutover_ready
+
+
 def test_verifies_other_durable_credential_fields_without_network(assets):
     with closing(sqlite3.connect(assets[0])) as conn, conn:
         token = conn.execute(

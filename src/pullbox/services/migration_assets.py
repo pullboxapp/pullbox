@@ -63,6 +63,18 @@ class AssetReport:
                 "Do not generate a replacement key. Correct any file blockers and retry."
             )
         if self.blockers:
+            if "source_root_not_mapped" in self.blockers:
+                root_id = next(
+                    i
+                    for i, reason in self.root_problems.items()
+                    if reason == "source_root_not_mapped"
+                )
+                return (
+                    f"Check library root ID {root_id} against the stopped source container's "
+                    "Docker mounts. Its original folder must be on a host-readable bind mount "
+                    "without nested mounts or symlink substitutions. Keep the backup and media "
+                    "intact; if the source container changes, repeat capture and staging."
+                )
             if any(code.startswith("arc_") for code in self.blockers):
                 return (
                     "Check the original Story Arc placements, their canonical files and mount "
@@ -340,10 +352,16 @@ def check_assets(
                     check_saved_credentials(db, verified_key, report)
                 if root_args is None:
                     # A deployment check must use the paths Pullbox will actually open.
-                    root_args = [
-                        f"{i}={root_on_host(Path(p)) if root_on_host else p}"
-                        for i, p in db.execute("SELECT id,path FROM library_roots")
-                    ]
+                    root_args = []
+                    for root_id, recorded in db.execute(
+                        "SELECT id,path FROM library_roots ORDER BY id"
+                    ):
+                        try:
+                            actual = root_on_host(Path(recorded)) if root_on_host else recorded
+                        except (OSError, ValueError) as exc:
+                            report.root_problems[root_id] = "source_root_not_mapped"
+                            raise AssetVerificationError("source_root_not_mapped") from exc
+                        root_args.append(f"{root_id}={actual}")
                 _files(
                     db,
                     _maps(root_args),

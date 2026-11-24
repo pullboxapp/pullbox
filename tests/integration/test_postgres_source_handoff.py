@@ -21,6 +21,7 @@ from tests.integration import postgres_manual_metadata as manual
 from tests.integration import postgres_native_followup as native
 from tests.integration import postgres_propagation as propagation
 from tests.integration import postgres_series_editor as series_editor
+from tests.integration import postgres_watches as watches
 from tests.integration import test_postgres_stage_review as review
 from tests.integration import test_postgres_transfer_stage as stages
 from tests.integration.test_postgres_first_start import _NAVIGATE, docker
@@ -105,6 +106,9 @@ async def test_recheck_original_source_and_reviewed_target(
     (covers / "71" / "series.jpg").write_bytes(b"original cover")
     (comics / "one.cbz").write_bytes(b"first")
     imports = tmp_path / "imports"
+    watch_shelf = tmp_path / "watch-shelf"
+    if browser:
+        watch_shelf.mkdir()
     expected = None
     with closing(sqlite3.connect(source)) as db, db:
         db.execute("PRAGMA foreign_keys=ON")
@@ -120,6 +124,7 @@ async def test_recheck_original_source_and_reviewed_target(
             owned_digest = linked.seed(db, imports, comics)
             manual.seed(db, imports)
             propagation.seed(db, comics)
+            watches.seed(db)
             db.execute(
                 "INSERT INTO series_external_identities(series_id,identity_namespace,external_id,"
                 "verification_state,evidence_kind) "
@@ -172,6 +177,8 @@ async def test_recheck_original_source_and_reviewed_target(
                 [
                     "--mount",
                     f"type=bind,src={imports},dst=/imports,readonly",
+                    "--mount",
+                    f"type=bind,src={watch_shelf},dst=/watch-shelf",
                     "--mount",
                     f"type=bind,src={stages.ROOT / 'src'},dst=/candidate/src,readonly",
                     "--mount",
@@ -226,7 +233,8 @@ async def test_recheck_original_source_and_reviewed_target(
         original_stage = stages.state(sql, db)
         assert original_stage.startswith("false:")
         await check_binding(url, token, captured["snapshot_sha256"])
-        assert handoff(name, url, token, receipt, scratch)["source_and_target_verified"]
+        checked = handoff(name, url, token, receipt, scratch)
+        assert checked["source_and_target_verified"], checked["blockers"]
         captured_source = host.SourceCapture.read(receipt)
         recovered = tmp_path / "restored.db"
         shutil.copyfile(snapshot, recovered)
@@ -278,6 +286,9 @@ async def test_recheck_original_source_and_reviewed_target(
             inside = make_url(url).set(port=5432).render_as_string(hide_password=False)
             shared = xml and activated
             copied = comics if shared else tmp_path / "new-library"
+            target_shelf = tmp_path / "new-watch-shelf"
+            if browser:
+                shutil.copytree(watch_shelf, target_shelf)
             if not shared:
                 shutil.copytree(comics, copied)
             packages = docker(
@@ -305,6 +316,16 @@ async def test_recheck_original_source_and_reviewed_target(
                 "--cap-drop=ALL",
                 "--tmpfs",
                 f"/data:uid={os.getuid()},gid={os.getgid()},mode=0700",
+                *(
+                    [
+                        "--mount",
+                        f"type=bind,src={target_shelf},dst=/watch-shelf",
+                        "-e",
+                        "PULLBOX_METADATA_WHATS_NEW_ACTIONS_ENABLED=true",
+                    ]
+                    if browser
+                    else []
+                ),
                 "--mount",
                 f"type=bind,src={stages.ROOT / 'src'},dst=/candidate/src,readonly",
                 "--mount",
@@ -506,6 +527,7 @@ async def test_recheck_original_source_and_reviewed_target(
                     series_editor.verify(sql, restored, copied)
                     propagation.verify(sql, restored, copied)
                     propagation.verify_publication_titles(sql, restored, copied)
+                    watches.verify(sql, restored)
                     assert sql(restored, stat_query) == last_run
                 assert (
                     sql(restored, "SELECT name FROM story_arcs WHERE id=55")

@@ -676,6 +676,21 @@ Afterward, test restoring a new PostgreSQL backup alongside the matching media;
 the restored database should show those decisions. Do not perform test writes
 on an offline stage you plan to use for a real cutover.
 
+If you use **What's New > Watch**, also open **Pull List > Watching**. A saved
+Watch should still be listed, and a previously cancelled Watch should not be.
+Use **Find & Add** on an active Watch with a fresh release, choose a provider
+result, and check the library in the preview. It should be the library you chose
+when you watched the series, even if another library is the default. Cancel the
+preview to leave the Watch and files untouched. On the disposable rehearsal
+only, try cancelling a different Watch, take a PostgreSQL backup, and check that
+the cancellation persists after restore.
+
+If first-start approval reports `source_root_not_mapped`, compare the reported
+library root ID with the **stopped SQLite container's** bind mounts. Check every
+configured library, not just the default one. Correct the mapping to the original
+folder, not an empty replacement; if the container changes, repeat capture and
+staging rather than reusing its approval.
+
 **If startup is interrupted:** do not start SQLite based on a lost terminal or
 a failed health check. Check the database status from the maintenance database
 as shown above. A still-bound label means cutover did not commit; an interruption

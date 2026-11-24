@@ -215,6 +215,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- SQLite-to-PostgreSQL first-start approval now reports the library root ID
+  when it cannot map a folder from the stopped SQLite container. Approval
+  still stops rather than using a different folder.
+
 - If the issue editor loses a save confirmation, **Check this edit** shows
   whether that specific update was queued or finished. Checking does not
   rewrite the comic, and another edit to the same issue cannot mask its status.
