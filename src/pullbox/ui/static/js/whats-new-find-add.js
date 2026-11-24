@@ -193,6 +193,55 @@ function whatsNewFindAdd() {
       return this.openReleaseFinder(`/api/v1/whats-new/resolve/${cacheId}/${releaseId}`, trigger);
     },
 
+    async trackRelease(trigger, seriesId) {
+      if (trigger.disabled) return;
+      const cell = trigger.closest('[data-discovery-series]');
+      const cacheId = Number(cell.dataset.releaseCache), releaseId = Number(cell.dataset.releaseId);
+      const surface = trigger.closest('[data-testid="whats-new-page"]');
+      if (!Number.isSafeInteger(releaseId) || !Number.isSafeInteger(cacheId) || !releaseId || !cacheId) {
+        this.watchFeedback = 'Open the series page to turn on monitoring.';
+        return;
+      }
+      const url = window.location.pathname + window.location.search;
+      trigger.disabled = true;
+      this.watchFeedback = 'Turning on series monitoring...';
+      let saved = false;
+      try {
+        const result = await this.watchRequest('/api/v1/whats-new/track', {
+          cache_id: cacheId, release_id: releaseId, fingerprint: cell.dataset.releaseFingerprint,
+          expected_series_id: seriesId,
+        });
+        if (this.disposed) return;
+        if (result.id !== seriesId || result.monitored !== true) throw new Error('Reload to check the series monitoring status.');
+        saved = true;
+        this.watchFeedback = 'Series tracking is on.';
+        if (!trigger.isConnected || url !== window.location.pathname + window.location.search) return;
+        for (const badge of surface.querySelectorAll(`[data-monitor-series="${seriesId}"]`)) {
+          badge.textContent = 'Tracked';
+          const button = badge.parentElement.querySelector('[data-testid="whats-new-track"]');
+          if (button) button.disabled = true;
+        }
+        // Monitoring can change issue badges and Grab eligibility across multiple rows.
+        await htmx.ajax('GET', url, {source: surface, target: '#whats-new-results-body', swap: 'outerHTML'});
+        if (trigger.isConnected) throw new Error('The release rows did not refresh.');
+        if (!this.disposed && document.activeElement === document.body) {
+          surface.querySelector(`[data-release-cache="${cacheId}"][data-release-id="${releaseId}"] a[href="/series/${seriesId}"]`)?.focus({preventScroll: true});
+        }
+      } catch (error) {
+        if (!this.disposed) this.watchFeedback = saved
+          ? 'Tracking is on. Reload to refresh issue status.'
+          : error.name === 'AbortError' ? 'Tracking timed out. Reload to check the series before retrying.' : error.message;
+      } finally {
+        if (trigger.isConnected) {
+          trigger.disabled = saved;
+          if (document.activeElement === document.body) {
+            const focus = saved ? cell.querySelector('a') : trigger;
+            focus?.focus({preventScroll: true});
+          }
+        }
+      }
+    },
+
     async addExactRelease(trigger) {
       if (this.watchBusy || this.adding || this.findOpen) return;
       const cell = trigger.closest('[data-discovery-series]');
@@ -388,8 +437,16 @@ function whatsNewFindAdd() {
         link.textContent = 'Added';
         const status = document.createElement('span');
         status.className = 'badge badge-muted';
+        status.dataset.monitorSeries = String(data.id);
         status.textContent = data.monitored ? 'Tracked' : 'Paused';
         cell.replaceChildren(link, document.createTextNode(' '), status);
+        if (!data.monitored && cell.dataset.releaseId) {
+          const track = document.createElement('button');
+          track.type = 'button'; track.className = 'btn-ghost btn-sm';
+          track.dataset.testid = 'whats-new-track'; track.textContent = 'Track';
+          track.addEventListener('click', () => this.trackRelease(track, data.id));
+          cell.append(document.createTextNode(' '), track);
+        }
       }
     },
 

@@ -54,6 +54,12 @@ class WhatsNewIssueSelection(WhatsNewSeriesSelection):
     issue_id: int = Field(gt=0, le=2**31 - 1, strict=True)
 
 
+class WhatsNewTrackSelection(WhatsNewSeriesSelection):
+    """Expected local owner protects the click against a subsequently retargeted release."""
+
+    expected_series_id: int = Field(gt=0, le=2**31 - 1, strict=True)
+
+
 class WhatsNewCommunityCounts(BaseModel):
     """Community activity counters from the upstream summary contract."""
 

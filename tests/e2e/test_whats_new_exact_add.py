@@ -100,6 +100,14 @@ def test_add_published_series_in_place(
     expect(page.get_by_test_id("whats-new-find-dialog")).not_to_be_visible()
     href = link.get_attribute("href")
     emit.assert_awaited_once()
+    track = row.get_by_role("button", name="Track", exact=True)
+    expect(track).to_be_visible()
+    with page.expect_response("**/api/v1/whats-new/track") as tracked:
+        track.press("Enter")
+    assert tracked.value.ok, tracked.value.text()
+    expect(row.get_by_text("Tracked", exact=True)).to_be_visible()
+    expect(track).to_have_count(0)
+    expect(link).to_be_focused()
     page.reload()
     expect(link).to_have_attribute("href", href)
     link.click()
@@ -115,9 +123,11 @@ def test_add_published_series_in_place(
     path.rmdir()
 
 
+@pytest.mark.parametrize("refresh_fails", [False, True])
 def test_existing_native_owner_opens_locally_without_guessing_the_issue(
     release_page,  # noqa: F811
     seeded_server,
+    refresh_fails,
 ):
     async def seed():
         async with get_session_factory().begin() as db:
@@ -148,16 +158,51 @@ def test_existing_native_owner_opens_locally_without_guessing_the_issue(
 
     owner_id = _run_async_blocking(seed())
     page = release_page
-    page.goto(f"{seeded_server}/whats-new")
+    url = f"{seeded_server}/whats-new?q=Atlas"
+    page.goto(url)
+    page.get_by_test_id("whats-new-page").evaluate("el => el.dataset.sameShell='yes'")
     row = page.get_by_test_id("whats-new-release-row").filter(has_text="Atlas Deluxe")
     expect(row.get_by_text("Paused", exact=True)).to_be_visible()
     expect(row.get_by_role("button", name="Confirm series link")).to_be_visible()
     expect(row.get_by_role("button", name="Grab", exact=True)).to_have_count(0)
     link = row.get_by_role("link", name="Added", exact=True)
     expect(link).to_have_attribute("href", f"/series/{owner_id}")
+    track = row.get_by_role("button", name="Track", exact=True)
+    page.route(
+        "**/api/v1/whats-new/track",
+        lambda route: route.fulfill(
+            status=409, json={"detail": "The library series match changed. Reload before tracking."}
+        ),
+    )
+    track.press("Enter")
+    expect(
+        page.get_by_text("The library series match changed. Reload before tracking.")
+    ).to_be_visible()
+    expect(row.get_by_text("Paused", exact=True)).to_be_visible()
+    expect(track).to_be_enabled()
+    page.unroute("**/api/v1/whats-new/track")
+    if refresh_fails:
+        page.route(url, lambda route: route.fulfill(status=503, body="Unavailable"))
+    with page.expect_response("**/api/v1/whats-new/track") as pending:
+        row.get_by_role("button", name="Track", exact=True).press("Enter")
+    assert pending.value.ok, pending.value.text()
+    expect(page).to_have_url(url)
+    expect(page.get_by_test_id("whats-new-page")).to_have_attribute("data-same-shell", "yes")
+    if refresh_fails:
+        expect(page.get_by_text("Tracking is on. Reload to refresh issue status.")).to_be_visible()
+        expect(track).to_be_disabled()
+        page.unroute(url)
+        page.reload()
+    else:
+        expect(link).to_be_focused()
+    expect(row.get_by_text("Tracked", exact=True)).to_be_visible()
+    expect(row.get_by_role("button", name="Confirm series link")).to_be_visible()
+    expect(row.get_by_role("button", name="Grab")).to_have_count(0)
+    expect(page).to_have_url(url)
+    csrf = page.evaluate("readCsrfTokenFromBody()")
     link.press("Enter")
     expect(page).to_have_url(f"{seeded_server}/series/{owner_id}")
     assert page.request.delete(
         f"{seeded_server}/api/v1/series/{owner_id}",
-        headers={"X-CSRF-Token": page.evaluate("readCsrfTokenFromBody()")},
+        headers={"X-CSRF-Token": csrf},
     ).ok

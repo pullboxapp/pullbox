@@ -67,6 +67,28 @@ async def current_release_evidence(rows: list[WhatsNewReleaseCache]) -> ReleaseS
     )
 
 
+async def lock_current_release_feeds(
+    session: AsyncSession,
+    current: WhatsNewReleaseCache | None,
+    upcoming: WhatsNewReleaseCache | None,
+) -> None:
+    # Same order as the feed refresh, before locking a selected row or local series.
+    for row in (current, upcoming):
+        if (
+            row is not None
+            and await session.scalar(
+                select(WhatsNewReleaseCache)
+                .where(WhatsNewReleaseCache.id == row.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            is None
+        ):
+            raise WhatsNewSelectionError("These releases changed. Reload What's New.")
+    if await WhatsNewCacheService().get_latest_current_week(session) is not current:
+        raise WhatsNewSelectionError("These releases changed. Reload What's New.")
+
+
 async def release_offers(
     session: AsyncSession, evidence: ReleaseSeriesEvidence, ids: set[str], *, lock: bool = False
 ) -> dict[str, ExactOffer]:
@@ -134,20 +156,7 @@ async def _validate(
             "These releases are no longer current. Reload or use Find & Add."
         )
     if lock:
-        # Take cache locks in refresh order before the selected-row lookup.
-        for row in (current, upcoming):
-            if (
-                await session.scalar(
-                    select(WhatsNewReleaseCache)
-                    .where(WhatsNewReleaseCache.id == row.id)
-                    .with_for_update()
-                    .execution_options(populate_existing=True)
-                )
-                is None
-            ):
-                raise WhatsNewSelectionError(_CHANGED)
-        if await cache.get_latest_current_week(session) is not current:
-            raise WhatsNewSelectionError(_CHANGED)
+        await lock_current_release_feeds(session, current, upcoming)
     selected = await load_release_selection(session, submitted.cache_id, submitted.release_id)
     locg = selected.locg_series_id
     if not locg or not selected.series_published:

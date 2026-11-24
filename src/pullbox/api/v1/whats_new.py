@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict
 
 from pullbox.api.deps import AuthenticatedUser, DbSession, InteractiveOperatorUser  # noqa: TC001
 from pullbox.config import get_settings
+from pullbox.core.events import IssueWanted, get_event_bus
 from pullbox.core.exceptions import PullboxError, ValidationError
 from pullbox.core.metadata_identity_state import IdentityReviewRequiredError
 from pullbox.schemas.search import (
@@ -25,6 +26,7 @@ from pullbox.schemas.whats_new import (
     WhatsNewCurrentWeekResponse,
     WhatsNewIssueSelection,
     WhatsNewSeriesSelection,
+    WhatsNewTrackSelection,
     WhatsNewUpcomingResponse,
     WhatsNewWatchRequest,
 )
@@ -53,6 +55,7 @@ from pullbox.services.whats_new_refresh_queue import (
     WhatsNewRefreshCoordinator,
     run_whats_new_refresh,
 )
+from pullbox.services.whats_new_track import track_release_series
 
 if TYPE_CHECKING:
     from pullbox.models.whats_new import WhatsNewReleaseCache
@@ -132,6 +135,23 @@ async def create_release_watch(
         return watch_response(await save_watch(session, body, user.id))
     except WhatsNewSelectionError as exc:
         raise HTTPException(409, str(exc)) from exc
+
+
+@router.post("/track")
+async def track_local_series(
+    body: WhatsNewTrackSelection, session: DbSession, _user: InteractiveOperatorUser
+) -> dict[str, object]:
+    if not get_settings().metadata_whats_new_actions_enabled:
+        raise HTTPException(404, "Release discovery actions are not enabled.")
+    try:
+        wanted = await track_release_series(session, body)
+        await session.commit()
+    except WhatsNewSelectionError as exc:
+        await session.rollback()
+        raise HTTPException(409, str(exc)) from exc
+    for issue_id, series_id in wanted:
+        await get_event_bus().emit(IssueWanted(issue_id=issue_id, series_id=series_id))
+    return {"id": body.expected_series_id, "monitored": True}
 
 
 @router.post("/add-series")

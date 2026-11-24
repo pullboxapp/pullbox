@@ -126,10 +126,15 @@
               {% if release.price %}{{ "$%.2f"|format(release.price) }}{% else %}&mdash;{% endif %}
             </td>
             {% if whats_new_actions_enabled %}
-            <td class="r" data-discovery-series="{{ release.discovery_series_id or '' }}" data-discovery-issue="{{ release.local_issue.issue_id if release.local_issue else '' }}">
+            <td class="r" data-discovery-series="{{ release.discovery_series_id or '' }}" data-discovery-issue="{{ release.local_issue.issue_id if release.local_issue else '' }}"
+                data-release-cache="{{ release.discovery_cache_id }}" data-release-id="{{ release.discovery_release_id or '' }}" data-release-fingerprint="{{ release.discovery_fingerprint }}">
               {% if release.local_series %}
                 <a data-testid="whats-new-local-series" class="btn-ghost btn-sm" href="/series/{{ release.local_series.id }}">Added</a>
-                <span class="badge badge-muted">{{ 'Tracked' if release.local_series.monitored else 'Paused' }}</span>
+                <span class="badge badge-muted" data-monitor-series="{{ release.local_series.id }}">{{ 'Tracked' if release.local_series.monitored else 'Paused' }}</span>
+                {% if not release.local_series.monitored and release.discovery_release_id %}
+                <button type="button" class="btn-ghost btn-sm" data-testid="whats-new-track"
+                        @click="trackRelease($el, {{ release.local_series.id }})">Track</button>
+                {% endif %}
                 {% if release.local_issue %}
                 <div class="mt-1 flex flex-wrap items-center justify-end gap-2">
                   <span data-testid="whats-new-issue-state" class="badge {{ 'badge-success' if release.local_issue.state == 'owned' else 'badge-muted' }}">{{ release.local_issue.label }}</span>

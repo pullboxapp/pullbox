@@ -25,6 +25,13 @@ or import destination and does not save links or change monitoring. **Confirm
 series link** opens the explicit selection workflow. Until the LOCG series
 link is confirmed, the badge alone cannot identify an issue or offer **Grab**.
 
+On a paused series, **Track** turns monitoring on without adding a series or
+confirming its LOCG link. The server rechecks the release and its local owner.
+Automatically skipped issues become Wanted; owned, downloading and manually
+skipped issues keep their status. The table refreshes in place, including
+other releases for the series. If that refresh fails after the save, reload
+the page to see current issue status; there is no need to track it again.
+
 ## Admission
 
 The series must already own a verified LOCG series identity, established by exact

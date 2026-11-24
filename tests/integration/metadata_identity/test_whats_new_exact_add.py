@@ -7,10 +7,10 @@ from unittest.mock import AsyncMock
 from sqlalchemy import event, func, select
 
 from pullbox.core.events import EventBus
-from pullbox.models import Issue, Series, SeriesExternalIdentity
+from pullbox.models import Issue, IssueStatus, Series, SeriesExternalIdentity
 from pullbox.models.metadata_source import MetadataSourceConfig
 from pullbox.providers.metadata import sources
-from pullbox.schemas.whats_new import WhatsNewSeriesSelection
+from pullbox.schemas.whats_new import WhatsNewSeriesSelection, WhatsNewTrackSelection
 from pullbox.services.catalog import reader as catalog_reader
 from pullbox.services.whats_new_actions import release_series_evidence
 from pullbox.services.whats_new_cache_service import WhatsNewCacheService
@@ -21,12 +21,61 @@ from pullbox.services.whats_new_exact_add import (
 )
 from pullbox.services.whats_new_grab import cache_fingerprint
 from pullbox.services.whats_new_library_matches import native_library_matches
+from pullbox.services.whats_new_track import track_release_series
 from tests.integration.metadata_identity.test_series_interest import prepare
 from tests.integration.metadata_identity.test_watch_release_refresh import (
     watch_refresh_enabled,  # noqa: F401
 )
 from tests.ui.test_whats_new_ui_routes import _issue_summary
 from tests.unit.test_catalog_reader import installed_reader
+
+
+async def test_two_track_clicks_claim_only_one_issue_transition(identity_probe_db):
+    _, factory, _ = identity_probe_db
+    today = datetime.now(UTC).date()
+    cache = WhatsNewCacheService()
+    release = _issue_summary()
+    release["series"]["gcd_series_id"] = 82
+    async with factory.begin() as db:
+        current = await cache.upsert_current_week(
+            db, store_date=today, payload={"store_date": today.isoformat(), "issues": [release]}
+        )
+        await cache.upsert_upcoming(db, payload={"weeks": []})
+        owner = Series(title="Native", sort_title="native", monitored=False)
+        db.add(owner)
+        await db.flush()
+        issue = Issue(
+            series_id=owner.id, issue_number=1.0, status=IssueStatus.SKIPPED, manual_skip=False
+        )
+        db.add_all(
+            [
+                issue,
+                SeriesExternalIdentity(
+                    series_id=owner.id,
+                    identity_namespace="gcd",
+                    external_id="82",
+                    verification_state="verified",
+                    evidence_kind="user_selection",
+                ),
+            ]
+        )
+        await db.flush()
+        selection = WhatsNewTrackSelection(
+            cache_id=current.id,
+            release_id=release["locg_issue_id"],
+            fingerprint=cache_fingerprint(current.payload),
+            expected_series_id=owner.id,
+        )
+
+    async def click():
+        async with factory.begin() as db:
+            return await track_release_series(db, selection)
+
+    first, second = await asyncio.gather(click(), click())
+    assert first + second == [(issue.id, owner.id)]
+    async with factory() as db:
+        assert (await db.get(Series, owner.id)).monitored
+        assert (await db.get(Issue, issue.id)).status == IssueStatus.WANTED
 
 
 async def test_native_series_badges_for_one_hundred_releases_take_one_read(identity_probe_db):

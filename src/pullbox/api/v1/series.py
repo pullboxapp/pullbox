@@ -45,7 +45,7 @@ from pullbox.services.metadata_series_adoption import (
 from pullbox.services.metadata_service import MetadataService
 from pullbox.services.metadata_sources import load_source_runtime
 from pullbox.services.search_targets import load_series_wanted_search_targets
-from pullbox.services.series_service import SeriesService
+from pullbox.services.series_service import SeriesService, want_auto_skipped_issues
 from pullbox.services.series_sidecar import (
     create_added_series_sidecar,
     sync_refreshed_series_sidecars,
@@ -287,17 +287,7 @@ async def bulk_update_series(
         updated += int(result.rowcount or 0)  # type: ignore[attr-defined]
 
         if body.monitored:
-            issue_result = await session.execute(
-                update(Issue)
-                .where(
-                    Issue.series_id.in_(chunk),
-                    Issue.status == IssueStatus.SKIPPED,
-                    Issue.manual_skip.is_(False),
-                )
-                .values(status=IssueStatus.WANTED)
-                .returning(Issue.id, Issue.series_id)
-            )
-            wanted_issues = list(issue_result.all())
+            wanted_issues = await want_auto_skipped_issues(session, chunk)
             issues_updated += len(wanted_issues)
             for issue_id, series_id in wanted_issues:
                 await event_bus.emit(IssueWanted(issue_id=issue_id, series_id=series_id))

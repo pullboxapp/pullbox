@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   missing or you want to choose the match yourself.
   A release that matches a verified provider ID already in your library now
   shows **Tracked** or **Paused**, even before you confirm its LOCG series link.
+  Choose **Track** on a paused series to resume monitoring without leaving
+  the release list. Owned issues and manual skips are preserved.
 
 - A [fresh PostgreSQL installation guide](docs/postgresql-fresh-install.md)
   and standalone Docker Compose example keep new libraries separate from

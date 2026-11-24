@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from pullbox.core.events import EventBus, IssueWanted, SeriesAdded
 from pullbox.core.exceptions import NotFoundError, ValidationError
@@ -78,6 +78,23 @@ if TYPE_CHECKING:
     from pullbox.services.metadata_service import MetadataService
 
 logger = structlog.get_logger(__name__)
+
+
+async def want_auto_skipped_issues(
+    session: AsyncSession, series_ids: list[int]
+) -> list[tuple[int, int]]:
+    """Return only issues actually transitioned by this monitoring action."""
+    changed = await session.execute(
+        update(Issue)
+        .where(
+            Issue.series_id.in_(series_ids),
+            Issue.status == IssueStatus.SKIPPED,
+            Issue.manual_skip.is_(False),
+        )
+        .values(status=IssueStatus.WANTED)
+        .returning(Issue.id, Issue.series_id)
+    )
+    return [(issue_id, series_id) for issue_id, series_id in changed]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1168,18 +1185,8 @@ class SeriesService:
         Issues with manual_skip=True are left as SKIPPED.
         OWNED issues are never touched.
         """
-        result = await session.execute(
-            select(Issue).where(
-                Issue.series_id == series.id,
-                Issue.status == IssueStatus.SKIPPED,
-                Issue.manual_skip.is_(False),
-            )
-        )
-        issues = list(result.scalars().all())
-
-        for issue in issues:
-            issue.status = IssueStatus.WANTED
-            await self._event_bus.emit(IssueWanted(issue_id=issue.id, series_id=series.id))
+        for issue_id, series_id in await want_auto_skipped_issues(session, [series.id]):
+            await self._event_bus.emit(IssueWanted(issue_id=issue_id, series_id=series_id))
 
     async def _apply_monitoring_off(
         self,
