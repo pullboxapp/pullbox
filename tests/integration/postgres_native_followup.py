@@ -325,13 +325,18 @@ async def _reopen_owned_issue_after_disconnect(page, db, sql, comic):
     await expect(download).to_have_attribute("href", "/api/v1/issues/10017/download-file")
 
     # Drop idle connections only in this disposable app database, not running jobs.
-    killed = sql(
+    attempts = sql(
         db,
-        "SELECT pg_terminate_backend(pid, 5000) FROM pg_stat_activity "
+        "SELECT pid,pg_terminate_backend(pid, 5000) FROM pg_stat_activity "
         "WHERE datname=current_database() AND usename='probe_owner' "
         "AND backend_type='client backend' AND state='idle'",
     ).splitlines()
-    assert killed and all(result == "t" for result in killed), killed
+    targets = {int(pid): result for pid, result in (row.split("|") for row in attempts)}
+    assert "t" in targets.values(), targets
+    # A client can close between pg_stat_activity's snapshot and termination.
+    # Verify even those PIDs are gone; a timed-out, surviving session must fail.
+    ids = ",".join(str(pid) for pid in targets)
+    assert sql(db, f"SELECT count(*) FROM pg_stat_activity WHERE pid IN ({ids})") == "0"
     response = await page.reload(wait_until="domcontentloaded", timeout=10000)
     assert response and response.status == 200
     await expect(download).to_be_visible()
