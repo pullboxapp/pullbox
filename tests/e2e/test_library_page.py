@@ -2,12 +2,23 @@
 
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
+
 import pytest
 from playwright.sync_api import expect
 
+from tests.e2e.conftest import seeded_library_dir
 from tests.e2e.pages.library import LibraryPage
 
 pytestmark = pytest.mark.e2e
+
+
+def _library_json(template: str) -> str:
+    # Paths inside the mock JSON must point at this server's disposable library.
+    root = json.dumps(str(seeded_library_dir()))[1:-1]
+    return template.replace("$LIBRARY", root)
 
 
 class TestLibraryPage:
@@ -90,7 +101,9 @@ class TestLibraryPage:
         library.open_folder("01-batman")
 
         assert library.current_breadcrumb.is_visible()
-        assert library.current_breadcrumb.inner_text().endswith("/01-batman")
+        folder = Path(library.current_breadcrumb.inner_text())
+        assert folder.name == "01-batman"
+        assert folder.resolve().is_relative_to(Path(os.environ["PULLBOX_DATA_DIR"]).resolve())
         assert library.row_text("Batman 001 (2016).cbz").is_visible()
 
     def test_library_context_menu_shows_folder_actions_and_properties_modal(
@@ -137,7 +150,7 @@ class TestLibraryPage:
         seeded_server: str,  # type: ignore[no-untyped-def]
     ) -> None:
         library = LibraryPage(authed_page, seeded_server)
-        library.goto_path("/tmp/pullbox-e2e-library/01-batman")
+        library.goto_path(str(seeded_library_dir() / "01-batman"))
 
         library.right_click_row("Batman 001 (2016).cbz")
 
@@ -153,7 +166,7 @@ class TestLibraryPage:
         seeded_server: str,  # type: ignore[no-untyped-def]
     ) -> None:
         library = LibraryPage(authed_page, seeded_server)
-        library.goto_path("/tmp/pullbox-e2e-library/01-batman")
+        library.goto_path(str(seeded_library_dir() / "01-batman"))
 
         file_row = library.row_text("Batman 001 (2016).cbz")
         file_cell = file_row.locator("td").first
@@ -170,7 +183,7 @@ class TestLibraryPage:
         seeded_server: str,  # type: ignore[no-untyped-def]
     ) -> None:
         library = LibraryPage(authed_page, seeded_server)
-        library.goto_path("/tmp/pullbox-e2e-library/01-batman")
+        library.goto_path(str(seeded_library_dir() / "01-batman"))
 
         library.right_click_row("library-context-test.cbr")
 
@@ -182,7 +195,7 @@ class TestLibraryPage:
         seeded_server: str,  # type: ignore[no-untyped-def]
     ) -> None:
         library = LibraryPage(authed_page, seeded_server)
-        library.goto_path("/tmp/pullbox-e2e-library/01-batman")
+        library.goto_path(str(seeded_library_dir() / "01-batman"))
 
         library.right_click_row("Batman 001 (2016).cbz")
         library.context_action("delete").click()
@@ -249,7 +262,7 @@ class TestLibraryPage:
         seeded_server: str,  # type: ignore[no-untyped-def]
     ) -> None:
         library = LibraryPage(authed_page, seeded_server)
-        library.goto_path("/tmp/pullbox-e2e-library/01-batman")
+        library.goto_path(str(seeded_library_dir() / "01-batman"))
 
         library.right_click_row("Batman 001 (2016).cbz")
         library.context_action("rename").click()
@@ -290,14 +303,14 @@ class TestLibraryPage:
             lambda route: route.fulfill(
                 status=200,
                 content_type="application/json",
-                body="""
-{"status":"ok","kind":"file","source_path":"/tmp/pullbox-e2e-library/01-batman/Batman 001 (2016).cbz","target_path":"/tmp/pullbox-e2e-library/01-batman/Batman cover.cbz"}
-""".strip(),
+                body=_library_json("""
+{"status":"ok","kind":"file","source_path":"$LIBRARY/01-batman/Batman 001 (2016).cbz","target_path":"$LIBRARY/01-batman/Batman cover.cbz"}
+"""),
             ),
         )
 
         library = LibraryPage(authed_page, seeded_server)
-        library.goto_path("/tmp/pullbox-e2e-library/01-batman")
+        library.goto_path(str(seeded_library_dir() / "01-batman"))
 
         library.right_click_row("Batman 001 (2016).cbz")
         library.context_action("rename").click()
@@ -331,9 +344,9 @@ class TestLibraryPage:
             lambda route: route.fulfill(
                 status=200,
                 content_type="application/json",
-                body="""
-{"status":"ok","kind":"folder","source_path":"/tmp/pullbox-e2e-library/01-batman","target_path":"/tmp/pullbox-e2e-library/01-batman deluxe"}
-""".strip(),
+                body=_library_json("""
+{"status":"ok","kind":"folder","source_path":"$LIBRARY/01-batman","target_path":"$LIBRARY/01-batman deluxe"}
+"""),
             ),
         )
 
@@ -372,14 +385,14 @@ class TestLibraryPage:
             lambda route: route.fulfill(
                 status=200,
                 content_type="application/json",
-                body="""
+                body=_library_json("""
 {
   "name":"01-batman",
-  "path":"/tmp/pullbox-e2e-library/01-batman",
+  "path":"$LIBRARY/01-batman",
   "kind":"folder",
   "kind_label":"Folder",
   "root_name":"E2E Library",
-  "root_path":"/tmp/pullbox-e2e-library",
+  "root_path":"$LIBRARY",
   "file_format":null,
   "size_bytes":null,
   "item_count":3,
@@ -417,7 +430,7 @@ class TestLibraryPage:
     "used_pct":null
   }
 }
-""".strip(),
+"""),
             ),
         )
 
@@ -479,7 +492,7 @@ class TestLibraryPage:
             lambda route: route.fulfill(
                 status=200,
                 content_type="application/json",
-                body="""
+                body=_library_json("""
 {
   "target":"folders",
   "scope":"manual",
@@ -487,7 +500,7 @@ class TestLibraryPage:
   "actionable_count":1,
   "items":[
     {
-      "file_path":"/tmp/pullbox-e2e-library/01-batman",
+      "file_path":"$LIBRARY/01-batman",
       "current_name":"01-batman",
       "proposed_name":"Batman (2016)",
       "template_key":"folder_template",
@@ -498,7 +511,7 @@ class TestLibraryPage:
     }
   ]
 }
-""".strip(),
+"""),
             ),
         )
         authed_page.route(
@@ -506,9 +519,9 @@ class TestLibraryPage:
             lambda route: route.fulfill(
                 status=200,
                 content_type="application/json",
-                body="""
-{"status":"ok","kind":"folder","source_path":"/tmp/pullbox-e2e-library/01-batman","target_path":"/tmp/pullbox-e2e-library/Batman (2016)"}
-""".strip(),
+                body=_library_json("""
+{"status":"ok","kind":"folder","source_path":"$LIBRARY/01-batman","target_path":"$LIBRARY/Batman (2016)"}
+"""),
             ),
         )
 
@@ -577,7 +590,7 @@ class TestLibraryPage:
             lambda route: route.fulfill(
                 status=200,
                 content_type="application/json",
-                body="""
+                body=_library_json("""
 {
   "target":"files",
   "scope":"manual",
@@ -585,7 +598,7 @@ class TestLibraryPage:
   "actionable_count":1,
   "items":[
     {
-      "file_path":"/tmp/pullbox-e2e-library/01-batman/Batman 001 (2016).cbz",
+      "file_path":"$LIBRARY/01-batman/Batman 001 (2016).cbz",
       "current_name":"Batman 001 (2016).cbz",
       "proposed_name":"Batman (2016) #001.cbz",
       "template_key":"issue_file_template",
@@ -596,7 +609,7 @@ class TestLibraryPage:
     }
   ]
 }
-""".strip(),
+"""),
             ),
         )
         authed_page.route(
@@ -604,14 +617,14 @@ class TestLibraryPage:
             lambda route: route.fulfill(
                 status=200,
                 content_type="application/json",
-                body="""
-{"status":"ok","kind":"file","source_path":"/tmp/pullbox-e2e-library/01-batman/Batman 001 (2016).cbz","target_path":"/tmp/pullbox-e2e-library/01-batman/Batman (2016) #001.cbz"}
-""".strip(),
+                body=_library_json("""
+{"status":"ok","kind":"file","source_path":"$LIBRARY/01-batman/Batman 001 (2016).cbz","target_path":"$LIBRARY/01-batman/Batman (2016) #001.cbz"}
+"""),
             ),
         )
 
         library = LibraryPage(authed_page, seeded_server)
-        library.goto_path("/tmp/pullbox-e2e-library/01-batman")
+        library.goto_path(str(seeded_library_dir() / "01-batman"))
 
         library.right_click_row("Batman 001 (2016).cbz")
         library.context_action("auto-rename").click()
@@ -744,7 +757,7 @@ class TestLibraryPage:
         seeded_server: str,  # type: ignore[no-untyped-def]
     ) -> None:
         library = LibraryPage(authed_page, seeded_server)
-        library.goto_path("/tmp/pullbox-e2e-library/01-batman")
+        library.goto_path(str(seeded_library_dir() / "01-batman"))
 
         library.right_click_row("Batman 001 (2016).cbz")
         library.context_action("delete").click()
@@ -795,14 +808,14 @@ class TestLibraryPage:
             lambda route: route.fulfill(
                 status=200,
                 content_type="application/json",
-                body="""
+                body=_library_json("""
 {
   "scope":"manual",
   "item_count":1,
   "total_size_bytes":7,
   "items":[
     {
-      "file_path":"/tmp/pullbox-e2e-library/01-batman/library-context-test.cbr",
+      "file_path":"$LIBRARY/01-batman/library-context-test.cbr",
       "source_name":"library-context-test.cbr",
       "source_format":"CBR",
       "output_name":"library-context-test.cbz",
@@ -810,12 +823,12 @@ class TestLibraryPage:
     }
   ]
 }
-""".strip(),
+"""),
             ),
         )
 
         library = LibraryPage(authed_page, seeded_server)
-        library.goto_path("/tmp/pullbox-e2e-library/01-batman")
+        library.goto_path(str(seeded_library_dir() / "01-batman"))
 
         library.right_click_row("library-context-test.cbr")
         library.context_action("convert").click()
@@ -845,14 +858,14 @@ class TestLibraryPage:
             lambda route: route.fulfill(
                 status=200,
                 content_type="application/json",
-                body="""
+                body=_library_json("""
 {
   "scope":"manual",
   "item_count":1,
   "total_size_bytes":7,
   "items":[
     {
-      "file_path":"/tmp/pullbox-e2e-library/01-batman/library-context-test.cbr",
+      "file_path":"$LIBRARY/01-batman/library-context-test.cbr",
       "source_name":"library-context-test.cbr",
       "source_format":"CBR",
       "output_name":"library-context-test.cbz",
@@ -860,7 +873,7 @@ class TestLibraryPage:
     }
   ]
 }
-""".strip(),
+"""),
             ),
         )
         authed_page.route(
@@ -868,14 +881,14 @@ class TestLibraryPage:
             lambda route: route.fulfill(
                 status=200,
                 content_type="application/json",
-                body="""
-{"status":"ok","kind":"file","source_path":"/tmp/pullbox-e2e-library/01-batman/library-context-test.cbr","target_path":"/tmp/pullbox-e2e-library/01-batman/library-context-test.cbz","original_trash_path":"/tmp/pullbox-e2e-library/.trash/01-batman/library-context-test.cbr"}
-""".strip(),
+                body=_library_json("""
+{"status":"ok","kind":"file","source_path":"$LIBRARY/01-batman/library-context-test.cbr","target_path":"$LIBRARY/01-batman/library-context-test.cbz","original_trash_path":"$LIBRARY/.trash/01-batman/library-context-test.cbr"}
+"""),
             ),
         )
 
         library = LibraryPage(authed_page, seeded_server)
-        library.goto_path("/tmp/pullbox-e2e-library/01-batman")
+        library.goto_path(str(seeded_library_dir() / "01-batman"))
 
         library.right_click_row("library-context-test.cbr")
         library.context_action("convert").click()

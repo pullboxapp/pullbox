@@ -310,6 +310,10 @@ _TEST_COVER_PNG = base64.b64decode(
 )
 
 
+def seeded_library_dir() -> Path:
+    return Path(os.environ["PULLBOX_DATA_DIR"]).resolve() / "pullbox-e2e-library"
+
+
 async def _seed_series_library_data() -> None:
     """Seed a small /series dataset so E2E tests exercise real list states."""
     from datetime import UTC, date, datetime
@@ -360,16 +364,17 @@ async def _seed_series_library_data() -> None:
 
         primary_publisher = Publisher(name="DC Comics")
         secondary_publisher = Publisher(name="Image Comics")
+        seed_root = seeded_library_dir()
         library_root = LibraryRoot(
             name="E2E Library",
-            path="/tmp/pullbox-e2e-library",
+            path=str(seed_root),
             enabled=True,
         )
         session.add_all([primary_publisher, secondary_publisher, library_root])
         await session.flush()
 
         comics_directory = await session.get(SystemConfig, "comics_directory")
-        e2e_library_path = str(Path("/tmp/pullbox-e2e-library").resolve())
+        e2e_library_path = str(seed_root)
         if comics_directory is None:
             session.add(
                 SystemConfig(
@@ -391,9 +396,7 @@ async def _seed_series_library_data() -> None:
         ]
 
         for idx, (title, year, status, monitored, publisher) in enumerate(seeded_series, start=1):
-            series_path = Path(
-                f"/tmp/pullbox-e2e-library/{idx:02d}-{title.lower().replace(' ', '-')}"
-            )
+            series_path = seed_root / f"{idx:02d}-{title.lower().replace(' ', '-')}"
             series_path.mkdir(parents=True, exist_ok=True)
             series = Series(
                 title=title,
@@ -725,7 +728,7 @@ async def _seed_series_library_data() -> None:
                     )
                 )
 
-        misc_folder = Path("/tmp/pullbox-e2e-library/99-misc-folder")
+        misc_folder = seed_root / "99-misc-folder"
         misc_folder.mkdir(parents=True, exist_ok=True)
         (misc_folder / "notes.txt").write_text("not tracked", encoding="utf-8")
         (misc_folder / "tracked-note.cbz").write_bytes(b"cbz")
@@ -742,7 +745,7 @@ async def _seed_series_library_data() -> None:
         )
 
         for index in range(90):
-            scroll_folder = Path(f"/tmp/pullbox-e2e-library/zz-scroll-{index:03d}")
+            scroll_folder = seed_root / f"zz-scroll-{index:03d}"
             scroll_folder.mkdir(parents=True, exist_ok=True)
             scroll_file = scroll_folder / "tracked.cbz"
             scroll_file.write_bytes(b"cbz")

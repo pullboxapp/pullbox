@@ -16,6 +16,7 @@ from pullbox.config import get_settings
 from pullbox.database import get_session_factory
 from pullbox.utilities.models import UtilityJob, UtilityJobItem, UtilityJobLog
 from pullbox.utilities.settings import resolve_utility_directory
+from tests.e2e.conftest import seeded_library_dir
 from tests.e2e.pages.utilities import (
     UtilitiesConverterPage,
     UtilitiesDbCheckPage,
@@ -854,20 +855,21 @@ class TestUtilitiesPage:
 
         authed_page.evaluate(
             """
-            () => {
+            (folder) => {
               const root = document.querySelector("[data-testid='utilities-permissions-page']");
               const data = window.Alpine.$data(root);
               data.scope = "folder";
               data.selectedFolders = [
-                { path: "/tmp/pullbox-e2e-library/01-batman", name: "01-batman" }
+                { path: folder, name: "01-batman" }
               ];
-              data.selectedFolder = "/tmp/pullbox-e2e-library/01-batman";
+              data.selectedFolder = folder;
               data.runMode = "apply";
               data.confirmApply = false;
               data.validationError = "";
               data.submitting = false;
             }
-            """
+            """,
+            str(seeded_library_dir() / "01-batman"),
         )
 
         page.start_button.click()
@@ -892,13 +894,13 @@ class TestUtilitiesPage:
         )
         authed_page.evaluate(
             """
-            () => {
+            (folder) => {
               const root = document.querySelector("[data-testid='utilities-permissions-page']");
               const data = window.Alpine.$data(root);
               data.runMode = "apply";
               data.scope = "folder";
               data.selectedFolders = [
-                { path: "/tmp/pullbox-e2e-library/01-batman", name: "01-batman" }
+                { path: folder, name: "01-batman" }
               ];
               data.folderMode = "750";
               data.fileMode = "640";
@@ -908,7 +910,8 @@ class TestUtilitiesPage:
               data.validationError = "";
               data.submitting = false;
             }
-            """
+            """,
+            str(seeded_library_dir() / "01-batman"),
         )
 
         with authed_page.expect_response(
@@ -928,7 +931,7 @@ class TestUtilitiesPage:
             "file_mode": "640",
             "include_folders": True,
             "include_files": True,
-            "file_paths": ["/tmp/pullbox-e2e-library/01-batman"],
+            "file_paths": [str(seeded_library_dir() / "01-batman")],
             "confirm_apply": True,
         }
 
