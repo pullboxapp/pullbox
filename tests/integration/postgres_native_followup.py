@@ -308,9 +308,35 @@ async def exercise(origin, cases, originals, library, db, sql, owned_digest):
             await manual.exercise(page, library, sql, db)
             await series_editor.exercise(page, library, sql, db)
             await propagation.exercise(page, library, sql, db)
+            await _reopen_owned_issue_after_disconnect(page, db, sql, neighbor)
             return catalog_rows
         finally:
             await browser.close()
+
+
+async def _reopen_owned_issue_after_disconnect(page, db, sql, comic):
+    from playwright.async_api import expect
+
+    owned_row = "SELECT id,file_path FROM library_files WHERE issue_id=10017"
+    before = sql(db, owned_row), comic.read_bytes(), comic.stat().st_mtime_ns
+    await page.goto("/issues/10017")
+    download = page.get_by_test_id("issue-action-download")
+    await expect(download).to_have_attribute("href", "/api/v1/issues/10017/download-file")
+
+    # Drop idle connections only in this disposable app database, not running jobs.
+    killed = sql(
+        db,
+        "SELECT pg_terminate_backend(pid, 5000) FROM pg_stat_activity "
+        "WHERE datname=current_database() AND usename='probe_owner' "
+        "AND backend_type='client backend' AND state='idle'",
+    ).splitlines()
+    assert killed and all(result == "t" for result in killed), killed
+    response = await page.reload(wait_until="domcontentloaded", timeout=10000)
+    assert response and response.status == 200
+    await expect(download).to_be_visible()
+    archive = await page.request.get("/api/v1/issues/10017/download-file", timeout=10000)
+    assert archive.ok and await archive.body() == before[1]
+    assert (sql(db, owned_row), comic.read_bytes(), comic.stat().st_mtime_ns) == before
 
 
 if __name__ == "__main__":

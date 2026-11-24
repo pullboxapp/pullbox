@@ -984,6 +984,12 @@ recorded issue and skips one conflict at a time; the neighboring comic and all
 source files must remain unchanged. An import still waiting at Step 3 is a
 preflight blocker, not a resumable PostgreSQL test case.
 
+The same browser opens an owned issue before the rehearsal disconnects the
+test application's idle PostgreSQL sessions. Reloading must work without a new
+login or app restart, and the download must match the original comic bytes.
+This checks recovery from stale pooled connections; it does not test requests
+while PostgreSQL is offline or interrupted writes.
+
 In the same rehearsal, enable a generated read-only GCD catalog in Settings and
 link it to an existing ComicVine series. A fractional issue with the same number
 but no verified GCD identity must block refresh without partial additions. After
