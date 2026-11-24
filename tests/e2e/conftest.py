@@ -1171,7 +1171,7 @@ def _running_live_server() -> Generator[str, None, None]:
         "PULLBOX_LIBRARY_ROOT": str(library_root),
         # The manual-creation E2E module covers the explicit feature-on state.
         "PULLBOX_STORY_ARC_MANUAL_CREATE_ENABLED": "true",
-        # The session-scoped browser suite intentionally sends far more traffic
+        # A browser test module intentionally sends far more traffic
         # than one real client would within a minute. Keep rate limiting active
         # while preventing unrelated E2E modules from exhausting shared quotas.
         "PULLBOX_RATE_LIMIT_ENABLED": "true",
@@ -1269,9 +1269,9 @@ def _running_live_server() -> Generator[str, None, None]:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def live_server() -> Generator[str, None, None]:
-    """Start a live uvicorn server with a fresh database and migrations."""
+    """Keep a module's real migrations, imports and library edits out of other modules."""
     with _running_live_server() as base_url:
         yield base_url
 
@@ -1356,7 +1356,7 @@ def first_run_server() -> Generator[str, None, None]:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def seeded_server(live_server: str) -> Generator[str, None, None]:
     """Seed the live server with test data (admin user, series, issues).
 
@@ -1398,7 +1398,7 @@ def seeded_server(live_server: str) -> Generator[str, None, None]:
 
 @pytest.fixture
 def seeded_reader_state_guard(seeded_server: str) -> Generator[None, None, None]:
-    """Prevent reader mutations from leaking through the session-scoped E2E seed."""
+    """Prevent reader mutations from leaking through the shared module seed."""
     _run_async_blocking(_reset_seeded_reader_state())
     try:
         yield
@@ -1406,7 +1406,7 @@ def seeded_reader_state_guard(seeded_server: str) -> Generator[None, None, None]
         _run_async_blocking(_reset_seeded_reader_state())
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def auth_session_cookie(seeded_server: str) -> dict[str, str]:
     """Return a reusable authenticated session cookie for browser tests."""
     import httpx
@@ -1439,7 +1439,7 @@ def auth_session_cookie(seeded_server: str) -> dict[str, str]:
 def authed_page(page: Page, auth_session_cookie: dict[str, str]) -> Page:
     """A Playwright page that is logged in as the admin user.
 
-    Uses a session-scoped authenticated cookie rather than logging in
+    Uses a cookie belonging to the module's seeded database rather than logging in
     through the API for every test.
     """
     page.context.add_cookies([auth_session_cookie])

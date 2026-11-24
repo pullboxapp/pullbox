@@ -25,7 +25,7 @@ async def _seed(root, namespace, theme, browser_name, add_missing):
     from pullbox.database import get_session_factory
 
     base = (
-        83000000
+        183_000_000  # Separate from Mylar's skip/unmapped fixture range.
         + ["chromium", "firefox", "webkit"].index(browser_name) * 100000
         + ["light", "dark", "tron"].index(theme) * 10000
         + ["metron", "gcd"].index(namespace) * 1000
