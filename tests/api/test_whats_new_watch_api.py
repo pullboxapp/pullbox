@@ -1,7 +1,7 @@
 """Watch is cache-independent intent, not a placeholder library or download."""
 # ruff: noqa: F811 - fixtures imported from the owning discovery tests.
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select
@@ -45,6 +45,72 @@ async def watch(client, cache_id, root_id=None):
     if root_id is not None:
         body["library_root_id"] = root_id
     return await client.post("/api/v1/whats-new/watch", json=body, headers=csrf(client))
+
+
+async def set_series_publication(sec_db, cache_id, state, age_days=0):
+    async with sec_db.begin() as session:
+        row = await session.get(WhatsNewReleaseCache, cache_id)
+        issue = row.payload["issues"][0]
+        series = {
+            **issue["series"],
+            "publication_state": state,
+            "publication_as_of": (datetime.now(UTC).date() - timedelta(days=age_days)).isoformat(),
+        }
+        row.payload = {**row.payload, "issues": [{**issue, "series": series}]}
+
+
+@pytest.mark.parametrize(
+    ("state", "age_days", "can_watch"),
+    [
+        ("published", 0, False),
+        ("unknown", 0, True),
+        ("prepublication", 0, True),
+        ("published", 1, True),
+    ],
+)
+async def test_future_issue_watch_uses_series_publication(
+    authenticated_client, source_add_setup, future_release, sec_db, state, age_days, can_watch
+):
+    selected = await context(authenticated_client, future_release)
+    await set_series_publication(sec_db, future_release, state, age_days)
+    page = await authenticated_client.get("/whats-new")
+    assert 'data-testid="whats-new-find-add"' in page.text
+    lookup = await authenticated_client.get(f"/api/v1/whats-new/resolve/{future_release}/1514020")
+    assert lookup.json()["can_watch"] is can_watch and lookup.json()["can_link"]
+    result = await authenticated_client.post(
+        "/api/v1/whats-new/watch", json={"selection": selected}, headers=csrf(authenticated_client)
+    )
+    assert result.status_code == (200 if can_watch else 409), result.text
+    assert ('@click="startWatch(' in page.text) is can_watch
+    if not can_watch:
+        assert "already published" in result.text and "Find & Add" in result.text
+    async with sec_db() as session:
+        assert await session.scalar(select(func.count()).select_from(SeriesInterest)) == int(
+            can_watch
+        )
+        assert await session.scalar(select(func.count()).select_from(Series)) == 0
+    assert not source_add_setup["calls"] and not source_add_setup["events"]
+
+
+async def test_existing_watch_after_publication_can_be_cancelled_but_not_reopened(
+    authenticated_client, future_release, sec_db
+):
+    saved = (await watch(authenticated_client, future_release)).json()
+    await set_series_publication(sec_db, future_release, "published")
+    repeated = await watch(authenticated_client, future_release)
+    assert repeated.status_code == 200 and repeated.json()["id"] == saved["id"]
+    page = await authenticated_client.get("/whats-new")
+    assert f'@click="cancelWatch({saved["id"]},' in page.text
+    assert 'data-watchable="false"' in page.text
+    cancelled = await authenticated_client.post(
+        f"/api/v1/whats-new/watch/{saved['id']}/cancel", headers=csrf(authenticated_client)
+    )
+    assert cancelled.status_code == 200 and cancelled.json()["state"] == "cancelled"
+    assert (await watch(authenticated_client, future_release)).status_code == 409
+    async with sec_db() as session:
+        assert (
+            await session.get(SeriesInterest, saved["id"])
+        ).state is SeriesInterestState.CANCELLED
 
 
 @pytest.mark.parametrize(

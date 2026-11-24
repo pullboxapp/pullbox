@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
-from datetime import date
+from datetime import UTC, date, datetime
 from functools import cmp_to_key
 from math import ceil
 from typing import TYPE_CHECKING, Annotated, Any, Literal
@@ -20,10 +20,12 @@ from pullbox.core.metadata_identity import MetadataSource
 from pullbox.services.series_interest import active_watches
 from pullbox.services.whats_new_actions import (
     WhatsNewSelectionError,
+    can_offer_watch,
     load_release_selection,
     local_release_series,
     positive_id,
     release_series_id,
+    series_published_as_of,
 )
 from pullbox.services.whats_new_cache_service import WhatsNewCacheService
 from pullbox.services.whats_new_grab import cache_fingerprint, has_grab_capability
@@ -268,6 +270,8 @@ async def _decorate_release_actions(
             session, (r["discovery_series_id"] for r in releases if r["discovery_series_id"])
         )
     }
+    as_of = datetime.now(UTC).date()
+    today = date.today()
     for release, issue_state in zip(releases, issue_states, strict=True):
         release["local_issue"] = issue_state
         if can_grab and issue_state and issue_state.state is ReleaseIssueStatus.MISSING:
@@ -284,11 +288,11 @@ async def _decorate_release_actions(
         if watch is not None:
             release["watch_id"] = watch.id
             release["watch_state"] = watch.state.value
-        store_date = release.get("store_date")
-        release["watchable"] = bool(
-            release["discovery_series_id"]
-            and isinstance(store_date, date)
-            and store_date > date.today()
+        release["watchable"] = can_offer_watch(
+            release["discovery_series_id"],
+            release.get("store_date"),
+            today=today,
+            series_published=series_published_as_of(release.get("series"), as_of),
         )
 
 

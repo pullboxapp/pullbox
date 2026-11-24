@@ -219,6 +219,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- What's New offers **Find & Add**, not a new **Watch**, for future issues of
+  a series the release feed confirms is already published. Existing Watches
+  can still be reviewed or cancelled.
+
 - The supplied Docker Compose files now pass v2 metadata flags from `.env` to
   Pullbox. What's New actions and each paired XML writer can be enabled
   independently; all remain off by default.

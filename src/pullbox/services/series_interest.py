@@ -146,6 +146,8 @@ async def save_watch(
     interest = await find_watch(session, context.locg_series_id)
     if interest is not None and interest.state in ACTIVE_STATES:
         return _check_repeat_destination(interest, root_id)
+    if context.series_published:
+        raise WhatsNewSelectionError("This series is already published. Use Find & Add instead.")
     if interest is None:
         try:
             async with session.begin_nested():

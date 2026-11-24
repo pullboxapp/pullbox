@@ -41,7 +41,8 @@ function seriesWatchActions() {
       try {
         const data = await this.watchRequest(`/api/v1/whats-new/resolve/${cacheId}/${releaseId}`);
         if (this.disposed) return;
-        if (!data.can_watch || data.locg_series_id !== identity) throw new Error('This release changed. Reload before watching it.');
+        if (data.locg_series_id !== identity) throw new Error('This release changed. Reload before watching it.');
+        if (!data.can_watch) throw new Error('Watch is no longer available for this release. Reload or use Find & Add.');
         this.pendingWatch = { selection: data.selection, identity };
         if (data.watch_default_id) {
           await this.savePendingWatch(data.watch_default_id);
@@ -150,6 +151,8 @@ function seriesWatchActions() {
             : this.startWatch(Number(cell.dataset.watchCache), Number(cell.dataset.watchRelease), data.locg_series_id, button));
           nodes.push(button);
           if (cell.contains(this.watchTrigger)) focus = button;
+        } else if (cell.contains(this.watchTrigger)) {
+          focus = cell.closest('[data-discovery-series]')?.querySelector('[data-discovery-find-add]');
         }
         cell.replaceChildren(...nodes);
       }

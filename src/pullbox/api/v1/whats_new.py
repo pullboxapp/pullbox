@@ -36,7 +36,11 @@ from pullbox.services.series_interest import (
     unavailable_watch_destination,
     watch_response,
 )
-from pullbox.services.whats_new_actions import WhatsNewSelectionError, load_release_selection
+from pullbox.services.whats_new_actions import (
+    WhatsNewSelectionError,
+    can_offer_watch,
+    load_release_selection,
+)
 from pullbox.services.whats_new_cache_service import WhatsNewCacheService
 from pullbox.services.whats_new_grab import validate_issue_selection
 from pullbox.services.whats_new_refresh_queue import (
@@ -213,8 +217,11 @@ async def _release_context_response(
         "watch_destination_problem": destination_problem,
         "watch_roots": watch_roots,
         "watch_default_id": default_id,
-        "can_watch": bool(
-            context.locg_series_id and context.store_date and context.store_date > date.today()
+        "can_watch": can_offer_watch(
+            context.locg_series_id,
+            context.store_date,
+            today=date.today(),
+            series_published=context.series_published,
         ),
     }
 

@@ -108,6 +108,37 @@ def test_watch_reload_pull_list_cancel_and_rewatch(watch_page, seeded_server):
     expect(row).to_contain_text("Watching")
 
 
+def test_cancel_watch_after_series_publication_returns_to_find_add(watch_page, seeded_server):
+    page = watch_page
+    page.goto(f"{seeded_server}/whats-new")
+    row = page.get_by_test_id("whats-new-release-row").filter(has_text="Atlas Deluxe")
+    row.get_by_role("button", name="Watch", exact=True).click()
+    expect(row).to_contain_text("Watching")
+
+    async def publish_series():
+        async with get_session_factory().begin() as session:
+            cached = await session.scalar(select(WhatsNewReleaseCache))
+            issues = [
+                {
+                    **release,
+                    "series": {
+                        **release["series"],
+                        "publication_state": "published",
+                        "publication_as_of": datetime.now(UTC).date().isoformat(),
+                    },
+                }
+                for release in cached.payload["issues"]
+            ]
+            cached.payload = {**cached.payload, "issues": issues}
+
+    _run_async_blocking(publish_series())
+    page.reload()
+    row.get_by_role("button", name="Cancel Watch", exact=True).click()
+    expect(row.get_by_role("button", name="Cancel Watch", exact=True)).to_have_count(0)
+    expect(row.get_by_role("button", name="Watch", exact=True)).to_have_count(0)
+    expect(row.get_by_test_id("whats-new-find-add")).to_be_focused()
+
+
 async def publish_watched_fixture(*, publication_confirmed=False):
     factory = get_session_factory()
     async with factory.begin() as session:

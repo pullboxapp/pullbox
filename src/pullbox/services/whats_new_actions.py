@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -67,6 +67,23 @@ def release_series_id(release: dict[str, object]) -> str | None:
     return nested_id or direct_id
 
 
+def series_published_as_of(series: object, as_of: date) -> bool:
+    """Publication describes the series, not the selected issue's store date."""
+    return (
+        isinstance(series, dict)
+        and series.get("publication_state") == "published"
+        and series.get("publication_as_of") == as_of.isoformat()
+    )
+
+
+def can_offer_watch(
+    series_id: str | None, store_date: object, *, today: date, series_published: bool
+) -> bool:
+    return bool(
+        series_id and isinstance(store_date, date) and store_date > today and not series_published
+    )
+
+
 @dataclass(frozen=True)
 class ReleaseSelection:
     selection: WhatsNewSeriesSelection
@@ -75,6 +92,7 @@ class ReleaseSelection:
     publisher: str
     year: int | None
     store_date: date | None
+    series_published: bool
 
 
 async def load_release_selection(
@@ -131,6 +149,7 @@ async def load_release_selection(
     fingerprint = hashlib.sha256(
         json.dumps(context, sort_keys=True, default=str).encode()
     ).hexdigest()
+    as_of = datetime.now(UTC).date()
     return ReleaseSelection(
         WhatsNewSeriesSelection(cache_id=cache_id, release_id=release_id, fingerprint=fingerprint),
         context["locg_series_id"],
@@ -138,6 +157,7 @@ async def load_release_selection(
         context["publisher"],
         context["year"],
         context["store_date"],
+        any(series_published_as_of(release.get("series"), as_of) for release, _ in matches),
     )
 
 
@@ -229,11 +249,7 @@ def published_watch_evidence(
             issue = positive_id(release.get("locg_issue_id"))
             if issue and (other := issue_owners.setdefault(issue, nested)) != nested:
                 disputed.update((other, nested))
-            if (
-                not issue
-                or series.get("publication_state") != "published"
-                or series.get("publication_as_of") != as_of.isoformat()
-            ):
+            if not issue or not series_published_as_of(series, as_of):
                 disputed.add(nested)
             claims = evidence.setdefault(nested, {})
             for namespace in (
