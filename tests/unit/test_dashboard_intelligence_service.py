@@ -656,6 +656,9 @@ class TestBuildDashboard:
         await _seed_dashboard_fixture(db_session)
 
         class _LockedSession:
+            def get_bind(self) -> SimpleNamespace:
+                return SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+
             async def __aenter__(self) -> _LockedSession:
                 return self
 

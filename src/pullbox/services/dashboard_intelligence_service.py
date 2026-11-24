@@ -173,7 +173,11 @@ class DashboardIntelligenceService:
         for attempt in range(_CACHE_WRITE_RETRY_ATTEMPTS):
             async with factory() as session:
                 try:
-                    await session.execute(text("PRAGMA busy_timeout = 1000"))
+                    dialect = session.get_bind().dialect.name
+                    if dialect == "sqlite":
+                        await session.execute(text("PRAGMA busy_timeout = 1000"))
+                    elif dialect == "postgresql":
+                        await session.execute(text("SET LOCAL lock_timeout = '1s'"))
                     await writer(session)
                     await session.commit()
                     return

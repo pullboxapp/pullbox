@@ -171,6 +171,15 @@ def test_new_account_survives_recreating_both_containers(fresh_stack, major):
             page.wait_for_url(url + "/")
             original_id = sql("SELECT id FROM users WHERE username='freshoperator'")
             assert original_id.isdigit()
+            metric_id = sql(
+                "SELECT id FROM dashboard_metric_rollups WHERE metric_key='active_downloads' "
+                "ORDER BY bucket_start DESC LIMIT 1"
+            )
+            storage_id = sql(
+                "SELECT id FROM dashboard_storage_snapshots WHERE total_bytes > 0 "
+                "ORDER BY snapshot_date DESC LIMIT 1"
+            )
+            assert metric_id.isdigit() and storage_id.isdigit(), "Dashboard history was not saved"
             run("down")
             run("up", "-d", "--pull", "never", "--wait", "--wait-timeout", "110")
             url = "http://" + run("port", "pullbox", "8585")
@@ -180,6 +189,11 @@ def test_new_account_survives_recreating_both_containers(fresh_stack, major):
             page.goto(url + "/system?tab=about")
             expect(page.get_by_text(f"PostgreSQL {major}.", exact=False).first).to_be_visible()
             assert sql("SELECT id FROM users WHERE username='freshoperator'") == original_id
+            assert sql(f"SELECT count(*) FROM dashboard_metric_rollups WHERE id={metric_id}") == "1"
+            assert (
+                sql(f"SELECT count(*) FROM dashboard_storage_snapshots WHERE id={storage_id}")
+                == "1"
+            )
             assert not run(
                 "exec",
                 "-T",

@@ -301,8 +301,10 @@ async def test_capture_rollups_loads_and_persists_one_snapshot() -> None:
 
 
 class _CacheSession:
-    def __init__(self, commit_error: Exception | None = None) -> None:
+    def __init__(self, commit_error: Exception | None = None, dialect: str = "sqlite") -> None:
         self.commit_error = commit_error
+        self.get_bind = MagicMock()
+        self.get_bind.return_value.dialect.name = dialect
         self.execute = AsyncMock()
         self.commit = AsyncMock(side_effect=commit_error)
         self.rollback = AsyncMock()
@@ -315,10 +317,16 @@ class _CacheSession:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("dialect", "lock_budget"),
+    [("sqlite", "PRAGMA busy_timeout = 1000"), ("postgresql", "SET LOCAL lock_timeout = '1s'")],
+)
 async def test_best_effort_cache_write_commits_successfully(
     monkeypatch: pytest.MonkeyPatch,
+    dialect: str,
+    lock_budget: str,
 ) -> None:
-    cache_session = _CacheSession()
+    cache_session = _CacheSession(dialect=dialect)
     monkeypatch.setattr(
         "pullbox.database.get_session_factory",
         lambda: lambda: cache_session,
@@ -331,6 +339,8 @@ async def test_best_effort_cache_write_commits_successfully(
     )
 
     writer.assert_awaited_once_with(cache_session)
+    cache_session.execute.assert_awaited_once()
+    assert str(cache_session.execute.await_args.args[0]) == lock_budget
     cache_session.commit.assert_awaited_once()
     cache_session.rollback.assert_not_awaited()
 
