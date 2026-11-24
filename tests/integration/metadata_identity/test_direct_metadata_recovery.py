@@ -227,6 +227,8 @@ async def test_successful_replacement_entrypoints_retire_partial_recovery(
             )
             assert response.issue_id == issue_id
     elif entrypoint == "background":
+        monkeypatch.setattr(issue_import_task, "_issue_import_states", {})
+        monkeypatch.setattr(issue_import_task, "_issue_import_cancel_requests", set())
         monkeypatch.setattr(issue_import_task, "get_session_factory", lambda: factory)
         monkeypatch.setattr(issue_import_task, "_queue_issue_import_progress", AsyncMock())
         await issue_import_task._run_issue_import(issue_id, {"file_path": str(complete)})
