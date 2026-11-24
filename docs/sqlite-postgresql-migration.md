@@ -1,5 +1,9 @@
 # Prepare a SQLite library for PostgreSQL
 
+Already have a SQLite library? This guide preserves it. For a brand-new,
+empty library use the [fresh PostgreSQL install](postgresql-fresh-install.md)
+instead.
+
 Start with the read-only source and destination checks below. A disposable
 rehearsal or a retained **offline staging copy** is a separate, explicit action.
 None of these commands switches your running library.

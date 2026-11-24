@@ -2,7 +2,6 @@
 
 import json
 import os
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -21,21 +20,14 @@ FLAGS = (
 )
 
 
-@pytest.fixture(scope="module")
-def docker_cli():
-    docker = shutil.which("docker")
-    if (
-        not docker
-        or subprocess.run(
-            [docker, "compose", "version"], capture_output=True, timeout=10
-        ).returncode
-    ):
-        pytest.skip("Docker Compose CLI not installed")
-    return docker
-
-
 @pytest.mark.parametrize(
-    "example", ["docker-compose.yml", "docker-compose.dev.yml", "docker-compose.prod-test.yml"]
+    "example",
+    [
+        "docker-compose.yml",
+        "docker-compose.dev.yml",
+        "docker-compose.prod-test.yml",
+        "docker-compose.postgres.yml",
+    ],
 )
 @pytest.mark.parametrize("selected", ["defaults", "blank", "nonexperimental", *FLAGS])
 def test_compose_metadata_flags_are_independent(docker_cli, tmp_path, example, selected):
@@ -43,6 +35,10 @@ def test_compose_metadata_flags_are_independent(docker_cli, tmp_path, example, s
     env = (DOCKER_DIR / ".env.example").read_text()
     enabled = set(FLAGS[:-1]) if selected == "nonexperimental" else {selected} & set(FLAGS)
     env += "\nSHARED_ENV_MARKER=belongs-to-another-service\n"
+    if example == "docker-compose.postgres.yml":
+        env += (
+            "PULLBOX_PG_ADMIN_PASSWORD=render-only-admin\nPULLBOX_PG_APP_PASSWORD=render-only-app\n"
+        )
     for flag in FLAGS:
         if flag in enabled:
             env += f"{flag}=true\n"

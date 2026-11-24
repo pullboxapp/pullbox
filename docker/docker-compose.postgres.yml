@@ -1,0 +1,54 @@
+# Fresh v2 library only. See docs/postgresql-fresh-install.md before starting.
+name: pullbox-pg
+services:
+  db:
+    image: ${PULLBOX_PG_IMAGE:-postgres:18-bookworm}
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${PULLBOX_PG_ADMIN_PASSWORD:?set a private database administrator password}
+      PGDATA: ${PULLBOX_PG_VOLUME_ROOT:-/var/lib/postgresql}/pullbox/cluster
+    volumes:
+      - pgdata:${PULLBOX_PG_VOLUME_ROOT:-/var/lib/postgresql}
+    networks: [database]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres", "-d", "postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  pullbox:
+    image: ${PULLBOX_IMAGE:?select a PostgreSQL-capable Pullbox v2 image}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${PULLBOX_PG_HOST_PORT:-8585}:8585"
+    networks: [default, database]
+    environment:
+      PULLBOX_DB_URL: postgresql+asyncpg://pullbox@db:5432/pullbox
+      PGPASSWORD: ${PULLBOX_PG_APP_PASSWORD:?set the dedicated pullbox role password}
+      PULLBOX_LIBRARY_ROOT: /comics
+      PULLBOX_COVERS_DIR: /comics/.covers
+      PULLBOX_METADATA_WHATS_NEW_ACTIONS_ENABLED: "${PULLBOX_METADATA_WHATS_NEW_ACTIONS_ENABLED:-false}"
+      PULLBOX_METADATA_PAIRED_IMPORT_WRITER_ENABLED: "${PULLBOX_METADATA_PAIRED_IMPORT_WRITER_ENABLED:-false}"
+      PULLBOX_METADATA_PAIRED_CONVERSION_WRITER_ENABLED: "${PULLBOX_METADATA_PAIRED_CONVERSION_WRITER_ENABLED:-false}"
+      PULLBOX_METADATA_PAIRED_DOWNLOAD_WRITER_ENABLED: "${PULLBOX_METADATA_PAIRED_DOWNLOAD_WRITER_ENABLED:-false}"
+      PULLBOX_METADATA_PAIRED_DIRECT_WRITER_ENABLED: "${PULLBOX_METADATA_PAIRED_DIRECT_WRITER_ENABLED:-false}"
+      PULLBOX_METADATA_GCD_API_V2_ENABLED: "${PULLBOX_METADATA_GCD_API_V2_ENABLED:-false}"
+    volumes:
+      - appdata:/data
+      - comics:/comics
+      - downloads:/downloads
+      - imports:/imports
+
+networks:
+  default: {}
+  database:
+    internal: true
+
+volumes:
+  pgdata: {}
+  appdata: {}
+  comics: {}
+  downloads: {}
+  imports: {}

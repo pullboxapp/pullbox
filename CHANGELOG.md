@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A [fresh PostgreSQL installation guide](docs/postgresql-fresh-install.md)
+  and standalone Docker Compose example keep new libraries separate from
+  existing SQLite installations. The default SQLite setup is unchanged.
+
 - Open **Find & Add** directly from a watched series on the Pull List. The
   finder uses the Watch's exact series ID, even when a release title changes.
   You still choose the provider result and approve Add before the library changes.

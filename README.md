@@ -99,6 +99,11 @@ inside Pullbox.
 
 ### Docker Compose
 
+SQLite is the default. For a new v2 library, you can instead
+[start with PostgreSQL](docs/postgresql-fresh-install.md). If you already have
+a SQLite library, follow the [migration guide](docs/sqlite-postgresql-migration.md);
+changing the database URL alone does not move your library.
+
 If you do not have a shared Docker Compose `.env` file, copy the production
 .env example and edit the paths:
 
