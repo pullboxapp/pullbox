@@ -225,12 +225,18 @@ def watched_release_id(payload: dict[str, object], identity: str) -> int | None:
     return None
 
 
-def published_watch_evidence(
-    *payloads: dict[str, object], as_of: date
-) -> dict[str, dict[IdentityNamespace, str]]:
-    """Agree across both feeds; a scheduled issue date cannot prove publication."""
+@dataclass(frozen=True)
+class ReleaseSeriesEvidence:
+    claims: dict[str, dict[IdentityNamespace, str]]
+    published: set[str]
+    series_by_native_id: dict[tuple[IdentityNamespace, str], str]
+
+
+def release_series_evidence(*payloads: dict[str, object], as_of: date) -> ReleaseSeriesEvidence:
+    """Identity and publication are separate facts; neither comes from a title or store date."""
     evidence: dict[str, dict[IdentityNamespace, str]] = {}
     disputed: set[str] = set()
+    not_published: set[str] = set()
     issue_owners: dict[str, str] = {}
     provider_owners: dict[tuple[IdentityNamespace, str], str] = {}
     for payload in payloads:
@@ -249,8 +255,10 @@ def published_watch_evidence(
             issue = positive_id(release.get("locg_issue_id"))
             if issue and (other := issue_owners.setdefault(issue, nested)) != nested:
                 disputed.update((other, nested))
-            if not issue or not series_published_as_of(series, as_of):
+            if not issue:
                 disputed.add(nested)
+            if not series_published_as_of(series, as_of):
+                not_published.add(nested)
             claims = evidence.setdefault(nested, {})
             for namespace in (
                 IdentityNamespace.COMICVINE,
@@ -268,7 +276,18 @@ def published_watch_evidence(
                     owner = provider_owners.setdefault((namespace, str(value)), nested)
                     if owner != nested:
                         disputed.update((owner, nested))
-    return {identity: claims for identity, claims in evidence.items() if identity not in disputed}
+                        provider_owners[namespace, str(value)] = ""
+    consistent = {
+        identity: claims for identity, claims in evidence.items() if identity not in disputed
+    }
+    return ReleaseSeriesEvidence(consistent, consistent.keys() - not_published, provider_owners)
+
+
+def published_watch_evidence(
+    *payloads: dict[str, object], as_of: date
+) -> dict[str, dict[IdentityNamespace, str]]:
+    evidence = release_series_evidence(*payloads, as_of=as_of)
+    return {key: claims for key, claims in evidence.claims.items() if key in evidence.published}
 
 
 async def validate_release_selection(

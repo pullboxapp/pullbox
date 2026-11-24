@@ -219,6 +219,30 @@ async def test_exact_add_is_operator_only_and_browser_cannot_substitute_ids(
     assert not source_add_setup["calls"]
 
 
+async def test_submitted_offer_cannot_override_conflicting_local_owner(
+    authenticated_client, published, source_add_setup, sec_db
+):
+    selected = await offer(authenticated_client)
+    async with sec_db.begin() as db:
+        series = Series(title="Other edition", sort_title="other edition")
+        db.add(series)
+        await db.flush()
+        for ns, external in [("metron", "8"), ("locg", "222")]:
+            db.add(
+                SeriesExternalIdentity(
+                    series_id=series.id,
+                    identity_namespace=ns,
+                    external_id=external,
+                    verification_state="verified",
+                    evidence_kind="user_selection",
+                )
+            )
+    assert await offer(authenticated_client) is None
+    response = await submit(authenticated_client, selected)
+    assert response.status_code == 409
+    assert not source_add_setup["calls"]
+
+
 @pytest.mark.parametrize("change", ["other_feed", "setting", "catalog_disagrees"])
 async def test_exact_add_rechecks_evidence_after_provider_read(
     authenticated_client, sec_db, published, source_add_setup, monkeypatch, change

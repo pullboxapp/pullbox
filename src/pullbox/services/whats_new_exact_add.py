@@ -24,13 +24,15 @@ from pullbox.services.metadata_series_add import source_series_add_transaction
 from pullbox.services.metadata_sources import read_source_policies
 from pullbox.services.series_interest import ACTIVE_STATES, find_watch
 from pullbox.services.whats_new_actions import (
+    ReleaseSeriesEvidence,
     WhatsNewSelectionError,
     link_confirmed_release,
     load_release_selection,
-    published_watch_evidence,
+    release_series_evidence,
 )
 from pullbox.services.whats_new_cache_service import WhatsNewCacheService
 from pullbox.services.whats_new_grab import cache_fingerprint
+from pullbox.services.whats_new_library_matches import native_library_matches
 from pullbox.services.whats_new_watch_add import fetch_published_catalog
 
 if TYPE_CHECKING:
@@ -55,21 +57,22 @@ class ExactOffer:
         return hashlib.sha256(json.dumps(evidence, sort_keys=True).encode()).hexdigest()
 
 
-async def release_offers(
-    session: AsyncSession, rows: list[WhatsNewReleaseCache], ids: set[str], *, lock: bool = False
-) -> dict[str, ExactOffer]:
+async def current_release_evidence(rows: list[WhatsNewReleaseCache]) -> ReleaseSeriesEvidence:
     cache = WhatsNewCacheService()
     now = datetime.now(UTC)
-    if (
-        not ids
-        or len(rows) != 2
-        or any(row.fetched_at > now or cache.is_stale(row) for row in rows)
-    ):
-        return {}
-    evidence = await asyncio.to_thread(
-        published_watch_evidence, *(row.payload for row in rows), as_of=now.date()
+    if len(rows) != 2 or any(row.fetched_at > now or cache.is_stale(row) for row in rows):
+        return ReleaseSeriesEvidence({}, set(), {})
+    return await asyncio.to_thread(
+        release_series_evidence, *(row.payload for row in rows), as_of=now.date()
     )
-    matches = {identity: evidence[identity] for identity in ids if evidence.get(identity)}
+
+
+async def release_offers(
+    session: AsyncSession, evidence: ReleaseSeriesEvidence, ids: set[str], *, lock: bool = False
+) -> dict[str, ExactOffer]:
+    matches = {
+        key: evidence.claims[key] for key in ids & evidence.published if evidence.claims[key]
+    }
     if not matches:
         return {}
     query = (
@@ -149,7 +152,11 @@ async def _validate(
     locg = selected.locg_series_id
     if not locg or not selected.series_published:
         raise WhatsNewSelectionError("Publication is no longer confirmed. Use Find & Add.")
-    options = await release_offers(session, [current, upcoming], {locg}, lock=lock)
+    evidence = await current_release_evidence([current, upcoming])
+    local = await native_library_matches(session, evidence, {locg})
+    if locg in local and local[locg] is None:
+        raise WhatsNewSelectionError("Local provider links disagree. Use Find & Add.")
+    options = await release_offers(session, evidence, {locg}, lock=lock)
     offer = options.get(locg)
     payload = current.payload if submitted.cache_id == current.id else upcoming.payload
     if not offer:

@@ -18,6 +18,13 @@ release ID is discovery evidence, never a canonical issue ID.
 **Find & Add** remains available when evidence is sparse or changes. An
 active Watch retains its own destination and confirmation workflow.
 
+An existing series can show **Tracked** or **Paused** without a saved LOCG
+link: a fresh release feed must agree with a verified ComicVine, Metron or
+GCD series ID in the library. This read does not need a configured provider
+or import destination and does not save links or change monitoring. **Confirm
+series link** opens the explicit selection workflow. Until the LOCG series
+link is confirmed, the badge alone cannot identify an issue or offer **Grab**.
+
 ## Admission
 
 The series must already own a verified LOCG series identity, established by exact

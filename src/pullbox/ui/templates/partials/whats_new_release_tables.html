@@ -142,22 +142,23 @@
                   {% endif %}
                 </div>
                 {% endif %}
-              {% elif release.discovery_release_id %}
+              {% endif %}
+              {% if release.discovery_release_id and (not release.local_series or release.native_series_match) %}
                 {% if release.exact_offer %}
                 <button type="button" class="btn-primary btn-sm whitespace-nowrap" data-release-offer='{{ release.exact_offer|tojson }}'
                         :disabled="watchBusy || adding" @click="addExactRelease($el)">Add Series</button>
                 {% endif %}
                 <button type="button" class="btn-ghost btn-sm whitespace-nowrap" data-testid="whats-new-find-add" data-discovery-find-add
-                        @click="findRelease({{ release.discovery_cache_id }}, {{ release.discovery_release_id }}, $el)">Find &amp; Add</button>
+                        @click="findRelease({{ release.discovery_cache_id }}, {{ release.discovery_release_id }}, $el)">{{ 'Confirm series link' if release.native_series_match else 'Find & Add' }}</button>
                 <span data-discovery-watch="{{ release.discovery_series_id or '' }}" data-watch-cache="{{ release.discovery_cache_id }}" data-watch-release="{{ release.discovery_release_id }}" data-watchable="{{ 'true' if release.watchable else 'false' }}">
                   {% if release.watch_id %}
                   <span class="badge badge-muted">{{ 'Needs confirmation' if release.watch_state == 'needs_confirmation' else 'Watching' }}</span>
                   <button type="button" class="btn-ghost btn-sm whitespace-nowrap" :disabled="watchBusy" @click="cancelWatch({{ release.watch_id }}, '{{ release.discovery_series_id }}', $el)">Cancel Watch</button>
-                  {% elif release.watchable %}
+                  {% elif release.watchable and not release.local_series %}
                   <button type="button" class="btn-ghost btn-sm" :disabled="watchBusy" @click="startWatch({{ release.discovery_cache_id }}, {{ release.discovery_release_id }}, '{{ release.discovery_series_id }}', $el)">Watch</button>
                   {% endif %}
                 </span>
-              {% else %}
+              {% elif not release.local_series %}
                 <span class="text-pb-text-dim">Release details unavailable</span>
               {% endif %}
             </td>

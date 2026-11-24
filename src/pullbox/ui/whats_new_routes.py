@@ -28,9 +28,10 @@ from pullbox.services.whats_new_actions import (
     series_published_as_of,
 )
 from pullbox.services.whats_new_cache_service import WhatsNewCacheService
-from pullbox.services.whats_new_exact_add import release_offers
+from pullbox.services.whats_new_exact_add import current_release_evidence, release_offers
 from pullbox.services.whats_new_grab import cache_fingerprint, has_grab_capability
 from pullbox.services.whats_new_issue_state import ReleaseIssueStatus, local_release_issues
+from pullbox.services.whats_new_library_matches import native_library_matches
 from pullbox.ui.series_routes import _request_search_cache, load_add_series_search_context
 
 if TYPE_CHECKING:
@@ -278,16 +279,16 @@ async def _decorate_release_actions(
     }
     as_of = datetime.now(UTC).date()
     today = date.today()
-    candidates = {
+    unresolved = {
         r["discovery_series_id"]
         for r in releases
         if r["discovery_release_id"]
         and r["discovery_series_id"]
         and r["discovery_series_id"] not in owners
-        and r["discovery_series_id"] not in watches
-        and series_published_as_of(r.get("series"), as_of)
     }
-    offers = await release_offers(session, feeds, candidates)
+    evidence = await current_release_evidence(feeds if unresolved else [])
+    native = await native_library_matches(session, evidence, unresolved)
+    offers = await release_offers(session, evidence, unresolved - native.keys() - watches.keys())
     for release, issue_state in zip(releases, issue_states, strict=True):
         release["local_issue"] = issue_state
         if can_grab and issue_state and issue_state.state is ReleaseIssueStatus.MISSING:
@@ -300,6 +301,11 @@ async def _decorate_release_actions(
         series = owners.get(release["discovery_series_id"])
         if series is not None:
             release["local_series"] = {"id": series.id, "monitored": series.monitored}
+        elif release["discovery_release_id"] and (
+            badge := native.get(release["discovery_series_id"])
+        ):
+            release["local_series"] = badge
+            release["native_series_match"] = True
         watch = watches.get(release["discovery_series_id"])
         if (
             (offer := offers.get(release["discovery_series_id"]))

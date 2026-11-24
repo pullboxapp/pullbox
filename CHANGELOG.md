@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a confirmed provider ID and a default managed library. It uses your
   usual monitoring setting. **Find & Add** stays available when an ID is
   missing or you want to choose the match yourself.
+  A release that matches a verified provider ID already in your library now
+  shows **Tracked** or **Paused**, even before you confirm its LOCG series link.
 
 - A [fresh PostgreSQL installation guide](docs/postgresql-fresh-install.md)
   and standalone Docker Compose example keep new libraries separate from

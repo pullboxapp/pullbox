@@ -10,7 +10,7 @@ from sqlalchemy import select
 
 from pullbox.core.events import EventBus
 from pullbox.database import get_session_factory
-from pullbox.models import LibraryRoot
+from pullbox.models import LibraryRoot, Series, SeriesExternalIdentity
 from pullbox.models.whats_new import WhatsNewReleaseCache
 from pullbox.providers.metadata import sources
 from pullbox.services import whats_new_refresh_queue
@@ -113,3 +113,51 @@ def test_add_published_series_in_place(
         == 204
     )
     path.rmdir()
+
+
+def test_existing_native_owner_opens_locally_without_guessing_the_issue(
+    release_page,  # noqa: F811
+    seeded_server,
+):
+    async def seed():
+        async with get_session_factory().begin() as db:
+            row = await WhatsNewCacheService().get_latest_current_week(db)
+            row.fetched_at = datetime.now(UTC)
+            release, *others = row.payload["issues"]
+            row.payload = {
+                **row.payload,
+                "issues": [
+                    {**release, "series": {**release["series"], "metron_series_id": 810002}},
+                    *others,
+                ],
+            }
+            await WhatsNewCacheService().upsert_upcoming(db, payload={"weeks": []})
+            owner = Series(title="Native edition", sort_title="native edition", monitored=False)
+            db.add(owner)
+            await db.flush()
+            db.add(
+                SeriesExternalIdentity(
+                    series_id=owner.id,
+                    identity_namespace="metron",
+                    external_id="810002",
+                    verification_state="verified",
+                    evidence_kind="user_selection",
+                )
+            )
+            return owner.id
+
+    owner_id = _run_async_blocking(seed())
+    page = release_page
+    page.goto(f"{seeded_server}/whats-new")
+    row = page.get_by_test_id("whats-new-release-row").filter(has_text="Atlas Deluxe")
+    expect(row.get_by_text("Paused", exact=True)).to_be_visible()
+    expect(row.get_by_role("button", name="Confirm series link")).to_be_visible()
+    expect(row.get_by_role("button", name="Grab", exact=True)).to_have_count(0)
+    link = row.get_by_role("link", name="Added", exact=True)
+    expect(link).to_have_attribute("href", f"/series/{owner_id}")
+    link.press("Enter")
+    expect(page).to_have_url(f"{seeded_server}/series/{owner_id}")
+    assert page.request.delete(
+        f"{seeded_server}/api/v1/series/{owner_id}",
+        headers={"X-CSRF-Token": page.evaluate("readCsrfTokenFromBody()")},
+    ).ok
