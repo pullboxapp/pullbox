@@ -1073,6 +1073,35 @@ the user or series removes its bookmarks. Diagnostic DB copies strip all three
 tables' private reading data. Neither bookmark migration infers order from
 existing progress or permits downgrading away stored bookmarks.
 
+**How to check workflow parity.** The metadata integration suite exercises the
+checkout against a real database. It complements the packaged install and
+migration gate above; one cannot substitute for the other. For each PostgreSQL
+major, provision a fresh disposable database named `pullbox_metadata_contract_test`
+owned by a non-superuser test role. Set `PULLBOX_METADATA_TEST_POSTGRES_URL` to
+its `postgresql+asyncpg` URL in the test environment, **never** to a live library.
+The fixture creates and drops a separate schema per test; it does not run Alembic.
+Set `report` to a JUnit output path outside the checkout, one per major:
+
+```sh
+pytest tests/integration/metadata_identity -k postgresql -rs --junitxml="$report"
+```
+
+Check that PostgreSQL cases actually ran: an unset URL skips them. Put native
+`unrar` on `PATH` for CBR import, download, conversion and recovery cases. The
+two private House of M pack rehearsals additionally require the original files
+via `PULLBOX_HOUSE_OF_M_FIXTURE_DIR`. Report any skips by name; generated pack
+tests cover the same issue selections but do not establish that the private
+files were exercised.
+
+At application revision `1d86774e` (2026-11-24), PostgreSQL 16.16 and 18.6
+each passed the same 1,961 of 1,963 cases with Python 3.14.7 and asyncpg 0.32.0.
+There were no failures; only the two private-file cases above were skipped on
+each major. On 16, 20 native archive cases passed in a separate rerun with
+UnRAR available. Coverage included linked catalog extension, paired XML
+editing, import and download recovery, reader bookmarks, and What's New
+Grab and Watch. This was a local integration run, not a hosted release gate
+or evidence of whole-product parity under load.
+
 ### 6.1 Alembic Rules
 
 **Current Pullbox implementation**
