@@ -1031,6 +1031,15 @@ change together without altering its pages or any unselected file. A second
 preview must show the edited issue as current, the other managed issue as ready,
 and the kept-in-place issue as ineligible. Recheck ownership after native restore.
 
+The same migrated series contains two embedded alternate publication titles
+with the same text but different languages and IDs. From the blocked comic,
+open the series editor, keep both entries, add a new title, and save to the
+library only. No file should change until a fresh preview and explicit approval.
+Only the selected comic's `MetronInfo.xml` should change: both existing IDs
+stay with their original languages, and the new title has no ID. After restoring
+the native backup, check that the saved series values and their manual override
+still agree with the selected comic.
+
 Story Arc reader bookmarks are unique per user and arc. A bookmark
 stores the stable membership and the issue the user actually read, not a page
 number or a sequence offset. Progress remains in `issue_reader_states`.

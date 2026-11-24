@@ -505,6 +505,7 @@ async def test_recheck_original_source_and_reviewed_target(
                     manual.verify(sql, restored, refreshed=True)
                     series_editor.verify(sql, restored, copied)
                     propagation.verify(sql, restored, copied)
+                    propagation.verify_publication_titles(sql, restored, copied)
                     assert sql(restored, stat_query) == last_run
                 assert (
                     sql(restored, "SELECT name FROM story_arcs WHERE id=55")
