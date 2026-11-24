@@ -4,7 +4,7 @@ function seriesMetadataEditor(seriesId) {
   return {
     open: false, busy: false, checkingJob: true, error: "", preview: null, drafts: {},
     mode: "library_and_sidecars", allFields: false, reviewedInputs: null,
-    unconfirmed: null, savedValues: null,
+    unconfirmed: null, savedValues: null, nextTitleRow: 0,
     job: null, librarySaved: false, jobTargets: [], jobWarnings: [], partial: false, retryable: false,
     trigger: null, timer: null, generation: 0, jobGeneration: 0, disposed: false,
     init() { this.loadJob().finally(() => { this.checkingJob = false; }); },
@@ -35,6 +35,12 @@ function seriesMetadataEditor(seriesId) {
       if (this.trigger && this.trigger.isConnected) this.trigger.focus({ preventScroll: true });
     },
     invalidate() { this.reviewedInputs = null; },
+    titleRow(title = {}) { return { key: ++this.nextTitleRow, name: title.name || "", language: title.language || "en" }; },
+    moveTitle(rows, index, step) {
+      const next = index + step;
+      if (this.busy || next < 0 || next >= rows.length) return;
+      rows.splice(next, 0, rows.splice(index, 1)[0]); this.invalidate();
+    },
     fields() {
       return (this.preview ? this.preview.editor_fields : []).filter(field => this.allFields || field.changed ||
         (field.sources || []).some(source => source.value !== field.current) ||
@@ -69,6 +75,7 @@ function seriesMetadataEditor(seriesId) {
         let edit;
         if (draft.source === "custom") {
           let value = draft.value;
+          if (field.input_type === "titles") value = value.map(row => ({ name: row.name.trim(), language: row.language.trim().toLowerCase() }));
           if (field.input_type === "number" && String(value).trim() && Number.isSafeInteger(Number(value))) value = Number(value);
           edit = { action: "set", value: value };
         } else if (["library", "clear", "reset"].includes(draft.source)) edit = { action: draft.source };
@@ -87,6 +94,12 @@ function seriesMetadataEditor(seriesId) {
       this.busy = true; this.error = ""; this.invalidate();
       const body = reset ? { mode: this.mode, edits: {} } : this.inputs();
       const signature = JSON.stringify(body);
+      const titles = body.edits.publication_titles;
+      if (titles?.action === "set" && (!titles.value.length || titles.value.some(row => !row.name || !/^[a-z]{2}$/.test(row.language)))) {
+        this.error = "Enter a title and a two-letter language for each row, or choose Clear value to remove all titles.";
+        this.busy = false;
+        return;
+      }
       const missingChoice = (this.preview ? this.preview.editor_fields : []).find(field => {
         const edit = body.edits[field.key.slice(7)];
         return field.options.length && edit && edit.action === "set" && !field.options.some(option => option.value === edit.value);
@@ -110,7 +123,9 @@ function seriesMetadataEditor(seriesId) {
           this.drafts = {}; this.allFields = false;
           data.editor_fields.filter(field => field.editable).forEach(field => {
             const hasLibrary = this.sourceOptions(field).some(option => option.value === "library");
-            this.drafts[field.key] = { selected: false, source: hasLibrary ? "library" : "unchanged", value: field.current };
+            const value = field.input_type === "titles"
+              ? (field.title_draft?.length ? field.title_draft : [{}]).map(row => this.titleRow(row)) : field.current;
+            this.drafts[field.key] = { selected: false, source: hasLibrary ? "library" : "unchanged", value };
           });
         }
         this.job = null; this.librarySaved = false; this.jobTargets = []; this.jobWarnings = []; this.retryable = false; this.partial = false;

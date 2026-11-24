@@ -176,6 +176,20 @@ async def test_editor_stale_approval_and_csrf_fail_without_saving(
         {"status": {"action": "set", "value": "bogus"}},
         {"series_type": {"action": "set", "value": "bogus"}},
         {"volume": {"action": "reset", "value": "injected"}},
+        {"title": {"action": "set", "value": [{"name": "The Harbor", "language": "en"}]}},
+        *[
+            {"publication_titles": {"action": "set", "value": value}}
+            for value in (
+                [],
+                [{"name": "Name"}],
+                [{"name": "Name", "language": "en-US"}],
+                [{"name": "Name", "language": "en", "id": 12}],
+                [{"name": "Line\nbreak", "language": "en"}],
+                [{"name": "4050-12345", "language": "en"}],
+                [{"name": "Name", "language": "en"}, {"name": "NAME", "language": "en"}],
+                [{"name": str(i), "language": "en"} for i in range(129)],
+            )
+        ],
     ],
 )
 async def test_protected_or_invalid_fields_are_rejected(

@@ -70,6 +70,7 @@ preview; there is no need to contact a provider or repeat the catalog refresh.
 | Archive format | Publication format, distinct from Pullbox's internal series type |
 | Volume and language | Canonical baseline and sidecar; no member comic propagation |
 | Total volumes | Positive number of volumes, not the volume number or catalog issue count. Saving updates only the chosen library/sidecar destinations. |
+| Alternate publication titles | Ordered title/language pairs (for example, `Le Port` / `fr`). Save to the library only or also to the verified Pullbox snapshot in `series.json`. Reordering, clearing or restoring these titles does not change matching aliases, provider identities or comic files. |
 | Issue count | Protected catalog value; editing metadata cannot create catalog rows |
 | Provider IDs and cover artwork | Protected; use validated provider linking or artwork workflow |
 | Aliases and safe custom JSON | Preserved; not a raw JSON editor |

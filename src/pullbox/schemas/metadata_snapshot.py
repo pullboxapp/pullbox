@@ -38,6 +38,7 @@ from pullbox.schemas.metadata_issue_prices import IssuePriceList
 from pullbox.schemas.metadata_issue_universes import IssueUniverseList
 from pullbox.schemas.metadata_labels import IssueLabels, MetronTitleList
 from pullbox.schemas.metadata_sources import MetadataDomain
+from pullbox.schemas.series_publication_titles import SeriesPublicationTitles
 
 type EmbeddedDocument = Literal["ComicInfo.xml", "MetronInfo.xml"]
 
@@ -77,6 +78,9 @@ class MetadataValues(BaseModel):
 
     title: str | None = Field(default=None, max_length=MAX_TITLE_LENGTH)
     sort_title: str | None = Field(default=None, max_length=500)
+    publication_titles: SeriesPublicationTitles | None = Field(
+        default=None, exclude_if=lambda v: v is None
+    )
     publisher: str | None = Field(default=None, max_length=255)
     description: str | None = Field(default=None, max_length=200000)
     year_start: int | None = Field(default=None, ge=1, le=9999, strict=True)

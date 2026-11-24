@@ -609,6 +609,21 @@ def test_editor_real_api_previews_typed_library_only_corrections(authed_page, se
     dialog.get_by_label("New Description", exact=True).fill("A corrected series description.")
     _source(page, dialog, "Total volumes", "Enter correction")
     dialog.get_by_label("New Total volumes", exact=True).fill("7")
+    _source(page, dialog, "Alternate publication titles", "Enter correction")
+    dialog.get_by_label("Publication title 1", exact=True).fill("Le Port")
+    dialog.get_by_label("Title language 1", exact=True).fill("fr")
+    dialog.get_by_role("button", name="Add publication title").click()
+    dialog.get_by_label("Publication title 2", exact=True).fill("The Harbor")
+    expect(dialog.get_by_label("Title language 2", exact=True)).to_have_value("en")
+    dialog.get_by_role("button", name="Move publication title 2 up").click()
+    expect(dialog.get_by_label("Publication title 1", exact=True)).to_have_value("The Harbor")
+    dialog.get_by_role("button", name="Move publication title 1 down").click()
+    dialog.get_by_role("button", name="Add publication title").click()
+    dialog.get_by_role("button", name="Update preview", exact=True).click()
+    expect(
+        dialog.get_by_text("Enter a title and a two-letter language", exact=False)
+    ).to_be_visible()
+    dialog.get_by_role("button", name="Remove publication title 3").click()
     _source(page, dialog, "Status", "Enter correction")
     dialog.get_by_role("button", name="New Status", exact=True).click()
     page.get_by_role("option", name="Ended", exact=True).click()
@@ -617,6 +632,12 @@ def test_editor_real_api_previews_typed_library_only_corrections(authed_page, se
     assert response.value.status == 200
     body = response.value.json()
     assert body["mode"] == "library_only" and body["targets"] == []
+    assert (
+        next(f for f in body["editor_fields"] if f["key"] == "series.publication_titles")[
+            "proposed"
+        ]
+        == "Le Port (fr)\nThe Harbor (en)"
+    )
     assert (
         next(f for f in body["editor_fields"] if f["key"] == "series.volume_count")["proposed"]
         == "7"

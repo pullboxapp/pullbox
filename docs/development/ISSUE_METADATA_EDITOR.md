@@ -143,7 +143,7 @@ does not authorize dropping preserved data or writing to a new field on import.
 | Metron LastModified | **All fields** shows the source timestamp from the XML. This is not the release date or the file modification time. |
 | Metron resource IDs | **All fields** counts entries with IDs, such as credits and tags. Series and issue provider identities are excluded. IDs cannot be assigned by position or inferred from a renamed label. |
 | Metron Series/VolumeCount | Use **Total volumes** in the series editor. Updating selected comic files is a separate series action. |
-| Metron Series/AlternativeNames | Series-wide descriptive names, not issue-only overrides. |
+| Metron Series/AlternativeNames | Edit descriptive names and languages in the series editor under **Alternate publication titles**. Saving there updates the library and optionally `series.json`; propagation of these titles to embedded XML is not implemented. |
 
 These three archive summaries are read-only. They do not appear in **Differences**,
 are never selected by **Select all eligible**, and do not create import conflicts.

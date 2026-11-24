@@ -32,6 +32,7 @@ from pullbox.schemas.series_metadata_editor import (
     SeriesMetadataEditorReview,
     SeriesMetadataEditorSource,
 )
+from pullbox.schemas.series_publication_titles import SeriesPublicationTitle
 from pullbox.services.archive_metadata_binding import ArchiveMetadataBindingError
 from pullbox.services.library_mutation_coordination import (
     finish_short_mutation,
@@ -59,6 +60,7 @@ from pullbox.utilities.models import ItemState, JobType, UtilityJob, UtilityJobI
 FIELDS = {
     "title": ("Title", "text"),
     "sort_title": ("Sort title", "text"),
+    "publication_titles": ("Alternate publication titles", "titles"),
     "publisher": ("Publisher", "text"),
     "description": ("Description", "textarea"),
     "year_start": ("Start year", "number"),
@@ -99,6 +101,8 @@ PLAN = TypeAdapter(SeriesEditorPlan)
 
 
 def _display(value: object) -> str:
+    if isinstance(value, tuple) and all(isinstance(v, SeriesPublicationTitle) for v in value):
+        return "\n".join(f"{v.name} ({v.language})" for v in value)
     return "" if value is None else str(value)
 
 
@@ -206,6 +210,9 @@ def _saved_sources(
                     "status": {"status", "series_status"},
                 }
                 for field in FIELDS:
+                    # Only a verified Pullbox snapshot defines localized titles.
+                    if field == "publication_titles":
+                        continue
                     found = [
                         value
                         for key, value in layer.items()
@@ -320,7 +327,7 @@ async def prepare_series_editor(
         )
     )
     original = targets
-    values = snapshot.values.model_dump()
+    values = {key: getattr(snapshot.values, key) for key in MetadataValues.model_fields}
     origins = {origin.field: origin for origin in snapshot.origins}
     field_sources = saved_field_sources(state.series)
     fields = []
@@ -378,6 +385,12 @@ async def prepare_series_editor(
                 current_source_label=field_sources.get(field),
                 proposed=_display(values.get(field)),
                 input_type=input_type,
+                title_draft=(state.series.values.publication_titles or ())
+                if field == "publication_titles"
+                else (),
+                reason="These titles do not change the alternate names used for search and import."
+                if field == "publication_titles"
+                else "",
                 overridden=bool(previous and previous.user_override),
                 selected=edit is not None,
                 changed=field in edited_fields,

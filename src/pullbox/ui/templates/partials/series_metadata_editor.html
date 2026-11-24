@@ -65,14 +65,32 @@
                         <p class="text-sm text-pb-warning" x-show="drafts[field.key].source === 'clear'">This deliberately removes the value and keeps it empty during refresh.</p>
                         <p class="text-sm text-pb-text-sec" x-show="drafts[field.key].source === 'reset'">Keep the current value now and allow future provider refreshes to update it.</p>
                         <div x-show="drafts[field.key].source === 'custom'" class="space-y-2">
-                          <label class="field-label" :for="'series-editor-value-' + field.key" x-text="'New ' + field.label"></label>
+                          <label x-show="field.input_type !== 'titles'" class="field-label" :for="'series-editor-value-' + field.key" x-text="'New ' + field.label"></label>
+                          <template x-if="field.input_type === 'titles'">
+                            <fieldset class="space-y-3">
+                              <legend class="field-label">Publication titles and languages</legend>
+                              <p class="text-sm text-pb-text-sec">Use a two-letter language code, such as en for English or fr for French.</p>
+                              <template x-for="(row, index) in drafts[field.key].value" :key="row.key">
+                                <div class="flex flex-wrap items-end gap-2">
+                                  <label class="w-full min-w-0 sm:flex-1"><span class="field-label" x-text="'Publication title ' + (index + 1)"></span><input class="input-pb w-full" x-model="row.name" maxlength="500" @input="invalidate()" :disabled="busy"></label>
+                                  <label class="w-24"><span class="field-label" x-text="'Title language ' + (index + 1)"></span><input class="input-pb w-full" x-model="row.language" maxlength="2" @input="invalidate()" :disabled="busy"></label>
+                                  <div class="flex flex-wrap gap-1">
+                                    <button type="button" class="btn-ghost btn-sm" :aria-label="'Move publication title ' + (index + 1) + ' up'" :disabled="busy || index === 0" @click="moveTitle(drafts[field.key].value, index, -1)">Up</button>
+                                    <button type="button" class="btn-ghost btn-sm" :aria-label="'Move publication title ' + (index + 1) + ' down'" :disabled="busy || index === drafts[field.key].value.length - 1" @click="moveTitle(drafts[field.key].value, index, 1)">Down</button>
+                                    <button type="button" class="btn-ghost btn-sm" :aria-label="'Remove publication title ' + (index + 1)" :disabled="busy" @click="drafts[field.key].value.splice(index, 1); invalidate()">Remove</button>
+                                  </div>
+                                </div>
+                              </template>
+                              <button type="button" class="btn-ghost btn-sm" :disabled="busy || drafts[field.key].value.length >= 128" @click="drafts[field.key].value.push(titleRow()); invalidate()">Add publication title</button>
+                            </fieldset>
+                          </template>
                           <template x-if="field.options.length">
                             <div>{{ dropdown_select(name="series-editor-value", trigger_id_expression="'series-editor-value-' + field.key", local_model="drafts[field.key].value", options_expression="valueOptions(field)", local_on_change="invalidate()", disabled_expression="busy") }}</div>
                           </template>
                           <template x-if="!field.options.length && field.input_type === 'textarea'">
                             <textarea class="input-pb w-full min-h-24" :id="'series-editor-value-' + field.key" rows="4" x-model="drafts[field.key].value" @input="invalidate()" :disabled="busy"></textarea>
                           </template>
-                          <template x-if="!field.options.length && field.input_type !== 'textarea'">
+                          <template x-if="!field.options.length && !['textarea', 'titles'].includes(field.input_type)">
                             <input class="input-pb w-full" :id="'series-editor-value-' + field.key" :type="field.input_type === 'number' ? 'number' : 'text'" :step="field.input_type === 'number' ? '1' : null" x-model="drafts[field.key].value" @input="invalidate()" :disabled="busy">
                           </template>
                         </div>

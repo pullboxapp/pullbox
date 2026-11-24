@@ -32,6 +32,88 @@ async def save(factory, series_id, review):
     return plan
 
 
+async def test_publication_titles_do_not_become_matching_aliases(managed_series):
+    factory, series_id, _, folder, comic = managed_series
+    sidecar = folder / "series.json"
+    sidecar.write_text(json.dumps({"ComicID": 42, "publication_titles": "custom data"}))
+    original = comic.read_bytes(), comic.stat().st_mtime_ns
+    aliases = ["Matching alias"]
+    titles = [{"name": "Le Port", "language": "fr"}, {"name": "Le Port", "language": "en"}]
+    async with factory.begin() as session:
+        (await session.get(Series, series_id)).alternate_names = aliases
+
+    async def preview():
+        async with factory() as session:
+            result = await prepare_series_editor(session, series_id, SeriesMetadataEditorReview())
+        field = next(
+            (f for f in result.preview.editor_fields if f.key == "series.publication_titles"), None
+        )
+        assert field is not None and field.editable
+        return result, field
+
+    base, field = await preview()
+    assert not field.current and not any(s.value for s in field.sources)
+    for choice, expected, pinned in (
+        ({"action": "set", "value": titles}, titles, True),
+        ({"action": "reset"}, titles, False),
+        ({"action": "clear"}, None, True),
+    ):
+        review = SeriesMetadataEditorReview.model_validate(
+            {"edits": {"publication_titles": choice}}
+        )
+        async with factory() as session:
+            previous = sidecar.read_bytes()
+            await prepare_series_editor(session, series_id, review)
+            assert sidecar.read_bytes() == previous
+        plan = await save(factory, series_id, review)
+        async with factory() as session:
+            assert (await run_series_editor_target(session, plan, 0))["outcome"] == "saved"
+            assert (await session.get(Series, series_id)).alternate_names == aliases
+        saved, field = await preview()
+        assert field.current == ("Le Port (fr)\nLe Port (en)" if expected else "")
+        assert field.overridden == pinned
+        assert saved.snapshot.identities == base.snapshot.identities
+        doc = json.loads(sidecar.read_bytes())
+        assert doc["pullbox"]["snapshot"]["values"].get("publication_titles") == expected
+        assert doc["pullbox"]["aliases"] == aliases and doc["publication_titles"] == "custom data"
+        assert (comic.read_bytes(), comic.stat().st_mtime_ns) == original
+
+
+async def test_publication_titles_can_be_restored_from_a_verified_sidecar(managed_series):
+    factory, series_id, _, folder, comic = managed_series
+    titles = [{"name": "The Harbor", "language": "en"}, {"name": "Le Port", "language": "fr"}]
+    original = comic.read_bytes(), comic.stat().st_mtime_ns
+
+    def edit(choice, *, mode="library_and_sidecars"):
+        return SeriesMetadataEditorReview.model_validate(
+            {"mode": mode, "edits": {"publication_titles": choice}}
+        )
+
+    plan = await save(factory, series_id, edit({"action": "set", "value": titles}))
+    async with factory() as session:
+        assert (await run_series_editor_target(session, plan, 0))["outcome"] == "saved"
+    sidecar = folder / "series.json"
+    before = sidecar.read_bytes(), sidecar.stat().st_mtime_ns
+    await save(factory, series_id, edit({"action": "clear"}, mode="library_only"))
+    async with factory() as session:
+        editor = await prepare_series_editor(session, series_id, SeriesMetadataEditorReview())
+        field = next(
+            f for f in editor.preview.editor_fields if f.key == "series.publication_titles"
+        )
+        assert not field.current and field.overridden
+        source = next(s for s in field.sources if s.value == "The Harbor (en)\nLe Port (fr)")
+        assert "Pullbox snapshot" in source.label
+    restored = await save(factory, series_id, edit({"action": "sidecar", "source": source.token}))
+    assert restored.snapshot.values.publication_titles == plan.snapshot.values.publication_titles
+    async with factory() as session:
+        reopened = await prepare_series_editor(session, series_id, SeriesMetadataEditorReview())
+        draft = next(f for f in reopened.preview.editor_fields if f.key == field.key)
+        assert [entry.model_dump() for entry in draft.title_draft] == titles
+        assert draft.overridden
+    assert (sidecar.read_bytes(), sidecar.stat().st_mtime_ns) == before
+    assert (comic.read_bytes(), comic.stat().st_mtime_ns) == original
+
+
 async def test_total_volumes_is_a_series_correction_not_an_issue_count(managed_series):
     factory, series_id, _, folder, comic = managed_series
     sidecar = folder / "series.json"

@@ -4,11 +4,16 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_validator
 
+from pullbox.schemas.series_publication_titles import (
+    SeriesPublicationTitle,
+    SeriesPublicationTitles,
+)
 from pullbox.schemas.series_sidecar import SeriesSidecarTargetRead
 
 type EditableSeriesField = Literal[
     "title",
     "sort_title",
+    "publication_titles",
     "publisher",
     "description",
     "year_start",
@@ -27,7 +32,7 @@ class SeriesMetadataEdit(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     action: Literal["set", "clear", "reset", "library", "sidecar"]
-    value: StrictStr | StrictInt | None = None
+    value: StrictStr | StrictInt | SeriesPublicationTitles | None = None
     source: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
     @model_validator(mode="after")
@@ -45,7 +50,7 @@ class SeriesMetadataEditorReview(BaseModel):
 
     mode: SeriesEditorMode = "library_and_sidecars"
     edits: dict[EditableSeriesField, SeriesMetadataEdit] = Field(
-        default_factory=dict, max_length=12
+        default_factory=dict, max_length=13
     )
 
 
@@ -78,6 +83,7 @@ class SeriesMetadataEditorField(BaseModel):
     proposed: str
     editable: bool = True
     input_type: str = "text"
+    title_draft: tuple[SeriesPublicationTitle, ...] = Field(default=(), exclude_if=lambda v: not v)
     overridden: bool = False
     selected: bool = False
     changed: bool = False
