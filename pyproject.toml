@@ -77,7 +77,9 @@ dev = [
     "urllib3>=2.7.0",  # transitive (requests, pip-audit, safety) — floor for CVE-2026-44431/CVE-2026-44432
 ]
 e2e = [
-    "playwright~=1.58",
+    # These three releases bundle Firefox build 1572, which crashes inside axe
+    # on reader/arc E2E checks on macOS and Linux. Recheck with the next build.
+    "playwright~=1.58,!=1.65.0,!=1.65.1,!=1.65.2",
     "pytest-playwright~=0.6",
 ]
 prod = [
