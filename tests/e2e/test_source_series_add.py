@@ -334,7 +334,10 @@ def test_real_local_search_preview_add_refresh_and_existing_owner(
         page.get_by_test_id("series-action-refresh").click()
     assert refreshed.value.status == 200
     expect(
-        page.get_by_text("Updated series.json in the managed series folders.", exact=True)
+        page.get_by_text(
+            "Library metadata saved. series.json folders: 1 updated, 0 already current, 0 not written.",
+            exact=True,
+        )
     ).to_be_visible()
     assert (
         json.loads((Path(record["path"]) / "series.json").read_bytes())["pullbox"]["snapshot"][
