@@ -189,6 +189,69 @@ def _source(page, dialog, label, choice):
     page.get_by_role("option", name=choice, exact=True).click()
 
 
+@pytest.mark.parametrize("failure", ["lost", "server", "rejected"])
+def test_unconfirmed_save_checks_library_without_replaying(
+    authed_page, seeded_server, editor_api, failure
+):
+    page = authed_page
+    dialog = _open(page, seeded_server)
+    dialog.get_by_role("button", name="All fields", exact=True).click()
+    _source(page, dialog, "Title", "Enter correction")
+    dialog.get_by_label("New Title", exact=True).fill("My title")
+    dialog.get_by_role("button", name="Update preview", exact=True).click()
+    writes = []
+
+    def fail(route):
+        writes.append(route.request.post_data_json)
+        if failure == "lost":
+            editor_api["fields"][0].update(current="My title", overridden=True)
+            route.abort()
+        else:
+            route.fulfill(
+                status=409 if failure == "rejected" else 500, json={"detail": "Save rejected"}
+            )
+
+    page.route("**/metadata-editor/write", fail)
+    submit = dialog.get_by_role("button", name="Apply selected changes")
+    submit.click()
+    check = dialog.get_by_role("button", name="Check saved values")
+    if failure == "rejected":
+        expect(dialog.get_by_role("alert")).to_have_text("Save rejected")
+        expect(check).to_be_hidden()
+        expect(submit).to_be_disabled()
+        return
+    expect(dialog.get_by_role("alert")).to_contain_text("could not confirm")
+    expect(check).to_be_focused()
+    expect(submit).to_be_hidden()
+    expect(dialog.get_by_role("link", name="View sidecar jobs")).to_be_visible()
+    if failure == "server":
+        page.route("**/metadata-editor/preview", lambda route: route.fulfill(status=503), times=1)
+        check.click()
+        expect(dialog.get_by_role("alert")).to_contain_text("Could not check")
+        expect(dialog.get_by_role("button", name="Review changes again")).to_be_hidden()
+        expect(submit).to_be_hidden()
+    check.click()
+    saved = dialog.get_by_role("region", name="Saved values")
+    expect(saved.get_by_role("heading", name="Current library values")).to_be_focused()
+    expect(saved.get_by_text("Reviewed: My title", exact=True)).to_be_visible()
+    expect(
+        saved.get_by_text("Saved: " + ("My title" if failure == "lost" else "Batman"), exact=True)
+    ).to_be_visible()
+    expect(saved).not_to_contain_text("Sort title")
+    if failure == "server":
+        assert_no_axe_violations(
+            page,
+            name="unconfirmed-series-save",
+            include=['[aria-labelledby="series-editor-title"]'],
+        )
+    assert editor_api["previews"][-1] == {"mode": "library_only", "edits": {}}
+    expect(submit).to_be_hidden()
+    dialog.get_by_role("button", name="Review changes again").click()
+    expect(dialog.get_by_label("New Title", exact=True)).to_have_value("My title")
+    assert editor_api["previews"][-1]["mode"] == "library_and_sidecars"
+    assert len(writes) == 1 and not editor_api["retries"]
+
+
 def test_editor_is_available_on_series_without_a_conflict(authed_page, seeded_server):
     page = authed_page
     page.goto(f"{seeded_server}/series/1")

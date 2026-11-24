@@ -4,6 +4,7 @@ function seriesMetadataEditor(seriesId) {
   return {
     open: false, busy: false, checkingJob: true, error: "", preview: null, drafts: {},
     mode: "library_and_sidecars", allFields: false, reviewedInputs: null,
+    unconfirmed: null, savedValues: null,
     job: null, librarySaved: false, jobTargets: [], jobWarnings: [], partial: false, retryable: false,
     trigger: null, timer: null, generation: 0, jobGeneration: 0, disposed: false,
     init() { this.loadJob().finally(() => { this.checkingJob = false; }); },
@@ -13,9 +14,11 @@ function seriesMetadataEditor(seriesId) {
         method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": readCsrfTokenFromBody() },
         body: JSON.stringify(body),
       });
-      const data = await response.json();
-      if (!response.ok) throw new Error(_extractApiErrorMessage(response, data, "Could not check series metadata. Try again."));
-      return data;
+      if (!response.ok) {
+        const data = await _readJsonBody(response);
+        throw Object.assign(new Error(_extractApiErrorMessage(response, data, "Could not check series metadata. Try again.")), { status: response.status });
+      }
+      return response.json();
     },
     async show() {
       this.trigger = document.activeElement;
@@ -75,7 +78,7 @@ function seriesMetadataEditor(seriesId) {
       return { mode: this.mode, edits: edits };
     },
     canWrite() {
-      return !this.busy && !this.checkingJob && !this.job && this.preview && this.preview.ready && this.preview.editor_changed &&
+      return !this.busy && !this.checkingJob && !this.unconfirmed && !this.job && this.preview && this.preview.ready && this.preview.editor_changed &&
         this.reviewedInputs === JSON.stringify(this.inputs());
     },
     async loadPreview(reset = false) {
@@ -146,17 +149,48 @@ function seriesMetadataEditor(seriesId) {
       if (!this.canWrite()) return;
       this.busy = true; this.error = "";
       const approval = Object.assign({}, this.inputs(), { review_key: this.preview.review_key });
+      const reviewed = this.preview.editor_fields.filter(field => field.selected)
+        .map(({ key, label, proposed }) => ({ key, label, proposed }));
       this.invalidate();
+      let acknowledged = false;
       try {
         const result = await this.request(endpoint + "/write", approval);
         if (this.disposed) return;
+        if (!result || !result.job_id || result.library_saved !== true) throw new Error("Missing save confirmation.");
+        acknowledged = true;
         this.jobGeneration += 1;
         this.librarySaved = !!result.library_saved;
         this.job = { id: result.job_id, state: result.state, percent: 0, message: "Queued", error: null };
         await this.refreshSeries();
         await this.loadJob();
+      } catch (error) {
+        if (this.disposed) return;
+        if (!acknowledged && (!error.status || error.status >= 500 || error.status === 408)) {
+          this.unconfirmed = reviewed;
+          this.savedValues = null;
+          this.error = "Pullbox could not confirm whether your changes were saved. Check the saved values before applying anything again.";
+        } else this.error = error.message;
+      }
+      finally { if (!this.disposed) this.busy = false; }
+    },
+    async checkSavedValues() {
+      if (this.busy || !this.unconfirmed) return;
+      this.busy = true; this.error = ""; this.savedValues = null;
+      try {
+        const data = await this.request(endpoint + "/preview", { mode: "library_only", edits: {} });
+        if (this.disposed) return;
+        this.savedValues = this.unconfirmed.map(field => {
+          const saved = data.editor_fields.find(candidate => candidate.key === field.key);
+          if (!saved) throw new Error("Could not check all the selected fields. Check again when the library is available.");
+          return { ...field, current: saved.current, overridden: saved.overridden };
+        });
       } catch (error) { if (!this.disposed) this.error = error.message; }
       finally { if (!this.disposed) this.busy = false; }
+    },
+    async reviewAfterCheck() {
+      if (this.busy || !this.savedValues) return;
+      this.unconfirmed = null; this.savedValues = null;
+      await this.loadPreview();
     },
     async retry() {
       if (this.busy || !this.job || !this.retryable || this.active()) return;

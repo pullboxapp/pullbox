@@ -993,6 +993,13 @@ unavailability (HTTP 503), not lost authentication or incomplete setup. After
 PostgreSQL restarts, the same browser retries the issue without signing in.
 Neither check replays a write or qualifies interrupted transactions.
 
+The series editor rehearsal tests two separate outcomes. Terminating the
+editor's PostgreSQL session at commit must roll back the description, its
+metadata baseline and the queued job together. Dropping only the browser's
+response after a successful commit must leave the edited value and one new
+job. In both cases the operator checks the saved fields without sending
+another write. A library-only edit must leave the sidecar and comics intact.
+
 In the same rehearsal, enable a generated read-only GCD catalog in Settings and
 link it to an existing ComicVine series. A fractional issue with the same number
 but no verified GCD identity must block refresh without partial additions. After

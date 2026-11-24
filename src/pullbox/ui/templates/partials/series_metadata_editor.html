@@ -10,8 +10,23 @@
           <p class="text-sm text-pb-text-sec">Edit this series and its series.json files. Comic files and folder names stay unchanged.</p>
           <p class="text-sm text-pb-text-sec">Manual corrections survive refresh. Sources shown here are saved values.</p>
           <p class="text-sm text-pb-error" role="alert" x-show="error || (job && job.error)" x-text="error || (job && job.error)" x-cloak></p>
-          <p class="text-sm text-pb-text-sec" role="status" x-show="busy && !job" x-cloak>Preparing metadata preview...</p>
-          <div x-show="!job" class="space-y-4">
+          <p class="text-sm text-pb-text-sec" role="status" x-show="busy && !job" x-cloak x-text="unconfirmed ? 'Checking saved values...' : 'Preparing metadata preview...'"></p>
+          <section x-show="unconfirmed" x-cloak aria-label="Saved values" class="space-y-3">
+            <p class="text-sm text-pb-text-sec">Check what is in the library now. This does not apply your draft or read or write any files.</p>
+            <template x-if="savedValues">
+              <h3 tabindex="-1" class="field-label" x-init="$nextTick(() => { if (open) $el.focus() })">Current library values</h3>
+            </template>
+            <template x-for="field in savedValues || []" :key="field.key">
+              <div class="rounded-lg border border-pb-border p-3 space-y-1">
+                <h3 class="field-label" x-text="field.label"></h3>
+                <p class="text-sm whitespace-pre-wrap break-words" x-text="'Reviewed: ' + (field.proposed || 'Not set')"></p>
+                <p class="text-sm whitespace-pre-wrap break-words" x-text="'Saved: ' + (field.current || 'Not set')"></p>
+                <p class="text-xs text-pb-text-sec" x-text="field.overridden ? 'Manual correction' : 'No manual correction'"></p>
+              </div>
+            </template>
+            <a x-show="mode === 'library_and_sidecars'" class="btn-ghost btn-sm" href="/utilities?tab=queue">View sidecar jobs</a>
+          </section>
+          <div x-show="!job && !unconfirmed" class="space-y-4">
             <fieldset class="space-y-2" :disabled="busy || checkingJob">
               <legend class="field-label">Save to</legend>
               <label class="flex items-center gap-2 text-sm text-pb-text"><input type="radio" class="checkbox-pb !rounded-full" name="series-editor-mode" value="library_and_sidecars" x-model="mode" @change="invalidate()">Library and eligible series.json files</label>
@@ -101,8 +116,12 @@
           <button type="button" class="btn-ghost" @click="cancel()" x-show="active()" :disabled="busy || (job && job.state === 'CANCELLING')">Cancel sidecar write</button>
           <button type="button" class="btn-ghost" @click="loadPreview(true)" x-show="!active() && (!preview || job) && (!job || job.state !== 'PAUSED')" :disabled="busy || checkingJob">Preview again</button>
           <button type="button" class="btn-primary" @click="retry()" x-show="retryable && !active()" :disabled="busy">Retry unfinished sidecars</button>
-          <button type="button" class="btn-ghost" @click="loadPreview()" x-show="preview && !job" :disabled="busy || !!reviewedInputs">Update preview</button>
-          <button type="button" class="btn-primary" @click="write()" x-show="preview && !job" :disabled="!canWrite()">Apply selected changes</button>
+          <template x-if="unconfirmed">
+            <button type="button" class="btn-ghost" @click="checkSavedValues()" :disabled="busy" x-init="$nextTick(() => { if (open) $el.focus() })">Check saved values</button>
+          </template>
+          <button type="button" class="btn-primary" @click="reviewAfterCheck()" x-show="unconfirmed && savedValues" :disabled="busy">Review changes again</button>
+          <button type="button" class="btn-ghost" @click="loadPreview()" x-show="preview && !job && !unconfirmed" :disabled="busy || !!reviewedInputs">Update preview</button>
+          <button type="button" class="btn-primary" @click="write()" x-show="preview && !job && !unconfirmed" :disabled="!canWrite()">Apply selected changes</button>
         </footer>
       </section>
     </div>

@@ -3,10 +3,11 @@
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Path, Query
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pullbox.api.deps import DbSession, InteractiveOperatorUser, Settings
-from pullbox.core.exceptions import ValidationError
+from pullbox.core.exceptions import PullboxError, ValidationError
 from pullbox.models.user import User
 from pullbox.schemas.metadata_identity_review import IdentityReviewReceiptRead
 from pullbox.schemas.metadata_sources import SeriesPreviewQuery
@@ -169,6 +170,15 @@ async def editor_write(
         await session.commit()
         _schedule_dispatch(manager)
         return {"job_id": job.id, "state": job.state, "library_saved": True}
+    except DBAPIError as exc:
+        if not exc.connection_invalidated or session.get_bind().dialect.name != "postgresql":
+            raise
+        raise PullboxError(
+            "The database connection was interrupted. Check the saved series values "
+            "before applying the changes again.",
+            code="SERIES_METADATA_SAVE_UNCONFIRMED",
+            status_code=503,
+        ) from None
     except (ValueError, ValidationError) as exc:
         await session.rollback()
         raise HTTPException(409, str(exc)) from None

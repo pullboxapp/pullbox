@@ -2,9 +2,11 @@
 
 import json
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import DBAPIError
 
 from pullbox.models import Issue, LibraryFile, Series
 from pullbox.models.library import FileFormat
@@ -48,6 +50,38 @@ async def approve(client, series_id, body):
     )
     assert response.status_code == 202, response.text
     return response.json()
+
+
+@pytest.mark.parametrize(
+    "backend,disconnected", [("postgresql", True), ("postgresql", False), ("sqlite", False)]
+)
+async def test_editor_reports_only_interrupted_postgres_writes_as_unconfirmed(
+    monkeypatch, backend, disconnected
+):
+    from pullbox.api.v1 import series_metadata_links as api
+    from pullbox.core.exceptions import PullboxError
+    from pullbox.schemas.series_metadata_editor import SeriesMetadataEditorApproval
+
+    failure = DBAPIError(
+        None, None, RuntimeError("private driver diagnostics"), connection_invalidated=disconnected
+    )
+    session = Mock()
+    session.get_bind.return_value.dialect.name = backend
+    save = AsyncMock(side_effect=failure)
+    monkeypatch.setattr(api, "save_series_editor", save)
+    approval = SeriesMetadataEditorApproval(mode="library_only", edits={}, review_key="a" * 64)
+    expected = PullboxError if backend == "postgresql" and disconnected else DBAPIError
+    with pytest.raises(expected) as caught:
+        await api.editor_write(1, approval, session, Mock(username="reader"))
+    save.assert_awaited_once()
+    if expected is PullboxError:
+        assert (
+            caught.value.status_code == 503
+            and caught.value.code == "SERIES_METADATA_SAVE_UNCONFIRMED"
+        )
+        assert "private" not in str(caught.value)
+    else:
+        assert caught.value is failure
 
 
 async def test_default_save_commits_canonical_and_durable_sidecar_job(

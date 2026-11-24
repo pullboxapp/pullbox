@@ -30,6 +30,14 @@ override keeps the current value until configured refresh supplies a replacement
 Missing source values cannot silently erase data. Required values cannot be
 cleared. User choices remain available after validation errors.
 
+If the editor cannot confirm a save, use **Check saved values**. This reads
+only the library and shows each reviewed field beside its saved value and
+current override status. A matching value is not proof that this particular
+request saved it. No job is created and no sidecar is checked or written.
+If sidecars were selected, **View sidecar jobs** opens Utilities. To apply
+another edit, choose **Review changes again** to preview the retained draft,
+then explicitly apply it.
+
 **Add Series** and **What's New > Find & Add** offer **Create series.json in
 the new folder**. The choice applies to that add only and starts unchecked.
 Only after the series and catalog commit can the writer create the file, using
