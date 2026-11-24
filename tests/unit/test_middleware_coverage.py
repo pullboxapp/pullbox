@@ -13,6 +13,7 @@ import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy.exc import TimeoutError as PoolCheckoutTimeout
 from starlette.requests import Request
 from starlette.responses import Response
 
@@ -54,6 +55,19 @@ async def test_offline_mutation_never_suggests_resubmitting_or_leaks_details(met
     assert b"Check the status of your last action" in result.body
     assert b"Retry this page" not in result.body and b"private host details" not in result.body
     action.assert_awaited_once()
+
+
+async def test_full_pool_does_not_start_a_second_wait(monkeypatch):
+    monkeypatch.setattr("pullbox.api.middleware._setup_complete", None)
+    action = AsyncMock()
+    request = Request({"type": "http", "method": "GET", "path": "/issues/17", "headers": []})
+    with (
+        patch("pullbox.api.middleware.get_session_factory", return_value=MagicMock()),
+        patch("pullbox.api.middleware.is_setup_complete_db", side_effect=PoolCheckoutTimeout()),
+        pytest.raises(PoolCheckoutTimeout),
+    ):
+        await SetupDetectionMiddleware(MagicMock()).dispatch(request, action)
+    action.assert_not_awaited()
 
 
 class TestSetupDetectionRedirect:

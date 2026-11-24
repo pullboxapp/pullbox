@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 from sqlalchemy import select
+from sqlalchemy.exc import TimeoutError as PoolCheckoutTimeout
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request  # noqa: TC002 — used at runtime in dispatch()
 from starlette.responses import JSONResponse, RedirectResponse, Response
@@ -118,7 +119,7 @@ class SetupDetectionMiddleware(BaseHTTPMiddleware):
             factory = _request_session_factory(request)
             async with factory() as session:
                 complete = await is_setup_complete_db(session)
-        except DatabaseConnectionUnavailableError:
+        except (DatabaseConnectionUnavailableError, PoolCheckoutTimeout):
             raise
         except Exception:
             logger.exception("setup_detection_db_error", path=request.url.path)
@@ -177,6 +178,8 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                 response = await call_next(request)
             except DatabaseConnectionUnavailableError:
                 response = _database_unavailable_response(request)
+            except PoolCheckoutTimeout:
+                response = _database_unavailable_response(request, busy=True)
             duration_ms = (time.monotonic() - start) * 1000
             response.headers["X-Request-ID"] = request_id
 
@@ -208,17 +211,19 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             structlog.contextvars.unbind_contextvars("request_id")
 
 
-def _database_unavailable_response(request: Request) -> Response:
+def _database_unavailable_response(request: Request, *, busy: bool = False) -> Response:
     headers = {"Cache-Control": "no-store"}
     read = request.method in {"GET", "HEAD"}
     if read:
         headers["Retry-After"] = "5"
-    message = (
-        "Pullbox cannot reach the library database. Try again when it is available."
-        if read
-        else "Pullbox cannot reach the library database. Check the status of your last action "
-        "before trying it again."
+    reason = (
+        "The library database is busy." if busy else "Pullbox cannot reach the library database."
     )
+    if read:
+        action = "Try again shortly." if busy else "Try again when it is available."
+    else:
+        action = "Check the status of your last action before trying it again."
+    message = f"{reason} {action}"
     if (
         "text/html" in request.headers.get("accept", "").lower()
         and not request.url.path.startswith(("/api/", "/htmx/"))

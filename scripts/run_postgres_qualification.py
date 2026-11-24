@@ -7,6 +7,7 @@ import pytest
 
 CASES = (
     "test_postgres_fresh_install::test_new_account_survives_recreating_both_containers",
+    "test_postgres_pool_recovery::test_issue_navigation_and_edit_when_pool_is_full",
     "test_database_migration_target::test_fresh_postgres_migrations_reach_head",
     "test_database_migration_target::test_populated_postgres_migration_preserves_values_and_backfills",
     "test_database_migration_target::test_postgres_downgrade_cannot_lose_large_import_byte_count",

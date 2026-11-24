@@ -1196,6 +1196,14 @@ The Docker tests use only throwaway databases and require the local
 - In-memory SQLite drops `pool_pre_ping`.
 - File-based SQLite does not set PostgreSQL-style pool sizing knobs.
 
+If the application cannot check out a connection before the pool wait expires,
+the issue page and API return a non-cacheable 503. The message distinguishes a
+busy pool from an unreachable database. Reads offer a retry; a failed edit
+asks the operator to check the saved state and is never resubmitted. The setup
+check must not fall through to a second pool wait. The PostgreSQL qualification
+gate exercises these request paths against both majors using the checkout and
+a small disposable pool; production pool settings are unchanged.
+
 **Required standard**
 
 - Do not pretend SQLite and PostgreSQL should share the same pool-tuning rules.
