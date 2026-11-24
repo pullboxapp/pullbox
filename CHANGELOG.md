@@ -11,7 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add alternate publication titles and their languages in the series metadata
   editor. Save them to the library alone or include them in `series.json`.
-  They do not change the alternate names used to match imports or downloads.
+  To update selected comics, use **Update comic metadata** and preview the
+  changes to `MetronInfo.xml`. Embedded title IDs are preserved. Neither action
+  changes the alternate names used to match imports or downloads.
 - When **Import File** finds a metadata disagreement, choose **Edit issue fields**
   to correct issue values, preview both XML documents, and import the reviewed
   copy. The selected source stays unchanged. Replacing an owned copy requires

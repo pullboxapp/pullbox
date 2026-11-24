@@ -24,11 +24,19 @@ require a new preview; retry does not silently approve new content.
 ## Boundaries
 
 - Fields: series name, publisher, language, publication format, sort name, start year,
-  volume and total volumes. Start year and volume use the existing Metron series mappings, not
+  volume, total volumes and alternate publication titles. Start year and volume use the existing Metron series mappings, not
   issue dates or issue numbering.
 - **Total volumes** writes only MetronInfo's series volume count. A missing library
   value does not erase an embedded count. To remove it, first choose **Clear value**
   for **Total volumes** in the series editor, then preview and approve the affected comics.
+- **Alternate publication titles** writes the ordered titles and their languages under
+  `MetronInfo.xml`'s `Series/AlternativeNames`. The same title in different languages
+  is distinct; an omitted embedded language means English. An exact match keeps its
+  original resource ID, and a new title never receives a guessed ID. If a replacement
+  would discard an ID, or the list is ambiguous or annotated, that comic is left alone.
+  An empty library value does not erase embedded titles unless you explicitly cleared
+  the field in the series editor. Selecting only this field preserves the original
+  `ComicInfo.xml` bytes. It is unrelated to alternate names used for matching downloads.
 - Only registered managed CBZ/ZIP files with verified issue/series bindings and a
   reconciled XML pair qualify. Missing pairs link to the issue's existing metadata
   review workflow; the batch does not invent unreviewed issue metadata.

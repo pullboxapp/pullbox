@@ -710,10 +710,16 @@ def _assert_container_replaceable(node: ET.Element, field: str) -> None:
 
 
 def _validated_pair(
-    ci: ET.Element, mi: ET.Element, *, story_baseline: MetadataSnapshot | None = None
+    ci: ET.Element,
+    mi: ET.Element,
+    *,
+    story_baseline: MetadataSnapshot | None = None,
+    original_comicinfo: bytes | None = None,
 ) -> RenderedArchiveMetadata:
     result = RenderedArchiveMetadata(
-        ET.tostring(ci, encoding="utf-8", xml_declaration=True),
+        original_comicinfo
+        if original_comicinfo is not None
+        else ET.tostring(ci, encoding="utf-8", xml_declaration=True),
         ET.tostring(mi, encoding="utf-8", xml_declaration=True),
     )
     try:

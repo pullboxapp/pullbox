@@ -45,7 +45,16 @@ def prepare_projection(
 ) -> PreparedFileMetadata:
     bound = target.binding.metadata
     protected = (
-        fields - {"title", "sort_title", "year_start", "volume", "volume_count", "format"}
+        fields
+        - {
+            "title",
+            "sort_title",
+            "year_start",
+            "volume",
+            "volume_count",
+            "format",
+            "publication_titles",
+        }
     ) | ({"series_type", "archive_format"} if "format" in fields else set())
     origins = bound.issues[0].baseline.origins if bound.issues[0].baseline else ()
     if protected & (bound.issues[0].overrides | {o.field for o in origins if o.user_override}):

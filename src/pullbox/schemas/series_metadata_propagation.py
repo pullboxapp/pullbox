@@ -5,13 +5,21 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 type PropagationField = Literal[
-    "title", "publisher", "language", "format", "sort_title", "year_start", "volume", "volume_count"
+    "title",
+    "publisher",
+    "language",
+    "format",
+    "sort_title",
+    "year_start",
+    "volume",
+    "volume_count",
+    "publication_titles",
 ]
 
 
 class PropagationReview(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    fields: frozenset[PropagationField] = Field(min_length=1, max_length=8)
+    fields: frozenset[PropagationField] = Field(min_length=1, max_length=9)
 
 
 class PropagationApproval(BaseModel):

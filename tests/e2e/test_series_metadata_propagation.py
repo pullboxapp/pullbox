@@ -19,12 +19,12 @@ def test_preview_selection_progress_and_modal_bounds(authed_page, live_server, t
     page.route("**/api/v1/series/1/metadata-propagation/job*", lambda r: r.fulfill(json=state))
 
     def preview(route):
-        assert route.request.post_data_json == {"fields": ["title"]}
+        assert route.request.post_data_json == {"fields": ["publication_titles"]}
         state.update(
             {
                 "job": {"id": "a" * 32, "state": "COMPLETED", "percent": 100, "error": None},
                 "mode": "preview",
-                "fields": ["title"],
+                "fields": ["publication_titles"],
                 "counts": {"ready": 2, "attention": 1},
                 "ready_ids": [1, 2],
                 "page": 1,
@@ -39,8 +39,8 @@ def test_preview_selection_progress_and_modal_bounds(authed_page, live_server, t
                         "reason": "",
                         "changes": [
                             {
-                                "document": "ComicInfo.xml",
-                                "field": "ComicInfo/Series[1]",
+                                "document": "MetronInfo.xml",
+                                "field": "MetronInfo/Series[1]/AlternativeNames[1]/AlternativeName[1]",
                                 "before": "Old",
                                 "after": "New",
                             }
@@ -74,7 +74,9 @@ def test_preview_selection_progress_and_modal_bounds(authed_page, live_server, t
     expect(dialog).to_be_visible()
     expect(dialog.get_by_role("checkbox", name="Total volumes", exact=True)).not_to_be_checked()
     expect(dialog.get_by_role("button", name="Preview comic files")).to_be_disabled()
-    dialog.get_by_role("checkbox", name="Series name", exact=True).check()
+    titles = dialog.get_by_role("checkbox", name="Alternate publication titles", exact=True)
+    expect(titles).not_to_be_checked()
+    titles.check()
     dialog.get_by_role("button", name="Preview comic files").click()
     expect(dialog.get_by_role("status").filter(has_text="2 ready")).to_be_visible()
     dialog.get_by_role("checkbox", name="Update Issue 2").uncheck()

@@ -170,6 +170,29 @@ def file_metadata_error(exc: BaseException) -> str:
             "on the series and set Total volumes or choose Clear value, then preview again. "
             "To keep the comic's count, leave Total volumes unchecked."
         )
+    if code == "propagation_titles_unset":
+        return (
+            "The comic has alternate publication titles but the library does not. In Edit metadata "
+            "on the series, enter the titles or choose Clear value, then preview again. "
+            "Leave Alternate publication titles unchecked to keep the comic's values."
+        )
+    if code == "propagation_titles_identity":
+        return (
+            "This change would remove an embedded title identifier. Keep its exact title and "
+            "language in the series editor, or leave this comic unselected. No file was changed."
+        )
+    if code == "propagation_titles_legacy_xml":
+        return (
+            "Writing these titles would also require updating unrelated MetronInfo.xml fields. "
+            "Review the XML pair with Write file metadata on the issue page, or leave this comic "
+            "unselected. No file was changed."
+        )
+    if code in {"propagation_titles_ambiguous", "propagation_titles_annotated"}:
+        return (
+            "The comic contains repeated titles in the same language or annotated title entries. "
+            "Pullbox cannot replace them safely. Leave this comic unselected or correct its "
+            "embedded list before previewing again."
+        )
     if code == "editor_conversion_required":
         return (
             "This editor updates managed CBZ files without conversion. Convert this file to CBZ "

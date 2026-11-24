@@ -5,6 +5,8 @@ from xml.etree import ElementTree as ET
 from pullbox.core.archive_metadata import ArchiveMetadataFiles
 from pullbox.core.archive_metadata_fields import COMICINFO_ONLY_FORMATS, archive_format_label
 from pullbox.core.issue_numbers import normalize_issue_number_text
+from pullbox.core.metadata_xml import MetadataXmlError, parse_metadata_xml
+from pullbox.core.metroninfo_schema import validate_metroninfo_xml
 from pullbox.schemas.metadata_snapshot import MetadataSnapshot
 from pullbox.services.archive_metadata_preservation import (
     preserved_roots,
@@ -28,7 +30,45 @@ FIELDS = {
     "year_start": "Series start year",
     "volume": "Series volume",
     "volume_count": "Total volumes",
+    "publication_titles": "Alternate publication titles",
 }
+
+
+def _publication_titles(parent: ET.Element, series: MetadataSnapshot) -> None:
+    group = parent.find("AlternativeNames")
+    titles = series.values.publication_titles
+    if not titles and group is None:
+        return
+    if group is None:
+        group = ET.SubElement(parent, "AlternativeNames")
+    if (
+        not titles
+        and len(group)
+        and not any(o.field == "publication_titles" and o.user_override for o in series.origins)
+    ):
+        raise ArchiveMetadataRenderError("propagation_titles_unset")
+    existing: dict[tuple[str, str], ET.Element] = {}
+    for node in group:
+        if node.tag != "AlternativeName" or len(node):
+            raise ArchiveMetadataRenderError("propagation_titles_annotated")
+        # MetronInfo defines omitted lang as English, regardless of the parent series language.
+        key = (node.text or "", node.get("lang", "en"))
+        if key in existing:
+            raise ArchiveMetadataRenderError("propagation_titles_ambiguous")
+        existing[key] = node
+    ordered = []
+    for title in titles or ():
+        match = existing.pop((title.name, title.language), None)
+        if match is None:
+            match = ET.Element("AlternativeName", lang=title.language)
+            match.text = title.name
+        ordered.append(match)
+    if any("id" in node.attrib for node in existing.values()):
+        raise ArchiveMetadataRenderError("propagation_titles_identity")
+    if ordered:
+        group[:] = ordered
+    elif len(group):
+        parent.remove(group)
 
 
 def render_series_propagation(
@@ -55,9 +95,24 @@ def render_series_propagation(
     if conflicts:
         raise ArchiveMetadataRenderError("unreconciled_field", conflicts[0].key)
     ci, mi = preserved_roots(files)
+    titles_only = fields == {"publication_titles"}
+    if titles_only:
+        # The general writer normalizes legacy IDs and schema hints. A titles-only
+        # approval cannot also authorize those changes.
+        original = parse_metadata_xml(
+            files.metroninfo.payload, root_name="MetronInfo", preserve_misc=True
+        )
+        if ET.tostring(original) != ET.tostring(mi):
+            try:
+                validate_metroninfo_xml(files.metroninfo.payload)
+            except MetadataXmlError as exc:
+                raise ArchiveMetadataRenderError("propagation_titles_legacy_xml") from exc
+            mi = original
     parent = mi.find("Series")
     if parent is None:
         parent = ET.SubElement(mi, "Series")
+    if "publication_titles" in fields:
+        _publication_titles(parent, series)
     for field, ci_tag, mi_tag in (
         ("title", "Series", "Name"),
         ("sort_title", None, "SortName"),
@@ -111,4 +166,9 @@ def render_series_propagation(
                 raise ArchiveMetadataRenderError("unsupported_content", "Publisher")
             mi.remove(publisher)
         set_text(ci, "Publisher", value)
-    return _validated_pair(ci, mi, story_baseline=issue)
+    return _validated_pair(
+        ci,
+        mi,
+        story_baseline=issue,
+        original_comicinfo=files.comicinfo.payload if titles_only else None,
+    )

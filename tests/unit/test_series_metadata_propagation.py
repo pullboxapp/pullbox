@@ -5,6 +5,7 @@ from xml.etree import ElementTree as ET
 import pytest
 
 from pullbox.models.series import SeriesType
+from pullbox.schemas.series_publication_titles import SeriesPublicationTitle
 from pullbox.services.archive_metadata_rendering import (
     ArchiveMetadataRenderError,
     render_archive_metadata,
@@ -160,3 +161,124 @@ def test_identity_and_issue_number_conflicts_are_not_overridden():
             files(ET.tostring(ci).decode(), source.metroninfo.payload.decode()),
             frozenset({"title"}),
         )
+
+
+def _title_projection(existing, selected, *, clear=False):
+    series, issue, source = source_pair()
+    mi = ET.fromstring(source.metroninfo.payload)
+    mi.find("Series").append(
+        ET.fromstring(existing, parser=ET.XMLParser(target=ET.TreeBuilder(insert_comments=True)))
+    )
+    # Formatting of the unselected ComicInfo member must survive the actual write.
+    source = files(source.comicinfo.payload.decode() + "\n", ET.tostring(mi).decode())
+    titles = (
+        tuple(SeriesPublicationTitle(name=name, language=lang) for name, lang in selected) or None
+    )
+    series = series.model_copy(
+        update={
+            "values": series.values.model_copy(update={"publication_titles": titles}),
+            "origins": (origin("publication_titles", user=True),) if clear or titles else (),
+        }
+    )
+    return series, issue, source
+
+
+def test_publication_titles_preserve_localized_ids_and_never_copy_them_to_new_names():
+    args = _title_projection(
+        '<AlternativeNames><AlternativeName id="a">Port</AlternativeName>'
+        '<AlternativeName lang="fr" id="b">Port</AlternativeName>'
+        '<AlternativeName lang="de">Old</AlternativeName></AlternativeNames>',
+        [("Port", "fr"), ("Port", "en"), ("Der Hafen", "de")],
+    )
+    chosen = frozenset({"publication_titles"})
+    result = render_series_propagation(*args, chosen)
+    nodes = ET.fromstring(result.metroninfo).findall("Series/AlternativeNames/AlternativeName")
+    assert [(n.text, n.attrib) for n in nodes] == [
+        ("Port", {"lang": "fr", "id": "b"}),
+        ("Port", {"id": "a"}),
+        ("Der Hafen", {"lang": "de"}),
+    ]
+    assert result.comicinfo == args[2].comicinfo.payload
+    assert (
+        render_series_propagation(
+            args[0], args[1], files(result.comicinfo.decode(), result.metroninfo.decode()), chosen
+        )
+        == result
+    )
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        '<AlternativeName id="a">Port</AlternativeName>'
+        '<AlternativeName id="b" lang="en">Port</AlternativeName>',
+        "<!--proof--><AlternativeName>Port</AlternativeName>",
+    ],
+)
+def test_ambiguous_or_annotated_publication_title_lists_are_not_replaced(inner):
+    args = _title_projection(f"<AlternativeNames>{inner}</AlternativeNames>", [("Port", "en")])
+    with pytest.raises(ArchiveMetadataRenderError) as caught:
+        render_series_propagation(*args, frozenset({"publication_titles"}))
+    assert caught.value.code in {"propagation_titles_ambiguous", "propagation_titles_annotated"}
+
+
+def test_titles_only_do_not_normalize_unselected_metron_fields():
+    series, issue, source = _title_projection("<AlternativeNames/>", [("Port", "en")])
+    mi = ET.fromstring(source.metroninfo.payload)
+    attr = "{http://www.w3.org/2001/XMLSchema-instance}noNamespaceSchemaLocation"
+    mi.set(attr, "local-copy.xsd")
+
+    def project():
+        return render_series_propagation(
+            series,
+            issue,
+            files(source.comicinfo.payload.decode(), ET.tostring(mi).decode()),
+            frozenset({"publication_titles"}),
+        )
+
+    assert ET.fromstring(project().metroninfo).get(attr) == "local-copy.xsd"
+    mi.set("version", "1.0")  # Requires unrelated normalization before it can validate as 1.1.
+    with pytest.raises(ArchiveMetadataRenderError) as caught:
+        project()
+    assert caught.value.code == "propagation_titles_legacy_xml"
+
+
+@pytest.mark.parametrize(
+    ("selected", "explicit_clear", "expected"),
+    [
+        ([], False, "Clear value"),
+        ([], True, "identifier"),
+        ([("Port", "fr")], False, "identifier"),
+        ([("PORT", "en")], False, "identifier"),
+    ],
+)
+def test_missing_or_conflicting_title_identity_never_silently_rewrites(
+    selected, explicit_clear, expected
+):
+    from pullbox.services.issue_file_metadata import file_metadata_error
+
+    args = _title_projection(
+        '<AlternativeNames><AlternativeName id="a">Port</AlternativeName></AlternativeNames>',
+        selected,
+        clear=explicit_clear,
+    )
+    with pytest.raises(ArchiveMetadataRenderError) as caught:
+        render_series_propagation(*args, frozenset({"publication_titles"}))
+    assert expected in file_metadata_error(caught.value)
+
+
+def test_explicit_publication_title_clear_only_removes_unidentified_names():
+    args = _title_projection(
+        "<AlternativeNames><AlternativeName>Port</AlternativeName></AlternativeNames>",
+        [],
+        clear=True,
+    )
+    assert (
+        ET.fromstring(render_series_propagation(*args, frozenset({"title"})).metroninfo).findtext(
+            "Series/AlternativeNames/AlternativeName"
+        )
+        == "Port"
+    )
+    result = render_series_propagation(*args, frozenset({"publication_titles"}))
+    assert ET.fromstring(result.metroninfo).find("Series/AlternativeNames") is None
+    assert result.comicinfo == args[2].comicinfo.payload

@@ -2,9 +2,13 @@
 
 from uuid import uuid4
 
+import pytest
+
 from pullbox.models import Issue, Series
+from pullbox.schemas.series_metadata_editor import SeriesMetadataEditorReview
 from pullbox.schemas.series_metadata_propagation import PropagationReview
 from pullbox.services.issue_file_metadata import prepare_file_metadata, write_file_metadata
+from pullbox.services.series_metadata_editor import prepare_series_editor, save_series_editor
 from pullbox.services.series_metadata_propagation import KEY, job_details, latest_job, preview_plan
 from pullbox.utilities.executors.file_metadata import FileMetadataExecutor
 from pullbox.utilities.job_queue import JobQueueManager
@@ -13,13 +17,32 @@ from tests.api.test_series_metadata_propagation import seed_pair
 from tests.integration.metadata_identity.test_archive_metadata_publication import prepared
 
 
-async def test_projection_finalizes_without_advancing_canonical_state(identity_probe_db, tmp_path):
+@pytest.mark.parametrize("field", ["title", "publication_titles"])
+async def test_projection_finalizes_without_advancing_canonical_state(
+    identity_probe_db, tmp_path, field
+):
     _, factory, _ = identity_probe_db
     async with prepared(factory, tmp_path) as (path, staged, plan):
         await seed_pair(factory, path, staged, plan)
         series_id = plan.target.binding.metadata.series.local_id
         issue_id = plan.target.binding.metadata.issues[0].local_id
-        fields = frozenset({"title"})
+        if field == "publication_titles":
+            selection = SeriesMetadataEditorReview.model_validate(
+                {
+                    "mode": "library_only",
+                    "edits": {
+                        field: {"action": "set", "value": [{"name": "Le Port", "language": "fr"}]}
+                    },
+                }
+            )
+            async with factory() as session:
+                key = (
+                    await prepare_series_editor(session, series_id, selection)
+                ).preview.review_key
+            async with factory() as session:
+                await save_series_editor(session, series_id, selection, key)
+                await session.commit()
+        fields = frozenset({field})
         async with factory() as session:
             review = await prepare_file_metadata(session, issue_id, propagation_fields=fields)
             batch = await preview_plan(session, series_id, PropagationReview(fields=fields))

@@ -7,7 +7,8 @@ function seriesMetadataPropagation(seriesId) {
     options: [{key:"title",label:"Series name"}, {key:"publisher",label:"Publisher"},
       {key:"language",label:"Language"}, {key:"format",label:"Publication format"},
       {key:"sort_title",label:"Series sort name"}, {key:"year_start",label:"Series start year"},
-      {key:"volume",label:"Series volume"}, {key:"volume_count",label:"Total volumes"}],
+      {key:"volume",label:"Series volume"}, {key:"volume_count",label:"Total volumes"},
+      {key:"publication_titles",label:"Alternate publication titles"}],
     destroy() { this.disposed = true; this.generation++; clearTimeout(this.timer); },
     async request(url, body) {
       const response = await fetch(url, body === undefined ? {cache:"no-store"} : {

@@ -7,6 +7,7 @@ from zipfile import ZipFile
 import pytest
 
 from pullbox.models import Issue, LibraryFile, Series
+from pullbox.models.metadata_identity import IssueExternalIdentity
 from pullbox.schemas.series_metadata_editor import SeriesMetadataEditorReview
 from pullbox.services.series_metadata_editor import prepare_series_editor, save_series_editor
 from pullbox.utilities.executors.file_metadata import FileMetadataExecutor
@@ -141,6 +142,113 @@ async def test_saved_total_volumes_reaches_only_an_explicitly_approved_comic(
                 ET.fromstring(archive.read("MetronInfo.xml")).findtext("Series/VolumeCount") == "7"
             )
         assert (await preview_count())["counts"]["current"] == 1
+
+
+async def test_publication_title_write_changes_only_the_selected_ready_comic(
+    authenticated_client, sec_db, tmp_path, queue
+):
+    async with prepared(sec_db, tmp_path) as (path, staged, plan):
+        await seed_pair(sec_db, path, staged, plan)
+        series_id = plan.target.binding.metadata.series.local_id
+        issue_id = plan.target.binding.metadata.issues[0].local_id
+        endpoint = f"/api/v1/series/{series_id}/metadata-propagation"
+        sibling = path.with_name("sibling.cbz")
+        with ZipFile(sibling, "w") as archive:
+            archive.writestr("page.jpg", b"sibling page")
+            archive.writestr(
+                "ComicInfo.xml",
+                "<ComicInfo><Series>Example</Series><Number>51</Number></ComicInfo>",
+            )
+            archive.writestr(
+                "MetronInfo.xml",
+                "<MetronInfo><Series><Name>Example</Name></Series><Number>51</Number></MetronInfo>",
+            )
+        async with sec_db.begin() as session:
+            file = await session.get(LibraryFile, plan.target.binding.library_file_id)
+            other = Issue(series_id=series_id, issue_number=51)
+            session.add(other)
+            await session.flush()
+            session.add(
+                IssueExternalIdentity(
+                    issue_id=other.id,
+                    identity_namespace="metron",
+                    external_id="43",
+                    verification_state="verified",
+                    evidence_kind="provider_result",
+                )
+            )
+            session.add(
+                LibraryFile(
+                    file_path=str(sibling),
+                    file_name=sibling.name,
+                    file_format=file.file_format,
+                    file_size=sibling.stat().st_size,
+                    file_modified_at=datetime.fromtimestamp(sibling.stat().st_mtime, UTC),
+                    issue_id=other.id,
+                    library_root_id=file.library_root_id,
+                )
+            )
+        review = SeriesMetadataEditorReview.model_validate(
+            {
+                "mode": "library_only",
+                "edits": {
+                    "publication_titles": {
+                        "action": "set",
+                        "value": [{"name": "Le Port", "language": "fr"}],
+                    }
+                },
+            }
+        )
+        async with sec_db() as session:
+            key = (await prepare_series_editor(session, series_id, review)).preview.review_key
+        async with sec_db() as session:
+            await save_series_editor(session, series_id, review, key)
+            await session.commit()
+        with ZipFile(path) as archive:
+            original_ci = archive.read("ComicInfo.xml")
+        prior = path.read_bytes(), path.stat().st_mtime_ns
+        other_prior = sibling.read_bytes(), sibling.stat().st_mtime_ns
+
+        async def preview():
+            response = await authenticated_client.post(
+                endpoint + "/preview",
+                json={"fields": ["publication_titles"]},
+                headers=csrf(authenticated_client),
+            )
+            assert response.status_code == 202, response.text
+            await queue.dispatch_next()
+            return (await authenticated_client.get(endpoint + "/job")).json()
+
+        report = await preview()
+        assert report["counts"] == {"ready": 2}, [row["reason"] for row in report["targets"]]
+        assert all(
+            c["document"] == "MetronInfo.xml" and "/AlternativeNames" in c["field"]
+            for row in report["targets"]
+            for c in row["changes"]
+        )
+        assert all(
+            any(c["after"] == "Le Port" for c in row["changes"]) for row in report["targets"]
+        )
+        assert (path.read_bytes(), path.stat().st_mtime_ns) == prior
+        result = await authenticated_client.post(
+            endpoint + "/write",
+            json={"job_id": report["job"]["id"], "issue_ids": [issue_id]},
+            headers=csrf(authenticated_client),
+        )
+        assert result.status_code == 202, result.text
+        await queue.dispatch_next()
+        assert (await authenticated_client.get(endpoint + "/job")).json()["counts"] == {
+            "written": 1
+        }
+        with ZipFile(path) as archive:
+            node = ET.fromstring(archive.read("MetronInfo.xml")).find(
+                "Series/AlternativeNames/AlternativeName"
+            )
+            assert node.text == "Le Port" and node.attrib == {"lang": "fr"}
+            assert archive.read("ComicInfo.xml") == original_ci
+            assert archive.read("page.jpg") == b"page bytes"
+        assert (await preview())["counts"] == {"ready": 1, "current": 1}
+        assert (sibling.read_bytes(), sibling.stat().st_mtime_ns) == other_prior
 
 
 @pytest.mark.parametrize("change", ["series", "file"])
