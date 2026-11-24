@@ -328,7 +328,9 @@ async def link_confirmed_release(
                 IdentityEventEvidence(
                     ExactIdentityEvidence(identity, IdentityEvidenceKind.USER_SELECTION),
                     context.selection.fingerprint,
-                    locator=IdentityEvidenceLocator(IdentityEvidenceRecordKind.SERIES, series_id),
+                    locator=IdentityEvidenceLocator(
+                        IdentityEvidenceRecordKind.LOCG_RELEASE, selection.release_id
+                    ),
                 ),
                 actor=IdentityEventActor.USER,
                 actor_user_id=actor_user_id,

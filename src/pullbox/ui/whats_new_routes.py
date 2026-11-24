@@ -28,6 +28,7 @@ from pullbox.services.whats_new_actions import (
     series_published_as_of,
 )
 from pullbox.services.whats_new_cache_service import WhatsNewCacheService
+from pullbox.services.whats_new_exact_add import release_offers
 from pullbox.services.whats_new_grab import cache_fingerprint, has_grab_capability
 from pullbox.services.whats_new_issue_state import ReleaseIssueStatus, local_release_issues
 from pullbox.ui.series_routes import _request_search_cache, load_add_series_search_context
@@ -183,7 +184,12 @@ async def whats_new_page(
     active_model = current_week_model if active_window == "current" else upcoming_model
     actions_enabled = get_settings().metadata_whats_new_actions_enabled
     if actions_enabled:
-        await _decorate_release_actions(session, [current_week_model, upcoming_model])
+        feeds = [row for row in (current_week, upcoming) if row is not None]
+        if store_date is not None and current_week != await service.get_latest_current_week(
+            session
+        ):
+            feeds = []
+        await _decorate_release_actions(session, [current_week_model, upcoming_model], feeds)
     ctx = _ctx(
         request,
         user,
@@ -236,7 +242,7 @@ def _view_model(
 
 
 async def _decorate_release_actions(
-    session: DbSession, models: list[dict[str, object] | None]
+    session: DbSession, models: list[dict[str, object] | None], feeds: list[WhatsNewReleaseCache]
 ) -> None:
     """One bounded ownership lookup for the visible release rows; no provider I/O."""
     releases: list[dict[str, Any]] = []
@@ -272,6 +278,16 @@ async def _decorate_release_actions(
     }
     as_of = datetime.now(UTC).date()
     today = date.today()
+    candidates = {
+        r["discovery_series_id"]
+        for r in releases
+        if r["discovery_release_id"]
+        and r["discovery_series_id"]
+        and r["discovery_series_id"] not in owners
+        and r["discovery_series_id"] not in watches
+        and series_published_as_of(r.get("series"), as_of)
+    }
+    offers = await release_offers(session, feeds, candidates)
     for release, issue_state in zip(releases, issue_states, strict=True):
         release["local_issue"] = issue_state
         if can_grab and issue_state and issue_state.state is ReleaseIssueStatus.MISSING:
@@ -285,6 +301,17 @@ async def _decorate_release_actions(
         if series is not None:
             release["local_series"] = {"id": series.id, "monitored": series.monitored}
         watch = watches.get(release["discovery_series_id"])
+        if (
+            (offer := offers.get(release["discovery_series_id"]))
+            and release["discovery_release_id"]
+            and series_published_as_of(release.get("series"), as_of)
+        ):
+            release_id = int(release["discovery_release_id"])
+            release["exact_offer"] = {
+                "cache_id": release["discovery_cache_id"],
+                "release_id": release_id,
+                "fingerprint": offer.fingerprint(release["discovery_fingerprint"], release_id),
+            }
         if watch is not None:
             release["watch_id"] = watch.id
             release["watch_state"] = watch.state.value

@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- In **What's New**, use **Add Series** directly from a published release
+  with a confirmed provider ID and a default managed library. It uses your
+  usual monitoring setting. **Find & Add** stays available when an ID is
+  missing or you want to choose the match yourself.
+
 - A [fresh PostgreSQL installation guide](docs/postgresql-fresh-install.md)
   and standalone Docker Compose example keep new libraries separate from
   existing SQLite installations. The default SQLite setup is unchanged.

@@ -148,7 +148,10 @@ async def pending_adds(
     return jobs
 
 
-async def _catalog(session: AsyncSession, job: WatchAdd) -> SourceSeriesBundle:
+async def fetch_published_catalog(
+    session: AsyncSession, locg: str, claims: dict[IdentityNamespace, str]
+) -> SourceSeriesBundle:
+    """Require one complete configured catalog to corroborate every published claim."""
     gcd = get_settings().metadata_gcd_api_v2_enabled
     registry = MetadataSourceRegistry(
         await load_source_runtime(session, gcd_api_enabled=gcd),
@@ -158,7 +161,7 @@ async def _catalog(session: AsyncSession, job: WatchAdd) -> SourceSeriesBundle:
     await session.rollback()
     retry = False
     for source in registry.ordered_sources():
-        identity = job.claims.get(source.identity_namespace)
+        identity = claims.get(source.identity_namespace)
         if not identity or registry.source_availability(source, SourceCapability.ISSUE_LIST):
             continue
         try:
@@ -181,13 +184,13 @@ async def _catalog(session: AsyncSession, job: WatchAdd) -> SourceSeriesBundle:
         verified[native.identity_namespace] = native.external_id
         if (
             not bundle.issues
-            or any(ns in verified and verified[ns] != value for ns, value in job.claims.items())
-            or verified.get(IdentityNamespace.LOCG, job.locg) != job.locg
+            or any(ns in verified and verified[ns] != value for ns, value in claims.items())
+            or verified.get(IdentityNamespace.LOCG, locg) != locg
         ):
             raise SeriesAdoptionError(
                 "The published series and provider catalog need confirmation."
             )
-        if not job.claims.keys() <= verified.keys():
+        if not claims.keys() <= verified.keys():
             continue  # A lower-priority source may corroborate every supplied ID.
         return approve_catalog_review(bundle, None)
     raise SeriesAdoptionError(
@@ -202,7 +205,7 @@ async def _add(session: AsyncSession, job: WatchAdd) -> None:
         or not await session.scalar(select(SeriesInterest.id).where(*job.current()))
     ):
         return
-    bundle = await _catalog(session, job)
+    bundle = await fetch_published_catalog(session, job.locg, job.claims)
     await session.rollback()
 
     async def guard() -> None:

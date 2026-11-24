@@ -32,6 +32,7 @@ class IdentityEvidenceRecordKind(enum.StrEnum):
     IMPORT_JOB_ACTION = "import_job_action"
     LIBRARY_FILE = "library_file"
     RELEASE_WATCH = "release_watch"
+    LOCG_RELEASE = "locg_release"
 
 
 class IdentityEventActor(enum.StrEnum):
@@ -42,7 +43,7 @@ class IdentityEventActor(enum.StrEnum):
 
 @dataclass(frozen=True)
 class IdentityEvidenceLocator:
-    """Safe local record locator, not a path or evidence payload."""
+    """Bounded record reference, not a path, URL or free-form evidence payload."""
 
     record_kind: IdentityEvidenceRecordKind
     record_id: int

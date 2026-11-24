@@ -143,6 +143,10 @@
                 </div>
                 {% endif %}
               {% elif release.discovery_release_id %}
+                {% if release.exact_offer %}
+                <button type="button" class="btn-primary btn-sm whitespace-nowrap" data-release-offer='{{ release.exact_offer|tojson }}'
+                        :disabled="watchBusy || adding" @click="addExactRelease($el)">Add Series</button>
+                {% endif %}
                 <button type="button" class="btn-ghost btn-sm whitespace-nowrap" data-testid="whats-new-find-add" data-discovery-find-add
                         @click="findRelease({{ release.discovery_cache_id }}, {{ release.discovery_release_id }}, $el)">Find &amp; Add</button>
                 <span data-discovery-watch="{{ release.discovery_series_id or '' }}" data-watch-cache="{{ release.discovery_cache_id }}" data-watch-release="{{ release.discovery_release_id }}" data-watchable="{{ 'true' if release.watchable else 'false' }}">

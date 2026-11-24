@@ -10,7 +10,8 @@ from pydantic import BaseModel, ConfigDict
 
 from pullbox.api.deps import AuthenticatedUser, DbSession, InteractiveOperatorUser  # noqa: TC001
 from pullbox.config import get_settings
-from pullbox.core.exceptions import PullboxError
+from pullbox.core.exceptions import PullboxError, ValidationError
+from pullbox.core.metadata_identity_state import IdentityReviewRequiredError
 from pullbox.schemas.search import (
     DcGrabRequest,
     DcGrabResponse,
@@ -23,10 +24,13 @@ from pullbox.schemas.whats_new import (
     WhatsNewCacheMetadata,
     WhatsNewCurrentWeekResponse,
     WhatsNewIssueSelection,
+    WhatsNewSeriesSelection,
     WhatsNewUpcomingResponse,
     WhatsNewWatchRequest,
 )
 from pullbox.services.library_root_management import available_add_series_roots
+from pullbox.services.metadata_identity_attachment import IdentityAttachmentConflictError
+from pullbox.services.metadata_series_adoption import SeriesAdoptionError
 from pullbox.services.series_interest import (
     ACTIVE_STATES,
     cancel_watch,
@@ -42,6 +46,7 @@ from pullbox.services.whats_new_actions import (
     load_release_selection,
 )
 from pullbox.services.whats_new_cache_service import WhatsNewCacheService
+from pullbox.services.whats_new_exact_add import add_exact_release
 from pullbox.services.whats_new_grab import validate_issue_selection
 from pullbox.services.whats_new_refresh_queue import (
     RefreshQueueStatus,
@@ -127,6 +132,27 @@ async def create_release_watch(
         return watch_response(await save_watch(session, body, user.id))
     except WhatsNewSelectionError as exc:
         raise HTTPException(409, str(exc)) from exc
+
+
+@router.post("/add-series")
+async def add_published_series(
+    body: WhatsNewSeriesSelection, session: DbSession, user: InteractiveOperatorUser
+) -> dict[str, object]:
+    if not get_settings().metadata_whats_new_actions_enabled:
+        raise HTTPException(404, "Release discovery actions are not enabled.")
+    try:
+        return await add_exact_release(session, body, user.id)
+    except WhatsNewSelectionError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except (
+        SeriesAdoptionError,
+        IdentityAttachmentConflictError,
+        IdentityReviewRequiredError,
+        ValidationError,
+    ) as exc:
+        raise HTTPException(
+            409, "The exact catalog or library could not be confirmed. Use Find & Add."
+        ) from exc
 
 
 @router.post("/watch/{interest_id}/cancel")

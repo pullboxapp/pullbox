@@ -5,6 +5,19 @@ proven issue store date from the public What's New release cache. This is
 passive release context, not a new executable provider, settings entry,
 credential, crawler or source-priority choice.
 
+## Adding From What's New
+
+For a published release, **Add Series** uses the configured managed default
+and normal search-on-add policy. It requires fresh, agreeing public release
+evidence and a configured source for at least one exact series ID. Rendering
+the table does not search providers. On click, one complete provider catalog
+must corroborate all supplied IDs; Pullbox rechecks the release and destination
+before saving. Repeat clicks do not create duplicate series. The selected
+release ID is discovery evidence, never a canonical issue ID.
+
+**Find & Add** remains available when evidence is sparse or changes. An
+active Watch retains its own destination and confirmation workflow.
+
 ## Admission
 
 The series must already own a verified LOCG series identity, established by exact

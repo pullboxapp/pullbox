@@ -193,6 +193,25 @@ function whatsNewFindAdd() {
       return this.openReleaseFinder(`/api/v1/whats-new/resolve/${cacheId}/${releaseId}`, trigger);
     },
 
+    async addExactRelease(trigger) {
+      if (this.watchBusy || this.adding || this.findOpen) return;
+      const cell = trigger.closest('[data-discovery-series]');
+      const identity = cell?.dataset.discoverySeries;
+      this.watchBusy = true;
+      this.watchFeedback = 'Adding series...';
+      try {
+        const result = await this.watchRequest('/api/v1/whats-new/add-series', JSON.parse(trigger.dataset.releaseOffer));
+        if (this.disposed) return;
+        if (!identity || result.locg_series_id !== identity) throw new Error('Reload to check the series match.');
+        this.patchAddedRelease(result, identity);
+        this.watchFeedback = result.monitored ? 'Series added and tracked.' : 'Series added. Monitoring is paused.';
+        this.$nextTick(() => cell.querySelector('a')?.focus({ preventScroll: true }));
+      } catch (error) {
+        if (!this.disposed) this.watchFeedback = error.name === 'AbortError'
+          ? 'Add Series timed out. Reload to check your library before retrying.' : error.message;
+      } finally { this.watchBusy = false; }
+    },
+
     findWatched(interestId, trigger) {
       return this.openReleaseFinder(`/api/v1/whats-new/watch/${interestId}/resolve`, trigger);
     },
@@ -204,7 +223,7 @@ function whatsNewFindAdd() {
     },
 
     async openReleaseFinder(url, trigger) {
-      if (this.adding) return;
+      if (this.adding || this.watchBusy) return;
       this.findController?.abort();
       const sequence = ++this.findSequence;
       const controller = new AbortController();
@@ -350,11 +369,14 @@ function whatsNewFindAdd() {
     },
 
     afterSeriesAdded(data) {
+      this.patchAddedRelease(data, this.releaseContext.locg_series_id);
+      this.releaseCompleted = true;
+    },
+
+    patchAddedRelease(data, identity) {
       if (!Number.isSafeInteger(data.id) || data.id < 1 || typeof data.monitored !== 'boolean') {
         throw new Error('The Add response could not be verified. Reload the release list.');
       }
-      this.releaseCompleted = true;
-      const identity = this.releaseContext.locg_series_id;
       if (!identity) return;
       // Patch only confirmed rows, keeping the release table, scroll and filters intact.
       for (const cell of this.$root.querySelectorAll('[data-discovery-series]')) {
