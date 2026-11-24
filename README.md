@@ -214,6 +214,7 @@ read-only or runtime-managed inside Pullbox.
 | `PULLBOX_RATE_LIMIT_TIER3` | `300` | Read-operation requests per minute per IP. |
 | `PULLBOX_COMICVINE_API_KEY` | unset | Optional ComicVine API key bootstrap value. The UI is preferred after setup. |
 | `PULLBOX_COMICVINE_RATE_LIMIT` | `200` | ComicVine request budget per hour. |
+| `PULLBOX_METADATA_WHATS_NEW_ACTIONS_ENABLED` | `false` | Enable Find & Add, Watch and issue actions in What's New. Does not enable automatic file metadata writing. |
 | `PULLBOX_DATA_API_BASE_URL` | `https://api.pullbox.app` | Pullbox Data API base URL. Leave default unless testing a private deployment. |
 | `PULLBOX_METADATA_REFRESH_DAYS` | `30` | Metadata refresh age threshold. |
 | `PULLBOX_SEARCH_INTERVAL_HOURS` | `6` | Automatic wanted-search scheduler cadence. |
@@ -254,6 +255,18 @@ read-only or runtime-managed inside Pullbox.
 - Intervention queue for ambiguous matches.
 - Health checks, diagnostics, logs, backups, and audit trail.
 - Server-rendered UI with HTMX, Alpine.js, and Tailwind CSS.
+
+### Watching an upcoming series
+
+With What's New actions enabled, choose **Watch** on an upcoming release.
+Pullbox remembers the selected library. A refresh can add the monitored series
+when publication and an exact provider match are confirmed. If it needs your
+choice, open **Pull List > Watching > Find & Add** and review the provider result.
+
+If the saved library is offline, restore the mount and use **Recheck library**.
+Changing the default does not redirect an existing Watch. If you removed its
+library, close the finder, choose **Cancel Watch**, then use **Find & Add** in
+What's New. Cancelling a Watch does not delete a series or files.
 
 
 ## Development

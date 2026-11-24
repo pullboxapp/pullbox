@@ -184,6 +184,7 @@ function whatsNewFindAdd() {
     findResults: [], findMessages: [], findPage: 1, findPages: 1, findTotal: 0,
     findSources: [['all', 'All enabled sources']], findRevisions: {}, findSequence: 0, findController: null,
     releaseContext: null, releaseTrigger: null, releaseCompleted: false,
+    findDestinationProblem: null,
 
     findRelease(cacheId, releaseId, trigger) {
       return this.openReleaseFinder(`/api/v1/whats-new/resolve/${cacheId}/${releaseId}`, trigger);
@@ -193,6 +194,12 @@ function whatsNewFindAdd() {
       return this.openReleaseFinder(`/api/v1/whats-new/watch/${interestId}/resolve`, trigger);
     },
 
+    recheckWatchLibrary() {
+      const problem = this.findDestinationProblem;
+      if (!Number.isSafeInteger(problem?.watch_id) || !Number.isSafeInteger(problem.library_root_id)) return;
+      return this.openReleaseFinder(`/api/v1/whats-new/watch/${problem.watch_id}/resolve?expected_root_id=${problem.library_root_id}`, this.releaseTrigger);
+    },
+
     async openReleaseFinder(url, trigger) {
       if (this.adding) return;
       this.findController?.abort();
@@ -200,6 +207,7 @@ function whatsNewFindAdd() {
       const controller = new AbortController();
       this.findController = controller;
       this.releaseContext = null;
+      this.findDestinationProblem = null;
       this.releaseCompleted = false;
       this.releaseTrigger = trigger;
       this.findOpen = true;
@@ -211,7 +219,7 @@ function whatsNewFindAdd() {
       this.findSource = 'all';
       this.findQuery = '';
       this.$nextTick(() => requestAnimationFrame(() => {
-        if (this.findOpen && !this.disposed) this.$refs.findQuery?.focus({ preventScroll: true });
+        if (this.findOpen && !this.disposed && !this.findDestinationProblem) this.$refs.findQuery?.focus({ preventScroll: true });
       }));
       const timeout = setTimeout(() => controller.abort(), 30000);
       try {
@@ -219,12 +227,22 @@ function whatsNewFindAdd() {
         const data = await response.json();
         if (sequence !== this.findSequence || this.disposed || !this.findOpen) return;
         if (!response.ok) throw new Error(data.detail || data.error?.message || 'Reload the release list and retry.');
-        this.releaseContext = data;
-        this.findQuery = data.title;
         const roots = data.roots || [];
         this.libraryRootId = roots[0]?.id || null;
         this.rootLabel = roots[0] ? roots[0].path + ' - ' + roots[0].name : '';
         this.rootPaths = Object.fromEntries(roots.map(root => [root.id, root.path]));
+        if (data.watch_destination_problem) {
+          this.findDestinationProblem = data.watch_destination_problem;
+          this.findBusy = false;
+          this.$nextTick(() => requestAnimationFrame(() => {
+            if (sequence !== this.findSequence || !this.findOpen || this.disposed) return;
+            const focus = this.findDestinationProblem.removed ? this.$refs.findDialog : this.$refs.findRecheck;
+            focus?.focus({ preventScroll: true });
+          }));
+          return;
+        }
+        this.releaseContext = data;
+        this.findQuery = data.title;
         this.findBusy = false;
         await this.searchReleaseSeries();
       } catch (error) {

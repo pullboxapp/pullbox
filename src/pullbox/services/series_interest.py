@@ -74,6 +74,37 @@ def _check_repeat_destination(interest: SeriesInterest, root_id: int) -> SeriesI
     return interest
 
 
+async def unavailable_watch_destination(
+    session: AsyncSession, interest: SeriesInterest
+) -> dict[str, str | bool | int]:
+    """Explain a failed destination check without choosing or changing a root."""
+    root_id = interest.target_library_root_id
+    root = await session.get(LibraryRoot, root_id) if root_id is not None else None
+    if root is None:
+        return {
+            "removed": True,
+            "message": (
+                "The library saved for this Watch was removed. Close this window and choose "
+                "Cancel Watch. Then use Find & Add in What's New to add to your current library."
+            ),
+        }
+    if not root.enabled:
+        reason = "is disabled. Enable it in Library roots"
+    elif not root.allow_managed_writes:
+        reason = (
+            "does not allow managed writes. If this is the intended destination, "
+            'turn on "Allow managed files" in Library roots'
+        )
+    else:
+        reason = "is unavailable for writing. Check its folder mount and write permissions"
+    return {
+        "removed": False,
+        "watch_id": interest.id,
+        "library_root_id": root.id,
+        "message": f'The library saved for this Watch, "{root.name}", {reason}, then recheck.',
+    }
+
+
 async def find_watch(session: AsyncSession, identity: str) -> SeriesInterest | None:
     rows = await session.scalars(
         select(SeriesInterest)

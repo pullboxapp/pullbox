@@ -215,6 +215,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Find & Add now identifies an unavailable watched library before searching
+  providers. Restore that library and recheck it, or cancel the Watch if its
+  library was removed. Pullbox never silently substitutes the default library.
+
 - SQLite-to-PostgreSQL first-start approval now reports the library root ID
   when it cannot map a folder from the stopped SQLite container. Approval
   still stops rather than using a different folder.

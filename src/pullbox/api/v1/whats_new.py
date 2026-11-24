@@ -33,6 +33,7 @@ from pullbox.services.series_interest import (
     find_watch,
     resolve_watched_release,
     save_watch,
+    unavailable_watch_destination,
     watch_response,
 )
 from pullbox.services.whats_new_actions import WhatsNewSelectionError, load_release_selection
@@ -160,6 +161,7 @@ async def resolve_watch_context(
     interest_id: Annotated[int, Path(gt=0, le=2**31 - 1)],
     session: DbSession,
     _user: InteractiveOperatorUser,
+    expected_root_id: Annotated[int | None, Query(gt=0, le=2**31 - 1)] = None,
 ) -> dict[str, object]:
     if not get_settings().metadata_whats_new_actions_enabled:
         raise HTTPException(404, "Release discovery actions are not enabled.")
@@ -167,11 +169,17 @@ async def resolve_watch_context(
         context = await resolve_watched_release(session, interest_id)
     except WhatsNewSelectionError as exc:
         raise HTTPException(409, str(exc)) from exc
-    return await _release_context_response(session, context, interest_id=interest_id)
+    return await _release_context_response(
+        session, context, interest_id=interest_id, expected_root_id=expected_root_id
+    )
 
 
 async def _release_context_response(
-    session: DbSession, context: ReleaseSelection, *, interest_id: int | None = None
+    session: DbSession,
+    context: ReleaseSelection,
+    *,
+    interest_id: int | None = None,
+    expected_root_id: int | None = None,
 ) -> dict[str, object]:
     watch_roots = await available_add_series_roots(session, require_default=False)
     default_id = (
@@ -185,8 +193,15 @@ async def _release_context_response(
         interest is None or interest.id != interest_id or interest.state not in ACTIVE_STATES
     ):
         raise HTTPException(409, "This Watch is no longer active. Reload the Pull List.")
+    destination_problem = None
     if interest is not None and interest.state in ACTIVE_STATES:
+        if expected_root_id is not None and interest.target_library_root_id != expected_root_id:
+            raise HTTPException(
+                409, "The watched destination changed. Close and reopen Find & Add."
+            )
         roots = [root for root in watch_roots if root["id"] == interest.target_library_root_id]
+        if not roots:
+            destination_problem = await unavailable_watch_destination(session, interest)
     return {
         "selection": context.selection.model_dump(),
         "title": context.title,
@@ -195,6 +210,7 @@ async def _release_context_response(
         "can_link": context.locg_series_id is not None,
         "locg_series_id": context.locg_series_id,
         "roots": roots,
+        "watch_destination_problem": destination_problem,
         "watch_roots": watch_roots,
         "watch_default_id": default_id,
         "can_watch": bool(

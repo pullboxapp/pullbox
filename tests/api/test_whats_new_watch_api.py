@@ -13,6 +13,7 @@ from pullbox.models import Series
 from pullbox.models.config import SystemConfig
 from pullbox.models.library import LibraryRoot
 from pullbox.models.metadata_identity import SeriesExternalIdentity
+from pullbox.models.series_interest import SeriesInterest, SeriesInterestState
 from pullbox.models.whats_new import WhatsNewReleaseCache
 from tests.api.test_metadata_sources_api import csrf
 from tests.api.test_source_series_add_api import source_add_setup  # noqa: F401
@@ -91,6 +92,81 @@ async def test_find_watched_series_resolves_identity_not_title(
         assert "selection" not in response.json()
     assert not source_add_setup["calls"] and not source_add_setup["events"]
     assert not list(source_add_setup["root"].iterdir())
+
+
+@pytest.mark.parametrize("problem", ["disabled", "reference_only", "offline", "removed"])
+async def test_watch_finder_reports_its_own_unavailable_destination(
+    authenticated_client, source_add_setup, future_release, sec_db, tmp_path, problem
+):
+    library = tmp_path / "alternate-shelf"
+    library.mkdir()
+    async with sec_db.begin() as session:
+        root = LibraryRoot(name="Alternate shelf", path=str(library), allow_managed_writes=True)
+        session.add(root)
+        await session.flush()
+        root_id = root.id
+    saved = (await watch(authenticated_client, future_release, root_id)).json()
+    async with sec_db.begin() as session:
+        root = await session.get(LibraryRoot, root_id)
+        if problem == "removed":
+            await session.delete(root)
+        elif problem == "disabled":
+            root.enabled = False
+        elif problem == "reference_only":
+            root.allow_managed_writes = False
+        else:
+            library.rmdir()
+
+    for route in (
+        f"/api/v1/whats-new/watch/{saved['id']}/resolve",
+        f"/api/v1/whats-new/resolve/{future_release}/1514020",
+    ):
+        response = await authenticated_client.get(route)
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["watch_default_id"] == source_add_setup["body"]["library_root_id"]
+        assert data["roots"] == []
+        info = data["watch_destination_problem"]
+        assert info["removed"] is (problem == "removed")
+        if problem == "removed":
+            assert "Cancel Watch" in info["message"] and "removed" in info["message"]
+        else:
+            assert "Alternate shelf" in info["message"]
+            assert {
+                "disabled": "disabled",
+                "reference_only": "managed writes",
+                "offline": "folder",
+            }[problem] in info["message"]
+    async with sec_db() as session:
+        record = await session.get(SeriesInterest, saved["id"])
+        assert record.state is SeriesInterestState.WATCHING
+        assert record.target_library_root_id == (None if problem == "removed" else root_id)
+    assert not source_add_setup["calls"] and not source_add_setup["events"]
+
+
+async def test_rechecking_watched_root_rejects_a_changed_or_cancelled_watch(
+    authenticated_client, source_add_setup, future_release, sec_db, tmp_path
+):
+    saved = (await watch(authenticated_client, future_release)).json()
+    root_id = saved["library_root_id"]
+    lookup = f"/api/v1/whats-new/watch/{saved['id']}/resolve?expected_root_id={root_id}"
+    other = tmp_path / "new-shelf"
+    other.mkdir()
+    cancel_url = f"/api/v1/whats-new/watch/{saved['id']}/cancel"
+    assert (
+        await authenticated_client.post(cancel_url, headers=csrf(authenticated_client))
+    ).is_success
+    assert (await authenticated_client.get(lookup)).status_code == 409
+    async with sec_db.begin() as session:
+        root = LibraryRoot(name="New shelf", path=str(other), allow_managed_writes=True)
+        session.add(root)
+        await session.flush()
+        new_id = root.id
+    renewed = (await watch(authenticated_client, future_release, new_id)).json()
+    assert renewed["id"] == saved["id"]
+    response = await authenticated_client.get(lookup)
+    assert response.status_code == 409 and "destination changed" in response.text
+    assert not source_add_setup["calls"] and not list(other.iterdir())
 
 
 async def test_watch_repeat_cache_eviction_cancel_and_pull_list_are_durable(

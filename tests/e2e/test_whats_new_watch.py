@@ -300,6 +300,95 @@ def test_refresh_confirmation_has_actionable_release_link_and_cancel(
     expect(watched).not_to_be_visible()
 
 
+@pytest.mark.parametrize(
+    "entry,removed", [("pull-list", False), ("whats-new", True), ("whats-new", False)]
+)
+def test_watched_destination_problem_stops_search_and_offers_recovery(
+    watch_page, seeded_server, tmp_path, entry, removed
+):
+    page = watch_page
+    library = tmp_path / "shelf"
+    library.mkdir()
+
+    async def prepare():
+        async with get_session_factory().begin() as session:
+            root = LibraryRoot(name="Watch shelf", path=str(library), allow_managed_writes=True)
+            session.add(root)
+            await session.flush()
+            release = await session.scalar(select(WhatsNewReleaseCache))
+            release.fetched_at = release.last_successful_refresh_at = datetime.now(UTC)
+            return root.id, release.id
+
+    async def remove_root():
+        async with get_session_factory().begin() as session:
+            await session.execute(delete(LibraryRoot).where(LibraryRoot.id == root_id))
+
+    root_id, cache_id = _run_async_blocking(prepare())
+    try:
+        page.goto(f"{seeded_server}/whats-new")
+        data = page.request.get(
+            f"{seeded_server}/api/v1/whats-new/resolve/{cache_id}/260001"
+        ).json()
+        assert data["watch_default_id"] and data["watch_default_id"] != root_id
+        saved = page.request.post(
+            f"{seeded_server}/api/v1/whats-new/watch",
+            headers={"X-CSRF-Token": page.evaluate("readCsrfTokenFromBody()")},
+            data={"selection": data["selection"], "library_root_id": root_id},
+        )
+        assert saved.ok, saved.text()
+        if removed:
+            _run_async_blocking(remove_root())
+        else:
+            library.rmdir()
+        page.goto(f"{seeded_server}/{entry}")
+        row = page.get_by_test_id(
+            "whats-new-release-row" if entry == "whats-new" else "pull-list-watch-row"
+        ).filter(has_text="Atlas Deluxe")
+        opener = row.get_by_role("button", name="Find & Add", exact=True)
+        searches = []
+        page.on(
+            "request",
+            lambda r: searches.append(r.url) if "/whats-new/find-series/" in r.url else None,
+        )
+        opener.click()
+        finder = page.get_by_test_id("whats-new-find-dialog")
+        warning = finder.get_by_role("alert").filter(has_text="Watch")
+        expect(warning).to_contain_text("removed" if removed else "Watch shelf")
+        expect(finder.get_by_role("button", name="Search", exact=True)).not_to_be_visible()
+        expect(finder.get_by_role("link", name="Open What's New")).not_to_be_visible()
+        assert not searches
+        recheck = finder.get_by_role("button", name="Recheck library")
+        if removed:
+            expect(recheck).not_to_be_visible()
+            expect(warning).to_contain_text("Cancel Watch")
+        else:
+            expect(finder.get_by_role("link", name="Review library roots")).to_have_attribute(
+                "href", "/settings?tab=media"
+            )
+            expect(recheck).to_be_focused()
+            assert_no_axe_violations(
+                page,
+                name=f"watch-library-unavailable-{entry}",
+                include=["[data-testid='whats-new-find-dialog']"],
+            )
+            library.mkdir()
+            with page.expect_response(
+                lambda r: r.url.endswith(
+                    f"/watch/{saved.json()['id']}/resolve?expected_root_id={root_id}"
+                )
+            ) as retry:
+                recheck.click()
+            assert [r["id"] for r in retry.value.json()["roots"]] == [root_id]
+            expect(finder.get_by_label("Series title")).to_have_value("Atlas Deluxe")
+            expect(finder.get_by_role("button", name="Search", exact=True)).to_be_enabled()
+            assert len(searches) == 1
+        page.keyboard.press("Escape")
+        expect(opener).to_be_focused()
+        expect(row.get_by_role("button", name="Cancel Watch", exact=True)).to_be_enabled()
+    finally:
+        _run_async_blocking(remove_root())
+
+
 def test_missing_watched_release_does_not_search_for_another_series(watch_page, seeded_server):
     page = watch_page
     page.goto(f"{seeded_server}/whats-new")

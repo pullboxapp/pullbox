@@ -11,10 +11,17 @@
       </button>
     </div>
     <div class="modal-body p-5 space-y-4">
-      <p class="text-sm text-pb-text-sec">Choose the series this release belongs to, then review the Add preview. This uses your normal Add Series and Search on Add settings.</p>
+      <p x-show="!findDestinationProblem" class="text-sm text-pb-text-sec">Choose the series this release belongs to, then review the Add preview. This uses your normal Add Series and Search on Add settings.</p>
+      <div x-show="findDestinationProblem" x-cloak>
+        <p role="alert" class="inline-alert inline-alert-warning" x-text="findDestinationProblem?.message"></p>
+        <div x-show="findDestinationProblem && !findDestinationProblem.removed" class="mt-3 flex flex-wrap gap-2">
+          <button type="button" x-ref="findRecheck" class="btn-primary btn-sm" @click="recheckWatchLibrary()">Recheck library</button>
+          <a class="btn-ghost btn-sm" href="/settings?tab=media">Review library roots</a>
+        </div>
+      </div>
       <p x-show="releaseContext" class="text-sm text-pb-text-sec" x-text="releaseContext ? [releaseContext.title, releaseContext.publisher, releaseContext.year].filter(Boolean).join(' · ') : ''"></p>
       <p x-show="releaseContext && !releaseContext.can_link" class="inline-alert inline-alert-warning">This release has no stable series ID. You can add a series, but this release will not be marked Tracked.</p>
-      <form hx-boost="false" @submit.prevent="searchReleaseSeries()" class="space-y-3">
+      <form x-show="!findDestinationProblem" hx-boost="false" @submit.prevent="searchReleaseSeries()" class="space-y-3">
         <label for="whats-new-find-query" class="text-sm font-medium">Series title</label>
         <input id="whats-new-find-query" x-ref="findQuery" class="input-pb w-full" x-model="findQuery" maxlength="512" autocomplete="off">
         <div class="flex flex-wrap items-end gap-3">
@@ -67,7 +74,7 @@
         <span role="status" class="text-sm text-pb-text-sec" x-text="findPage + ' / ' + findPages + ' - ' + findTotal + ' matches'"></span>
         <button type="button" class="btn-ghost btn-sm" @click="searchReleaseSeries(findPage + 1)" :disabled="findBusy || findPage >= findPages">Next results</button>
       </div>
-      <button type="button" class="btn-ghost ml-auto" @click="closeFind()">Cancel</button>
+      <button type="button" class="btn-ghost ml-auto" @click="closeFind()" x-text="findDestinationProblem ? 'Close' : 'Cancel'">Cancel</button>
     </div>
   </div>
 </div>
