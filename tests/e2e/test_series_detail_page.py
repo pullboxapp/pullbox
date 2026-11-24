@@ -16,22 +16,38 @@ pytestmark = pytest.mark.e2e
 class TestSeriesDetailPage:
     """Behavior-first E2E coverage for /series/{id}."""
 
-    def test_sidecar_warning_survives_refresh_and_can_be_reviewed(self, authed_page, seeded_server):
+    @pytest.mark.parametrize(
+        ("counts", "message"),
+        [
+            (
+                '{"updated":2,"current":1,"blocked":1}',
+                "Library metadata saved. series.json folders: 2 updated, 1 already current, 1 not written.",
+            ),
+            (
+                None,
+                "Library metadata saved. Review the folders where series.json could not be written.",
+            ),
+            (
+                '{"updated":0,"current":null,"blocked":-1}',
+                "Library metadata saved. Review the folders where series.json could not be written.",
+            ),
+        ],
+    )
+    def test_sidecar_warning_survives_refresh_and_can_be_reviewed(
+        self, authed_page, seeded_server, counts, message
+    ):
         page = authed_page
         SeriesDetailPage(page, seeded_server).goto(1)
+        headers = {"X-Pullbox-Series-Json": "review"}
+        if counts is not None:
+            headers["X-Pullbox-Series-Json-Counts"] = counts
         page.route(
             "**/api/v1/series/1/refresh",
-            lambda route: route.fulfill(
-                json={"id": 1}, headers={"X-Pullbox-Series-Json": "review"}
-            ),
+            lambda route: route.fulfill(json={"id": 1}, headers=headers),
         )
         page.get_by_test_id("series-action-refresh").click()
-        expect(
-            page.get_by_text(
-                "Library metadata saved. Review the folders where series.json could not be written.",
-                exact=True,
-            )
-        ).to_be_visible()
+        expect(page.get_by_text(message, exact=True)).to_be_visible()
+        assert "series-json" not in page.url
         page.get_by_role("button", name="Review series.json folders").click()
         expect(page.get_by_role("dialog", name="Write series metadata")).to_be_visible()
 

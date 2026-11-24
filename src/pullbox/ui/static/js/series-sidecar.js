@@ -22,7 +22,9 @@ function seriesSidecar(seriesId) {
     },
     close() {
       this.open = false;
-      if (this.trigger && this.trigger.isConnected) this.trigger.focus({ preventScroll: true });
+      const target = this.trigger?.isConnected && this.trigger.getClientRects().length
+        ? this.trigger : this.$refs.writeTrigger;
+      target?.focus({ preventScroll: true });
     },
     async loadPreview() {
       if (this.busy) return;
@@ -41,7 +43,12 @@ function seriesSidecar(seriesId) {
       this.busy = true; this.error = "";
       try {
         const data = await this.request("write", { review_key: this.preview.review_key });
-        if (!this.disposed) this.result = data;
+        if (!this.disposed) {
+          this.result = data;
+          this.$dispatch("series-sidecar-written", { seriesId, counts: {
+            updated: data.written, current: data.unchanged, blocked: this.blockedCount(),
+          } });
+        }
       } catch (error) {
         if (!this.disposed) { this.error = error.message; this.preview.ready = false; }
       } finally { if (!this.disposed) this.busy = false; }
@@ -50,10 +57,11 @@ function seriesSidecar(seriesId) {
     actionLabel(action) {
       return { create: "Create series.json", update: "Update series.json", unchanged: "Up to date", blocked: "Left unchanged" }[action] || action;
     },
+    blockedCount() { return this.result.targets.filter(target => target.action === "blocked").length; },
     summary() {
       if (!this.result) return "";
       const written = this.result.written;
-      const blocked = this.result.targets.filter(target => target.action === "blocked").length;
+      const blocked = this.blockedCount();
       return "Wrote " + written + " series.json file" + (written === 1 ? "." : "s.") +
         (blocked ? " " + blocked + " folder" + (blocked === 1 ? " was" : "s were") + " left unchanged; review the reasons below." : "");
     },

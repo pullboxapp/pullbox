@@ -215,6 +215,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Refresh Metadata now reports how many series folders received an updated
+  `series.json`, were already current, or were not written. Use **Review
+  series.json folders** to see the reasons and retry after fixing a folder.
+  Reference-only folders and comic files remain untouched.
+
 - Find & Add now identifies an unavailable watched library before searching
   providers. Restore that library and recheck it, or cancel the Watch if its
   library was removed. Pullbox never silently substitutes the default library.

@@ -604,9 +604,15 @@ async def create_added_series_sidecar(
     return "review"
 
 
+@dataclass(frozen=True)
+class SidecarRefreshResult:
+    outcome: Literal["updated", "current", "review", "no-folders"]
+    counts: dict[str, int] | None = None
+
+
 async def sync_refreshed_series_sidecars(
     session: AsyncSession, series_id: int
-) -> Literal["updated", "current", "review", "no-folders"] | None:
+) -> SidecarRefreshResult | None:
     """After an interactive refresh commits, publish only to eligible managed folders."""
     try:
         setting = await session.get(SystemConfig, "series_sidecars_on_refresh")
@@ -617,15 +623,17 @@ async def sync_refreshed_series_sidecars(
         await session.commit()
         targets = await inspect_series_sidecar_binding(binding)
         if not targets:
-            return "no-folders"
+            return SidecarRefreshResult("no-folders")
         result = await _write_targets(session, binding, targets)
     except (ValueError, ValidationError, NotFoundError, OSError, SQLAlchemyError):
         # The library refresh is already committed. Only sidecar output needs review.
         await session.rollback()
-        return "review"
-    if any(target.action == "blocked" for target in result.targets):
-        return "review"
-    return "updated" if result.written else "current"
+        return SidecarRefreshResult("review")
+    blocked = sum(target.action == "blocked" for target in result.targets)
+    return SidecarRefreshResult(
+        "review" if blocked else "updated" if result.written else "current",
+        {"updated": result.written, "current": result.unchanged, "blocked": blocked},
+    )
 
 
 async def _write_targets(

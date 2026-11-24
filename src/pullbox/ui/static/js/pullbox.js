@@ -20198,7 +20198,9 @@ function seriesDetailPage(config) {
       var url = new URL(window.location.href);
       if (url.searchParams.has("series-json")) {
         this.sidecarOutcome = url.searchParams.get("series-json");
+        this.sidecarCounts = this.parseSidecarCounts(url.searchParams.get("series-json-counts"));
         url.searchParams.delete("series-json");
+        url.searchParams.delete("series-json-counts");
         window.history.replaceState(window.history.state, "", url);
       }
       this.startMetadataSyncPolling();
@@ -20277,7 +20279,28 @@ function seriesDetailPage(config) {
     },
 
     sidecarOutcome: "",
+    sidecarCounts: null,
+    updateSidecarNotice: function (detail) {
+      if (!this.sidecarOutcome || detail.seriesId !== cfg.seriesId) return;
+      this.sidecarCounts = detail.counts;
+      this.sidecarOutcome = detail.counts.blocked ? "review" : detail.counts.updated ? "updated" : "current";
+    },
+    parseSidecarCounts: function (raw) {
+      if (!raw || raw.length > 128) return null;
+      try {
+        var counts = JSON.parse(raw);
+        if (counts && ["updated", "current", "blocked"].every(
+          key => Number.isSafeInteger(counts[key]) && counts[key] >= 0
+        )) return { updated: counts.updated, current: counts.current, blocked: counts.blocked };
+      } catch { return null; }
+      return null;
+    },
     sidecarNotice: function () {
+      var counts = this.sidecarCounts;
+      if (counts && ["review", "updated", "current"].includes(this.sidecarOutcome)) {
+        return "Library metadata saved. series.json folders: " + counts.updated +
+          " updated, " + counts.current + " already current, " + counts.blocked + " not written.";
+      }
       switch (this.sidecarOutcome) {
         case "updated": return "Updated series.json in the managed series folders.";
         case "current": return "Managed series.json files are already up to date.";
@@ -20542,8 +20565,11 @@ function seriesDetailPage(config) {
           }
           var destination = new URL(self.currentDetailUrl(), window.location.origin);
           var sidecars = response.headers.get("X-Pullbox-Series-Json");
-          if (sidecars) destination.searchParams.set("series-json", sidecars);
-          else self.dispatchToast("Metadata refreshed", "success");
+          if (sidecars) {
+            destination.searchParams.set("series-json", sidecars);
+            var counts = self.parseSidecarCounts(response.headers.get("X-Pullbox-Series-Json-Counts"));
+            if (counts) destination.searchParams.set("series-json-counts", JSON.stringify(counts));
+          } else self.dispatchToast("Metadata refreshed", "success");
           setTimeout(function () {
             window.location.assign(destination);
           }, 500);

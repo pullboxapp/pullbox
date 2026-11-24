@@ -682,10 +682,17 @@ async def refresh_series(
     except SeriesRefreshError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if getattr(request.state, "auth_method", None) in {"session", "local_bypass"}:
-        outcome = await sync_refreshed_series_sidecars(session, series_id)
-        if outcome is not None:
-            response.headers["X-Pullbox-Series-Json"] = outcome
-            logger.info("series_refresh_sidecar_result", series_id=series_id, outcome=outcome)
+        sidecars = await sync_refreshed_series_sidecars(session, series_id)
+        if sidecars is not None:
+            response.headers["X-Pullbox-Series-Json"] = sidecars.outcome
+            if sidecars.counts is not None:
+                response.headers["X-Pullbox-Series-Json-Counts"] = json.dumps(sidecars.counts)
+            logger.info(
+                "series_refresh_sidecar_result",
+                series_id=series_id,
+                outcome=sidecars.outcome,
+                folders=sidecars.counts,
+            )
     return record
 
 

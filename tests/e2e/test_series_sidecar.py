@@ -109,3 +109,63 @@ def test_no_safe_location_disables_sidecar_write(authed_page, seeded_server):
     dialog = page.get_by_role("dialog", name="Write series metadata", exact=True)
     expect(dialog.get_by_role("button", name="Write series.json", exact=True)).to_be_disabled()
     expect(dialog.get_by_text("Files kept in place are not modified.", exact=True)).to_be_visible()
+
+
+@pytest.mark.parametrize("still_blocked", [True, False], ids=["one-protected", "all-resolved"])
+def test_review_retry_updates_detail_summary_and_restores_visible_focus(
+    authed_page, seeded_server, still_blocked
+):
+    page = authed_page
+    endpoint = "**/api/v1/series/1/sidecar"
+    targets = [
+        {"directory": "/comics/Split", "action": "update"},
+        {"directory": "/comics/Batman", "action": "unchanged"},
+    ]
+    if still_blocked:
+        targets.append(
+            {"directory": "/legacy/Batman", "action": "blocked", "reason": "Reference only"}
+        )
+    page.route(
+        endpoint + "/preview",
+        lambda route: route.fulfill(
+            json={
+                "series_id": 1,
+                "review_key": "a" * 64,
+                "ready": True,
+                "snapshot": {"values": {"title": "Batman"}, "identities": []},
+                "targets": targets,
+            }
+        ),
+    )
+    calls = []
+
+    def write(route):
+        calls.append(route.request.post_data_json)
+        route.fulfill(
+            json={
+                "written": 1,
+                "unchanged": 1,
+                "targets": [dict(targets[0], action="unchanged"), *targets[1:]],
+            }
+        )
+
+    page.route(endpoint + "/write", write)
+    page.goto(f"{seeded_server}/series/1?series-json=review")
+    review = page.get_by_role("button", name="Review series.json folders")
+    review.click()
+    dialog = page.get_by_role("dialog", name="Write series metadata")
+    dialog.get_by_role("button", name="Write series.json", exact=True).click()
+    expect(dialog.get_by_role("status")).to_contain_text("Wrote 1 series.json file")
+    dialog.get_by_role("button", name="Close", exact=True).click()
+    expect(
+        page.get_by_text(
+            f"Library metadata saved. series.json folders: 1 updated, 1 already current, {int(still_blocked)} not written.",
+            exact=True,
+        )
+    ).to_be_visible()
+    assert calls == [{"review_key": "a" * 64}]
+    if still_blocked:
+        expect(review).to_be_focused()
+    else:
+        expect(review).not_to_be_visible()
+        expect(page.get_by_role("button", name="Write series metadata", exact=True)).to_be_focused()

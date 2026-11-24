@@ -187,15 +187,21 @@ async def test_opt_in_refresh_respects_import_guard_and_leaves_current_sidecar_u
         await session.flush()
         job_id = job.id
     async with factory() as session:
-        assert await series_sidecar.sync_refreshed_series_sidecars(session, series_id) == "review"
+        blocked = await series_sidecar.sync_refreshed_series_sidecars(session, series_id)
+        assert blocked.outcome == "review"
+        assert blocked.counts == {"updated": 0, "current": 0, "blocked": 1}
     assert not sidecar.exists()
     assert not list(folder.glob(".pullbox-series-*.tmp"))
     async with factory.begin() as session:
         (await session.get(ImportJob, job_id)).status = ImportJobStatus.COMPLETED
     async with factory() as session:
-        assert await series_sidecar.sync_refreshed_series_sidecars(session, series_id) == "updated"
+        updated = await series_sidecar.sync_refreshed_series_sidecars(session, series_id)
+        assert updated.outcome == "updated"
+        assert updated.counts == {"updated": 1, "current": 0, "blocked": 0}
         before = sidecar.stat()
-        assert await series_sidecar.sync_refreshed_series_sidecars(session, series_id) == "current"
+        current = await series_sidecar.sync_refreshed_series_sidecars(session, series_id)
+        assert current.outcome == "current"
+        assert current.counts == {"updated": 0, "current": 1, "blocked": 0}
     after = sidecar.stat()
     assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
     assert comic.read_bytes() == b"Archive must remain untouched"

@@ -84,7 +84,7 @@ async def test_refresh_updates_managed_split_but_preserves_referenced_folder(
     from pullbox.models.config import SystemConfig
 
     series_id, folder, root = sidecar_target
-    split, reference = root / "Split", root / "Keep"
+    split, reference, repair = root / "Split", root / "Keep", root / "Repair"
     (folder / "series.json").write_text('{"metadata":{"comicid":42},"custom":"keep"}')
     async with sec_db.begin() as session:
         session.add(SystemConfig(key="series_sidecars_on_refresh", value="true", value_type="bool"))
@@ -93,6 +93,7 @@ async def test_refresh_updates_managed_split_but_preserves_referenced_folder(
             [
                 (split, LibraryFileStorageMode.MANAGED),
                 (reference, LibraryFileStorageMode.REFERENCED),
+                (repair, LibraryFileStorageMode.MANAGED),
             ],
             start=1,
         ):
@@ -114,6 +115,8 @@ async def test_refresh_updates_managed_split_but_preserves_referenced_folder(
                     storage_mode=mode,
                 )
             )
+    damaged = repair / "series.json"
+    damaged.write_bytes(b"invalid JSON")
     result = await authenticated_client.post(
         f"/api/v1/series/{series_id}/refresh", headers=csrf(authenticated_client)
     )
@@ -125,10 +128,64 @@ async def test_refresh_updates_managed_split_but_preserves_referenced_folder(
     assert primary["metadata"]["name"] == "Refreshed title"
     assert primary["pullbox"] == json.loads((split / "series.json").read_bytes())["pullbox"]
     assert not (reference / "series.json").exists()
-    assert all(
-        (path / "issue.cbz").read_bytes() == b"original comic" for path in (reference, split)
-    )
     assert result.headers["X-Pullbox-Series-Json"] == "review"
+    counts_header = "X-Pullbox-Series-Json-Counts"
+    assert json.loads(result.headers[counts_header]) == {"updated": 2, "current": 0, "blocked": 2}
+    assert damaged.read_bytes() == b"invalid JSON"
+    current = [path / "series.json" for path in (folder, split)]
+    before = [(p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes()) for p in current]
+    damaged.write_text('{"custom":"preserve me"}')
+    plan = (await preview(authenticated_client, series_id)).json()
+    assert plan["ready"]
+    retried = await write(authenticated_client, series_id, plan)
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["written"] == 1
+    assert retried.json()["unchanged"] == 2
+    assert json.loads(damaged.read_bytes())["custom"] == "preserve me"
+    refreshed = await authenticated_client.post(
+        f"/api/v1/series/{series_id}/refresh", headers=csrf(authenticated_client)
+    )
+    assert json.loads(refreshed.headers[counts_header]) == {
+        "updated": 0,
+        "current": 3,
+        "blocked": 1,
+    }
+    assert [(p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes()) for p in current] == before
+    assert not (reference / "series.json").exists()
+    assert all(
+        (path / "issue.cbz").read_bytes() == b"original comic"
+        for path in (reference, split, repair)
+    )
+
+
+@pytest.mark.parametrize("scenario", ["no-folders", "unavailable"])
+async def test_refresh_without_inspection_does_not_report_invented_counts(
+    authenticated_client, sidecar_target, provider_refresh, sec_db, monkeypatch, scenario
+):
+    from pullbox.models.config import SystemConfig
+    from pullbox.services import series_sidecar
+
+    series_id, folder, _ = sidecar_target
+    async with sec_db.begin() as session:
+        session.add(SystemConfig(key="series_sidecars_on_refresh", value="true", value_type="bool"))
+        if scenario == "no-folders":
+            (await session.get(Series, series_id)).path = None
+    if scenario == "unavailable":
+
+        async def unavailable(binding):
+            raise OSError("Storage unavailable")
+
+        monkeypatch.setattr(series_sidecar, "inspect_series_sidecar_binding", unavailable)
+    result = await authenticated_client.post(
+        f"/api/v1/series/{series_id}/refresh", headers=csrf(authenticated_client)
+    )
+    assert result.status_code == 200
+    assert result.json()["title"] == "Refreshed title"
+    assert result.headers["X-Pullbox-Series-Json"] == (
+        "no-folders" if scenario == "no-folders" else "review"
+    )
+    assert "X-Pullbox-Series-Json-Counts" not in result.headers
+    assert not (folder / "series.json").exists()
 
 
 @pytest.mark.parametrize("scenario", ["default", "api-key", "refresh-failed", "unsafe-json"])
@@ -171,9 +228,15 @@ async def test_refresh_sidecar_boundaries(
         assert title == ("Test series" if scenario == "refresh-failed" else "Refreshed title")
     if scenario == "unsafe-json":
         assert result.headers["X-Pullbox-Series-Json"] == "review"
+        assert json.loads(result.headers["X-Pullbox-Series-Json-Counts"]) == {
+            "updated": 0,
+            "current": 0,
+            "blocked": 1,
+        }
         assert sidecar.read_bytes() == b"invalid original"
     else:
         assert "X-Pullbox-Series-Json" not in result.headers
+        assert "X-Pullbox-Series-Json-Counts" not in result.headers
         assert not sidecar.exists()
 
 
