@@ -218,12 +218,36 @@ async def exercise(page, library, sql, db):
         assert result.ok, await result.text()
         return editor, await result.json()
 
+    async def check_interrupted_approval(editor, message):
+        write_url = "**/issues/10001/metadata-editor/write"
+        jobs = (
+            "SELECT count(*) FROM utility_jobs WHERE job_type='file_metadata' "
+            "AND config::json->>'issue_id'='10001'"
+        )
+        before_jobs = int(sql(db, jobs))
+        receipts = []
+
+        async def lose_ack(route):
+            response = await route.fetch(max_retries=0, max_redirects=0)
+            assert response.status == 202, await response.text()
+            receipts.append((await response.json())["job_id"])
+            await route.abort()
+
+        await page.route(write_url, lose_ack)
+        try:
+            await editor.get_by_role("button", name="Apply selected changes").click()
+            async with page.expect_response("**/file-metadata/job?editor_request_id=*") as pending:
+                await editor.get_by_role("button", name="Check this edit").click()
+            report = await (await pending.value).json()
+            assert [report["job"]["id"]] == receipts
+            await expect(editor.get_by_text(message, exact=False)).to_be_visible(timeout=20000)
+            assert int(sql(db, jobs)) == before_jobs + 1
+        finally:
+            await page.unroute(write_url, lose_ack)
+
     editor, preview = await review_date("Clear value")
     assert preview["ready"] and preview["editor_changed"]
-    await editor.get_by_role("button", name="Apply selected changes").click()
-    await expect(editor.get_by_text("Both metadata files are up to date.")).to_be_visible(
-        timeout=20000
-    )
+    await check_interrupted_approval(editor, "Both metadata files are up to date.")
     await editor.get_by_role("button", name="Close", exact=True).click()
     cleared = signature()
     with ZipFile(comic) as archive:
@@ -235,10 +259,7 @@ async def exercise(page, library, sql, db):
     editor, preview = await review_date("Remove manual override")
     assert preview["ready"] and preview["unchanged"] and not preview["changes"]
     await expect(editor.get_by_text("Only the manual override", exact=False)).to_be_visible()
-    await editor.get_by_role("button", name="Apply selected changes").click()
-    await expect(
-        editor.get_by_text("Selected fields are back under provider control.", exact=False)
-    ).to_be_visible(timeout=20000)
+    await check_interrupted_approval(editor, "Selected fields are back under provider control.")
     await editor.get_by_role("button", name="Close", exact=True).click()
     assert sql(db, "SELECT store_date IS NULL FROM issues WHERE id=10001") == "t"
     await refresh_issue()

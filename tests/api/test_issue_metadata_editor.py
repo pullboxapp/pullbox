@@ -207,6 +207,71 @@ async def test_editor_custom_title_writes_both_xml_and_persists_override(
             assert any(o.field == "title" and o.user_override for o in snapshot.origins)
 
 
+async def test_issue_editor_receipt_tracks_only_the_submitted_edit(
+    authenticated_client, sec_db, tmp_path, monkeypatch
+):
+    import pullbox.api.v1.issue_metadata_links as api
+
+    manager = JobQueueManager(sec_db)
+    manager.register_executor(JobType.FILE_METADATA, FileMetadataExecutor)
+    monkeypatch.setattr(api, "_get_manager", lambda: manager)
+    monkeypatch.setattr(api, "_schedule_dispatch", lambda manager: None)
+    async with prepared(sec_db, tmp_path) as (path, _, plan):
+        issue = plan.target.binding.metadata.issues[0].local_id
+        endpoint = f"/api/v1/issues/{issue}/metadata-editor"
+        status = f"/api/v1/issues/{issue}/file-metadata/job"
+        body = {"edits": {"title": {"source": "custom", "value": "Receipt test"}}}
+        headers = csrf(authenticated_client)
+        preview = await authenticated_client.post(endpoint + "/preview", json=body, headers=headers)
+        key = "e5" * 16
+        approval = {**body, "review_key": preview.json()["review_key"], "request_id": key}
+        before = path.read_bytes(), path.stat().st_mtime_ns
+        reply = await authenticated_client.post(endpoint + "/write", json=approval, headers=headers)
+        assert reply.status_code == 202, reply.text
+        job_id = reply.json()["job_id"]
+        target = status + "?editor_request_id=" + key
+        assert (await authenticated_client.get(target)).json()["job"]["id"] == job_id
+        assert (await authenticated_client.get(target)).json()["job"]["state"] == "QUEUED"
+        for missing in (
+            status + "?editor_request_id=" + "12" * 16,
+            target.replace(f"/issues/{issue}/", f"/issues/{issue + 1}/"),
+        ):
+            assert (await authenticated_client.get(missing)).json() == {"job": None}
+        assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+        # An explicitly repeated approval must not queue the same write twice.
+        replay = await authenticated_client.post(
+            endpoint + "/write", json=approval, headers=headers
+        )
+        assert replay.status_code == 202 and replay.json()["job_id"] == job_id
+        changed = await authenticated_client.post(
+            endpoint + "/write",
+            json={**approval, "edits": {"title": {"source": "clear"}}},
+            headers=headers,
+        )
+        assert changed.status_code == 409
+        await manager.dispatch_next()
+        after = path.read_bytes(), path.stat().st_mtime_ns
+        assert before[0] != after[0]
+        async with sec_db.begin() as session:
+            unrelated = await manager.create_job(
+                session, JobType.FILE_METADATA, "Other edit", {"issue_id": issue}
+            )
+        assert (await authenticated_client.get(status)).json()["job"]["id"] == unrelated.id
+        report = (await authenticated_client.get(target)).json()["job"]
+        assert report["state"] == "COMPLETED" and report["id"] == job_id, report
+        replay = await authenticated_client.post(
+            endpoint + "/write", json=approval, headers=headers
+        )
+        assert replay.json() == {"job_id": job_id, "state": "COMPLETED"}
+        with ZipFile(path) as archive:
+            assert ET.fromstring(archive.read("ComicInfo.xml")).findtext("Title") == "Receipt test"
+            assert ET.fromstring(archive.read("MetronInfo.xml")).findtext("Stories/Story") == (
+                "Receipt test"
+            )
+            assert archive.read("page.jpg") == b"page bytes"
+        assert (path.read_bytes(), path.stat().st_mtime_ns) == after
+
+
 async def test_editor_can_correct_agreeing_ratings_and_explicitly_clear_both(
     authenticated_client, sec_db, tmp_path, monkeypatch
 ):

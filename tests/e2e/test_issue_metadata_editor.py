@@ -10,6 +10,85 @@ from tests.e2e.accessibility import assert_no_axe_violations
 pytestmark = pytest.mark.e2e
 
 
+@pytest.mark.parametrize("accepted", [False, True], ids=["not-recorded", "queued"])
+def test_lost_issue_edit_response_checks_the_exact_job(
+    authed_page, seeded_server, accepted, tmp_path
+):
+    page = authed_page
+    writes, previews, checks = [], [], []
+    job_url = "**/api/v1/issues/1/file-metadata/job"
+    page.route(job_url, lambda route: route.fulfill(json={"job": None}))
+
+    def check(route):
+        assert route.request.method == "GET"
+        checks.append(route.request.url.partition("editor_request_id=")[2])
+        if len(checks) == 1:
+            route.fulfill(status=503, body="")
+        else:
+            result = {"id": "receipt-job", "state": "QUEUED", "message": "Queued", "percent": 0}
+            route.fulfill(json={"job": result if accepted else None})
+
+    def preview(route):
+        previews.append(route.request.post_data_json)
+        route.fulfill(
+            json={
+                "file_name": "Issue.cbz",
+                "review_key": "a" * 64,
+                "ready": True,
+                "changes": [],
+                "editor_changed": bool(previews[-1].get("edits")),
+                "editor_fields": [
+                    {
+                        "key": "issue.title",
+                        "label": "Title",
+                        "input_type": "text",
+                        "editable": True,
+                        "current": "Original",
+                        "differs": True,
+                        "options": [{"source": "library", "value": "Original"}],
+                    }
+                ],
+            }
+        )
+
+    def write(route):
+        writes.append(route.request.post_data_json)
+        route.abort()
+
+    page.route(job_url + "?*", check)
+    page.route("**/metadata-editor/preview", preview)
+    page.route("**/metadata-editor/write", write)
+    page.goto(f"{seeded_server}/issues/1")
+    page.get_by_role("button", name="Edit metadata", exact=True).click()
+    dialog = page.get_by_role("dialog", name="Edit issue metadata")
+    dialog.get_by_label("Update Title", exact=True).check()
+    dialog.get_by_role("button", name="Update preview").click()
+    apply = dialog.get_by_role("button", name="Apply selected changes")
+    apply.click()
+    check_button = dialog.get_by_role("button", name="Check this edit")
+    expect(check_button).to_be_focused()
+    expect(apply).to_be_hidden()
+    if not accepted:
+        dialog.screenshot(path=tmp_path / "issue-edit-receipt.png")
+    assert_no_axe_violations(
+        page, name="issue-editor-lost-receipt", include=['[aria-labelledby="file-metadata-title"]']
+    )
+    check_button.click()
+    expect(dialog.get_by_role("alert")).to_contain_text("Could not check")
+    expect(dialog.get_by_role("button", name="Review changes again")).to_be_hidden()
+    check_button.click()
+    if accepted:
+        expect(dialog.get_by_role("status").filter(has_text="Queued")).to_be_visible()
+        expect(dialog.get_by_text("Both metadata files are up to date.")).to_be_hidden()
+    else:
+        expect(dialog.get_by_text("No job is recorded for this edit yet.")).to_be_visible()
+        dialog.get_by_role("button", name="Review changes again").click()
+        expect(apply).to_be_enabled()
+        assert previews[-1]["edits"] == {"title": {"source": "library"}}
+    assert len(writes) == 1
+    assert len(writes[0]["request_id"]) == 32 and set(checks) == {writes[0]["request_id"]}
+
+
 @pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 390), ("tron", 1280)])
 def test_editor_select_preview_apply_and_validation_retention(
     authed_page, seeded_server, theme, width
@@ -18,6 +97,7 @@ def test_editor_select_preview_apply_and_validation_retention(
     page.set_viewport_size({"width": width, "height": 740})
     job = {"job": None}
     page.route("**/api/v1/issues/1/file-metadata/job", lambda route: route.fulfill(json=job))
+    page.route("**/api/v1/issues/1/file-metadata/job?*", lambda route: route.fulfill(json=job))
     writes = []
     previews = []
     fields = [
@@ -457,6 +537,7 @@ def test_editor_select_preview_apply_and_validation_retention(
     )
     dialog.get_by_role("button", name="Apply selected changes", exact=True).click()
     expect(dialog.get_by_role("progressbar")).to_have_attribute("aria-valuenow", "42")
+    assert len(writes) == 1 and len(writes[0].pop("request_id")) == 32
     assert writes == [
         {
             "edits": selected,

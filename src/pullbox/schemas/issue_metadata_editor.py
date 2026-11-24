@@ -234,6 +234,7 @@ class IssueMetadataEditorReview(BaseModel):
 
 class IssueMetadataEditorApproval(IssueMetadataEditorReview):
     review_key: str = Field(pattern=r"^[a-f0-9]{64}$")
+    request_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
 
 
 class IssueMetadataEditorOption(BaseModel):

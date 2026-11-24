@@ -1,9 +1,12 @@
 """Operator review and descriptive refresh for existing issues."""
 
+import hashlib
+import json
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Path
+from fastapi import APIRouter, HTTPException, Path, Query
 from sqlalchemy import JSON, Text, cast, select, type_coerce
+from sqlalchemy.exc import IntegrityError
 
 from pullbox.api.deps import DbSession, InteractiveOperatorUser, Settings
 from pullbox.core.exceptions import ValidationError
@@ -170,8 +173,14 @@ async def file_write(
 
 @router.get("/{issue_id}/file-metadata/job")
 async def file_job(
-    issue_id: LocalId, session: DbSession, _user: InteractiveOperatorUser
+    issue_id: LocalId,
+    session: DbSession,
+    user: InteractiveOperatorUser,
+    editor_request_id: Annotated[str | None, Query(pattern=r"^[a-f0-9]{32}$")] = None,
 ) -> dict[str, object]:
+    if editor_request_id is not None:
+        job = await session.get(UtilityJob, _editor_job_id(user.id, issue_id, editor_request_id))
+        return await file_job_status(session, job) if job else {"job": None}
     document = JSON().with_variant(Text(), "sqlite")
     job = await session.scalar(
         select(UtilityJob)
@@ -209,7 +218,21 @@ async def editor_write(
     user: InteractiveOperatorUser,
 ) -> dict[str, str]:
     review = IssueMetadataEditorReview(edits=body.edits)
+    job_id = _editor_job_id(user.id, issue_id, body.request_id) if body.request_id else None
+    config = {
+        "issue_id": issue_id,
+        "review_key": body.review_key,
+        "editor": review.model_dump(mode="json"),
+    }
+
+    def receipt(job: UtilityJob) -> dict[str, str]:
+        if job.job_type != JobType.FILE_METADATA or json.loads(job.config) != config:
+            raise HTTPException(409, "This receipt belongs to another edit. Preview again.")
+        return {"job_id": job.id, "state": job.state}
+
     try:
+        if job_id and (existing := await session.get(UtilityJob, job_id)):
+            return receipt(existing)
         prepared = await prepare_file_metadata(session, issue_id, editor=review)
         if not prepared.preview.ready:
             raise ArchivePublicationError("unresolved_conflicts")
@@ -221,18 +244,26 @@ async def editor_write(
             session,
             JobType.FILE_METADATA,
             f"Edit issue metadata: {prepared.preview.file_name}",
-            {
-                "issue_id": issue_id,
-                "review_key": body.review_key,
-                "editor": review.model_dump(mode="json"),
-            },
+            config,
             created_by=user.username,
+            job_id=job_id,
         )
         await session.commit()
         _schedule_dispatch(manager)
         return {"job_id": job.id, "state": job.state}
+    except IntegrityError:
+        await session.rollback()
+        if job_id and (existing := await session.get(UtilityJob, job_id)):
+            return receipt(existing)
+        raise
     except (ValueError, OSError) as exc:
         raise HTTPException(409, file_metadata_error(exc)) from exc
+
+
+def _editor_job_id(user_id: int, issue_id: int, request_id: str) -> str:
+    # The job primary key makes repeated delivery of one approval queue at most one write.
+    key = f"pullbox:issue-editor:v1:{user_id}:{issue_id}:{request_id}"
+    return hashlib.blake2s(key.encode("ascii"), digest_size=16).hexdigest()
 
 
 async def file_job_status(session: DbSession, job: UtilityJob) -> dict[str, object]:

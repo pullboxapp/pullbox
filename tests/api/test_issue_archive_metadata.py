@@ -29,7 +29,10 @@ pytest_plugins = ["conftest_security"]
 
 @pytest.fixture
 async def sec_db(tmp_path: Path) -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
-    # Background progress and publication use independent sessions, not one StaticPool connection.
+    # Install the runtime connection settings before the first connection. Otherwise
+    # a later worker connection can try to switch DELETE to WAL during publication.
+    import pullbox.database  # noqa: F401
+
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'archive-metadata.db'}")
     async with engine.begin() as connection:
         await create_test_schema(connection)
@@ -41,6 +44,8 @@ async def sec_db(tmp_path: Path) -> AsyncGenerator[async_sessionmaker[AsyncSessi
 
 async def test_background_sessions_have_independent_transactions(sec_db):
     async with sec_db() as writer, sec_db() as observer, writer.begin_nested():
+        assert await writer.scalar(text("PRAGMA journal_mode")) == "wal"
+        assert await writer.scalar(text("PRAGMA foreign_keys")) == 1
         assert await writer.scalar(text("SELECT 1")) == 1
         assert await observer.scalar(text("SELECT 1")) == 1
         await observer.commit()

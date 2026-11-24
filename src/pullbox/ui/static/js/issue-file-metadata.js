@@ -166,15 +166,18 @@ function issueFileMetadata(issueId) {
     recovery: !issueId, resolved: false, editor: false,
     open: false, busy: false, error: "", preview: null, job: null, choices: {}, choicesDirty: false,
     timer: null, disposed: false, trigger: null, generation: 0, jobGeneration: 0,
+    editReceipt: null, unconfirmed: false, missingReceipt: false,
     init: function () { if (endpoint) this.loadJob(); },
     destroy: function () { this.disposed = true; this.generation += 1; clearTimeout(this.timer); },
     request: async function (url, body) {
       var response = await fetch(url, body === undefined ? { cache: "no-store" } : {
         method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": readCsrfTokenFromBody() }, body: JSON.stringify(body),
       });
-      var data = await response.json();
-      if (!response.ok) throw new Error(_extractApiErrorMessage(response, data, "Could not check file metadata. Try again."));
-      return data;
+      if (!response.ok) {
+        const data = await _readJsonBody(response);
+        throw Object.assign(new Error(_extractApiErrorMessage(response, data, "Could not check file metadata. Try again.")), { status: response.status });
+      }
+      return response.json();
     },
     active: function () { return !!this.job && ["QUEUED", "RUNNING", "PAUSING", "CANCELLING"].includes(this.job.state); },
     loadJob: async function () {
@@ -182,17 +185,28 @@ function issueFileMetadata(issueId) {
       var generation = this.jobGeneration;
       var wasActive = this.active();
       try {
-        var data = await this.request(endpoint + "/job");
+        var data = await this.request(endpoint + "/job" + (this.editReceipt ? "?editor_request_id=" + this.editReceipt.id : ""));
         if (this.disposed || generation !== this.jobGeneration) return;
+        if (this.editReceipt && (!data || !Object.hasOwn(data, "job") || (data.job !== null && (!data.job?.id || !data.job.state))))
+          throw new Error("Could not check this edit. Check again when the library is available.");
+        if (this.editReceipt && !data.job) {
+          this.unconfirmed = true; this.missingReceipt = true; this.job = null;
+          return;
+        }
+        const wasUnconfirmed = this.unconfirmed;
+        this.unconfirmed = false; this.missingReceipt = false;
         this.job = data.job;
         if (this.recovery) this.resolved = !!data.resolved;
-        if (wasActive && this.job && this.job.state === "COMPLETED") {
+        if ((wasActive || wasUnconfirmed) && this.job && this.job.state === "COMPLETED") {
           if (this.recovery) return;
           window.dispatchEvent(new CustomEvent("issue-file-metadata-complete"));
           var target = document.getElementById("issue-metadata-content");
           if (target) await htmx.ajax("GET", "/htmx/issues/" + issueId + "/metadata", { target: target, swap: "morph:outerHTML" });
         }
-      } catch (error) { if (!this.disposed) this.error = error.message; }
+      } catch (error) {
+        if (!this.disposed && generation === this.jobGeneration)
+          this.error = this.unconfirmed ? "Could not check this edit. Check again when the library is available." : error.message;
+      }
       if (!this.disposed && this.active()) this.timer = setTimeout(() => this.loadJob(), 1000);
     },
     showRecovery: async function (pendingId) {
@@ -212,11 +226,11 @@ function issueFileMetadata(issueId) {
     },
     show: async function (editor = false) {
       if (this.busy) return;
-      this.editor = editor;
+      this.editor = this.unconfirmed || editor;
       this.trigger = document.activeElement;
       this.open = true;
       this.$nextTick(() => this.$refs.dialog.focus({ preventScroll: true }));
-      if (!this.job || ["COMPLETED", "FAILED", "CANCELLED", "ROLLED_BACK"].includes(this.job.state)) await this.loadPreview();
+      if (!this.unconfirmed && (!this.job || ["COMPLETED", "FAILED", "CANCELLED", "ROLLED_BACK"].includes(this.job.state))) await this.loadPreview();
     },
     close: function () {
       this.open = false;
@@ -229,7 +243,7 @@ function issueFileMetadata(issueId) {
       this.choicesDirty = true;
     },
     canWrite: function () {
-      return !!this.preview && this.preview.ready !== false && !this.choicesDirty && (this.recovery || !this.editor || this.preview.editor_changed);
+      return !this.unconfirmed && !!this.preview && this.preview.ready !== false && !this.choicesDirty && (this.recovery || !this.editor || this.preview.editor_changed);
     },
     conflictChoices: function () {
       var conflicts = this.preview ? this.preview.conflicts || [] : [];
@@ -275,7 +289,7 @@ function issueFileMetadata(issueId) {
       if (reset && this.recovery && editRecovery && !this.editor) {
         Object.keys(this.choices).filter(key => key.startsWith("series.")).forEach(key => { choices[key] = this.choices[key]; });
       }
-      if (reset && !this.recovery) { this.job = null; this.preview = null; }
+      if (reset && !this.recovery) { this.job = null; this.preview = null; this.editReceipt = null; }
       try {
         var edits = reset ? {} : this.editorEdits();
         var body = Object.keys(choices).length ? { choices: choices } : {};
@@ -298,18 +312,46 @@ function issueFileMetadata(issueId) {
     write: async function () {
       if (this.busy || !this.canWrite() || this.active()) return;
       this.busy = true; this.error = "";
+      let submittingEdit = false;
       try {
         var approval = { review_key: this.preview.review_key };
         if (this.editor && this.recovery) approval.editor = { edits: this.editorEdits() };
         else if (this.editor) approval.edits = this.editorEdits();
         if ((!this.editor || this.recovery) && Object.keys(this.choices).length) approval.choices = Object.assign({}, this.choices);
+        if (this.editor && !this.recovery) {
+          if (this.editReceipt?.key !== approval.review_key) {
+            const bytes = crypto.getRandomValues(new Uint8Array(16));
+            this.editReceipt = { key: approval.review_key, id: Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("") };
+          }
+          approval.request_id = this.editReceipt.id;
+          this.jobGeneration += 1;
+          submittingEdit = true;
+        }
         var result = await this.request(this.reviewEndpoint() + "/write", approval);
         if (this.disposed) return;
+        if (submittingEdit && (!result?.job_id || !result.state)) throw new Error("Missing job receipt.");
         this.jobGeneration += 1;
         this.job = { id: result.job_id, state: result.state, percent: 0, message: "Queued", error: null };
         await this.loadJob();
-      } catch (error) { if (!this.disposed) this.error = error.message; }
+      } catch (error) {
+        if (!this.disposed) {
+          if (submittingEdit && (!error.status || error.status >= 500 || error.status === 408)) {
+            this.unconfirmed = true; this.missingReceipt = false;
+          } else this.error = error.message;
+        }
+      }
       finally { if (!this.disposed) this.busy = false; }
+    },
+    checkEdit: async function () {
+      if (this.busy || !this.unconfirmed) return;
+      this.busy = true; this.error = ""; this.missingReceipt = false;
+      try { await this.loadJob(); }
+      finally { if (!this.disposed) this.busy = false; }
+    },
+    reviewMissingEdit: async function () {
+      if (this.busy || !this.unconfirmed || !this.missingReceipt) return;
+      this.unconfirmed = false; this.missingReceipt = false;
+      await this.loadPreview(false);
     },
     cancel: async function () {
       if (this.busy || !this.active()) return;

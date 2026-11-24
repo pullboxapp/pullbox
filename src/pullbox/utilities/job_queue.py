@@ -232,6 +232,8 @@ class JobQueueManager:
         display_name: str,
         config: dict[str, Any],
         created_by: str | None = None,
+        *,
+        job_id: str | None = None,
     ) -> UtilityJob:
         """Create a new job and add it to the queue.
 
@@ -241,6 +243,7 @@ class JobQueueManager:
             display_name: Human-readable name for the UI.
             config: Job-specific configuration dict.
             created_by: Username who initiated the job.
+            job_id: Optional server-derived ID for a receipt-bound submission.
 
         Returns:
             The created UtilityJob instance.
@@ -253,6 +256,7 @@ class JobQueueManager:
             config=config,
             queue_position=next_pos,
             created_by=created_by,
+            job_id=job_id,
         )
         session.add(job)
         await session.flush()

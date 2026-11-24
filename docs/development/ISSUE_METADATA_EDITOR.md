@@ -12,6 +12,14 @@ or enter corrections, then **Update preview** and **Apply selected changes**.
 Preview does not query providers or write files. The existing background progress
 and cancellation controls apply after approval.
 
+If the browser loses the response to **Apply selected changes**, use **Check
+this edit**. It reads the saved job for that operator, issue and submission,
+not the latest job on the issue. A queued job is not a completed file write.
+If no job is recorded yet, check again or choose **Review changes again**.
+The draft is retained, and the preview is read-only. Submitting the same reviewed
+edit again with its receipt cannot create a second job, even if the first one
+finished in the meantime. The receipt does not authorize file access or edits.
+
 **Saved source** identifies the origin recorded for the current library value.
 For example, a cover date can come from GCD Local and a store date from LOCG
 release context. A manual correction keeps its own label. A value found in

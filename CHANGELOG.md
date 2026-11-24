@@ -205,6 +205,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- If the issue editor loses a save confirmation, **Check this edit** shows
+  whether that specific update was queued or finished. Checking does not
+  rewrite the comic, and another edit to the same issue cannot mask its status.
 - If the series editor loses a save confirmation, **Check saved values**
   compares the reviewed fields with the current library. Checking never
   submits the edit again or writes to `series.json` or a comic.
