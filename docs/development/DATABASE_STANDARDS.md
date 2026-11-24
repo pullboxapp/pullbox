@@ -987,8 +987,11 @@ preflight blocker, not a resumable PostgreSQL test case.
 The same browser opens an owned issue before the rehearsal disconnects the
 test application's idle PostgreSQL sessions. Reloading must work without a new
 login or app restart, and the download must match the original comic bytes.
-This checks recovery from stale pooled connections; it does not test requests
-while PostgreSQL is offline or interrupted writes.
+Then the rehearsal stops PostgreSQL itself without stopping the web app.
+While it is offline, navigation and API reads must report temporary database
+unavailability (HTTP 503), not lost authentication or incomplete setup. After
+PostgreSQL restarts, the same browser retries the issue without signing in.
+Neither check replays a write or qualifies interrupted transactions.
 
 In the same rehearsal, enable a generated read-only GCD catalog in Settings and
 link it to an existing ComicVine series. A fractional issue with the same number

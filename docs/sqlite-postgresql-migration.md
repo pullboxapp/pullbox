@@ -18,6 +18,13 @@ Bootstrap logs from older versions may contain the database URL. If a log was
 shared with a PostgreSQL password in it, rotate that credential and update the
 deployment secret; an application upgrade does not redact existing log files.
 
+If an already running PostgreSQL library shows **Library temporarily unavailable**,
+check that its PostgreSQL server is accepting connections. Once it is back,
+use **Retry this page**; a temporary connection failure does not require a new
+login, another migration, or a switch back to SQLite. If the message followed a
+change rather than a page load, check the issue or job's current status before
+submitting the change again.
+
 ## Back up and restore a PostgreSQL library
 
 This procedure is for an **already running PostgreSQL library**, not for

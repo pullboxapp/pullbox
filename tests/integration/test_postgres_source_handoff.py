@@ -438,7 +438,14 @@ async def test_recheck_original_source_and_reviewed_target(
                     address = docker("port", postgres, "8585/tcp", check=True).stdout.strip()
                     assert address.startswith("127.0.0.1:")
                     refreshed_rows = await native.exercise(
-                        "http://" + address, cases, originals, copied, db, sql, owned_digest
+                        "http://" + address,
+                        cases,
+                        originals,
+                        copied,
+                        db,
+                        sql,
+                        owned_digest,
+                        postgres,
                     )
                 if not shared:
                     assert inspect(name, "--compare-checkpoint", checkpoint)["checkpoint_matched"]

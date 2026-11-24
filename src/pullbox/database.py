@@ -15,7 +15,7 @@ from collections.abc import AsyncGenerator, Awaitable
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from weakref import WeakSet
 
 import structlog
@@ -31,6 +31,11 @@ from sqlalchemy.ext.asyncio import (
 
 from pullbox.config import get_settings
 from pullbox.core.db_utils import database_backend_label
+
+if TYPE_CHECKING:
+    from sqlalchemy.engine import Dialect
+    from sqlalchemy.engine.interfaces import DBAPIConnection
+    from sqlalchemy.pool import ConnectionPoolEntry
 
 logger = structlog.get_logger(__name__)
 
@@ -54,6 +59,21 @@ _SQLITE_JOURNAL_MODE_PRAGMAS = {
 
 class DatabaseMaintenanceBusyError(RuntimeError):
     """Existing transactions could not drain; maintenance may be retried later."""
+
+
+class DatabaseConnectionUnavailableError(ConnectionError):
+    """The runtime PostgreSQL engine could not establish a new connection."""
+
+
+def _connect_postgres(
+    dialect: "Dialect", _record: "ConnectionPoolEntry", args: list[Any], params: dict[str, Any]
+) -> "DBAPIConnection":
+    # Bound only connection establishment, not queries, migrations or file operations.
+    params.setdefault("timeout", 5)
+    try:
+        return dialect.connect(*args, **params)
+    except (ConnectionRefusedError, TimeoutError) as exc:
+        raise DatabaseConnectionUnavailableError("Cannot connect to the library database.") from exc
 
 
 class GateAwareAsyncSession(AsyncSession):
@@ -348,6 +368,8 @@ def get_engine() -> AsyncEngine:
         _recover_sqlite_sidecars_if_needed(settings.db_url)
         kwargs = _build_engine_kwargs(settings.db_url, echo=echo)
         _engine = create_async_engine(settings.db_url, **kwargs)
+        if _engine.dialect.name == "postgresql" and _engine.dialect.driver == "asyncpg":
+            event.listen(_engine.sync_engine, "do_connect", _connect_postgres)
         _set_db_permissions(settings.db_url)
         logger.debug("database_engine_created", database=database_backend_label(settings.db_url))
     return _engine

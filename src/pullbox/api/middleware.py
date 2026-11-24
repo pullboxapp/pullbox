@@ -23,7 +23,7 @@ from starlette.responses import JSONResponse, RedirectResponse, Response
 
 from pullbox.config import get_settings
 from pullbox.core.local_auth_bypass import LocalAuthBypassResolution, resolve_local_auth_bypass
-from pullbox.database import get_session_factory
+from pullbox.database import DatabaseConnectionUnavailableError, get_session_factory
 from pullbox.models.user import User
 from pullbox.services.auth_service import SESSION_COOKIE_NAME, AuthService
 
@@ -117,11 +117,14 @@ class SetupDetectionMiddleware(BaseHTTPMiddleware):
         try:
             factory = _request_session_factory(request)
             async with factory() as session:
-                if await is_setup_complete_db(session):
-                    _setup_complete = True
-                    return await call_next(request)
+                complete = await is_setup_complete_db(session)
+        except DatabaseConnectionUnavailableError:
+            raise
         except Exception:
             logger.exception("setup_detection_db_error", path=request.url.path)
+            return await call_next(request)
+        if complete:
+            _setup_complete = True
             return await call_next(request)
 
         # Setup not complete — redirect HTML requests to /setup
@@ -170,7 +173,10 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         structlog.contextvars.bind_contextvars(request_id=request_id)
         try:
             start = time.monotonic()
-            response = await call_next(request)
+            try:
+                response = await call_next(request)
+            except DatabaseConnectionUnavailableError:
+                response = _database_unavailable_response(request)
             duration_ms = (time.monotonic() - start) * 1000
             response.headers["X-Request-ID"] = request_id
 
@@ -200,6 +206,38 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             return response
         finally:
             structlog.contextvars.unbind_contextvars("request_id")
+
+
+def _database_unavailable_response(request: Request) -> Response:
+    headers = {"Cache-Control": "no-store"}
+    read = request.method in {"GET", "HEAD"}
+    if read:
+        headers["Retry-After"] = "5"
+    message = (
+        "Pullbox cannot reach the library database. Try again when it is available."
+        if read
+        else "Pullbox cannot reach the library database. Check the status of your last action "
+        "before trying it again."
+    )
+    if (
+        "text/html" in request.headers.get("accept", "").lower()
+        and not request.url.path.startswith(("/api/", "/htmx/"))
+        and request.headers.get("hx-request", "").lower() != "true"
+    ):
+        from pullbox.ui.routes import templates
+
+        return templates.TemplateResponse(
+            request,
+            "pages/database_unavailable.html",
+            {"message": message, "can_reload": read},
+            status_code=503,
+            headers=headers,
+        )
+    return JSONResponse(
+        {"error": {"code": "DATABASE_UNAVAILABLE", "message": message}},
+        status_code=503,
+        headers=headers,
+    )
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):

@@ -22163,10 +22163,25 @@ document.body.addEventListener("htmx:configRequest", function (e) {
   }
 });
 
+function databaseUnavailableMessage(xhr) {
+  if (!xhr || xhr.status !== 503) return "";
+  try {
+    var error = JSON.parse(xhr.responseText).error;
+    return error && error.code === "DATABASE_UNAVAILABLE" && typeof error.message === "string"
+      ? error.message : "";
+  } catch (_) {
+    return "";
+  }
+}
+
 // Boosted links inside the content region default to targeting <body>.
 // Redirect the swap to #content so the shell remains stable.
 // Also serves as safety fallback: if response lacks #content, do a full page load.
 document.body.addEventListener("htmx:beforeSwap", function (e) {
+  if (databaseUnavailableMessage(e.detail.xhr)) {
+    e.detail.shouldSwap = false;
+    return;
+  }
   // Content-area boosted links target <body> — redirect to #content
   if (e.detail.boosted && e.detail.target === document.body) {
     var responseText = e.detail.xhr && e.detail.xhr.responseText;
@@ -23806,6 +23821,11 @@ document.addEventListener("htmx:responseError", function (e) {
     return;
   }
   var message = "Request failed";
+  var offline = databaseUnavailableMessage(detail.xhr);
+  if (offline) {
+    showToast({ id: "database-unavailable", message: offline, level: "error" });
+    return;
+  }
   if (detail.xhr && detail.xhr.status) {
     message = "Error " + detail.xhr.status + ": " + (detail.xhr.statusText || "Request failed");
   }

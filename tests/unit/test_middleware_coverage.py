@@ -23,6 +23,7 @@ from pullbox.api.middleware import (
     mark_setup_complete,
     reset_setup_cache,
 )
+from pullbox.database import DatabaseConnectionUnavailableError
 
 os.environ.setdefault("PULLBOX_SECRET_KEY", "test-secret-key-for-middleware-tests")
 
@@ -41,8 +42,37 @@ class TestMarkSetupComplete:
         reset_setup_cache()
 
 
+@pytest.mark.parametrize("method,path", [("POST", "/library"), ("PATCH", "/api/v1/issues/17")])
+async def test_offline_mutation_never_suggests_resubmitting_or_leaks_details(method, path):
+    req = Request(
+        {"type": "http", "method": method, "path": path, "headers": [(b"accept", b"text/html")]}
+    )
+    action = AsyncMock(side_effect=DatabaseConnectionUnavailableError("private host details"))
+    result = await RequestLoggingMiddleware(MagicMock()).dispatch(req, action)
+    assert result.status_code == 503
+    assert result.headers["cache-control"] == "no-store" and "retry-after" not in result.headers
+    assert b"Check the status of your last action" in result.body
+    assert b"Retry this page" not in result.body and b"private host details" not in result.body
+    action.assert_awaited_once()
+
+
 class TestSetupDetectionRedirect:
     """Tests for SetupDetectionMiddleware when setup is not completed."""
+
+    async def test_cold_setup_check_does_not_replay_failed_action(self) -> None:
+        reset_setup_cache()
+        request = Request({"type": "http", "method": "POST", "path": "/library", "headers": []})
+        action = AsyncMock(side_effect=ConnectionRefusedError("unrelated downstream failure"))
+        try:
+            with (
+                patch("pullbox.api.middleware.get_session_factory", return_value=MagicMock()),
+                patch("pullbox.api.middleware.is_setup_complete_db", return_value=True),
+                pytest.raises(ConnectionRefusedError),
+            ):
+                await SetupDetectionMiddleware(app=MagicMock()).dispatch(request, action)
+            action.assert_awaited_once()
+        finally:
+            reset_setup_cache()
 
     @pytest.mark.asyncio
     async def test_redirect_html_to_setup(self) -> None:

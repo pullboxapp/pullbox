@@ -179,7 +179,7 @@ async def scan():
     return {"folder": cases, "mylar": mylar}
 
 
-async def exercise(origin, cases, originals, library, db, sql, owned_digest):
+async def exercise(origin, cases, originals, library, db, sql, owned_digest, postgres):
     from playwright.async_api import async_playwright, expect
 
     from tests.e2e.accessibility import AXE_SCRIPT, WCAG_AA_TAGS
@@ -309,6 +309,7 @@ async def exercise(origin, cases, originals, library, db, sql, owned_digest):
             await series_editor.exercise(page, library, sql, db)
             await propagation.exercise(page, library, sql, db)
             await _reopen_owned_issue_after_disconnect(page, db, sql, neighbor)
+            await _recover_from_database_outage(page, postgres, neighbor)
             return catalog_rows
         finally:
             await browser.close()
@@ -337,6 +338,36 @@ async def _reopen_owned_issue_after_disconnect(page, db, sql, comic):
     archive = await page.request.get("/api/v1/issues/10017/download-file", timeout=10000)
     assert archive.ok and await archive.body() == before[1]
     assert (sql(db, owned_row), comic.read_bytes(), comic.stat().st_mtime_ns) == before
+
+
+async def _recover_from_database_outage(page, postgres, comic):
+    from playwright.async_api import expect
+
+    from tests.integration.test_postgres_first_start import docker
+
+    original = comic.read_bytes(), comic.stat().st_mtime_ns
+    ctl = ("exec", "-u", "postgres", postgres, "pg_ctl", "-w", "-t", "15")
+    docker(*ctl, "stop", "-m", "fast", check=True)
+    try:
+        await page.evaluate("() => { void htmx.ajax('GET', '/issues/10017', {swap:'none'}); }")
+        await expect(page.locator("#toast-container")).to_contain_text(
+            "Pullbox cannot reach the library database."
+        )
+        down = await page.reload(wait_until="domcontentloaded", timeout=10000)
+        assert down and down.status == 503, down.status if down else None
+        await expect(
+            page.get_by_role("heading", name="Library temporarily unavailable")
+        ).to_be_visible()
+        assert (await page.request.get("/ping", timeout=5000)).ok
+        api = await page.request.get("/api/v1/issues/10017", timeout=10000)
+        assert api.status == 503 and (await api.json())["error"]["code"] == "DATABASE_UNAVAILABLE"
+        assert "no-store" in {v.strip() for v in api.headers["cache-control"].split(",")}
+        assert api.headers["retry-after"] == "5"
+    finally:
+        docker(*ctl, "start", "-l", "/tmp/postgres-restart.log", check=True)
+    await page.get_by_role("link", name="Retry this page").click(timeout=10000)
+    await expect(page.get_by_test_id("issue-action-download")).to_be_visible()
+    assert (comic.read_bytes(), comic.stat().st_mtime_ns) == original
 
 
 if __name__ == "__main__":

@@ -158,3 +158,25 @@ class TestPoolPrePing:
         ]:
             kwargs = _build_engine_kwargs(url, echo=False)
             assert kwargs["pool_pre_ping"] is True, f"pre_ping not set for {url}"
+
+
+@pytest.mark.parametrize("failure", [TimeoutError, ConnectionRefusedError])
+def test_new_postgres_handshake_failure_is_bounded_and_redacted(failure):
+    from pullbox.database import DatabaseConnectionUnavailableError, _connect_postgres
+
+    dialect = MagicMock()
+    dialect.connect.side_effect = failure("private connection details")
+    with pytest.raises(DatabaseConnectionUnavailableError) as caught:
+        _connect_postgres(dialect, MagicMock(), [], {})
+    dialect.connect.assert_called_once_with(timeout=5)
+    assert "private" not in str(caught.value)
+
+
+def test_unrelated_postgres_driver_error_is_not_a_temporary_outage():
+    from pullbox.database import _connect_postgres
+
+    dialect = MagicMock()
+    dialect.connect.side_effect = ValueError("invalid configuration")
+    with pytest.raises(ValueError, match="invalid configuration"):
+        _connect_postgres(dialect, MagicMock(), [], {"timeout": 12})
+    dialect.connect.assert_called_once_with(timeout=12)

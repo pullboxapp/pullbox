@@ -205,6 +205,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- When PostgreSQL refuses a new connection or the connection times out, the
+  issue page now explains how to retry. Failed in-page actions stay on screen
+  rather than navigating away or resubmitting the request.
 - Updating comic files from a series now requires an explicit issue selection.
   API clients must send a nonempty `issue_ids` list; omitting it no longer approves
   every ready comic. Retrying a job keeps its original selection.

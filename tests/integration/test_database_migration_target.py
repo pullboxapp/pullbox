@@ -103,10 +103,14 @@ def disposable_server(major, *, publish_app=False):
         "--env",
         "POSTGRES_PASSWORD",
         f"postgres:{major}-bookworm",
+        *(["sleep", "infinity"] if publish_app else []),
         env={**os.environ, "POSTGRES_PASSWORD": password},
         check=True,
     )
     try:
+        if publish_app:
+            # Keep shared networking and tmpfs alive when the browser test stops PostgreSQL.
+            docker("exec", "-d", container, "docker-entrypoint.sh", "postgres", check=True)
         for _ in range(100):
             if not docker(
                 "exec", container, "pg_isready", "-h", "127.0.0.1", "-U", "postgres"
