@@ -970,6 +970,18 @@ cover fresh setup and restart, schema upgrade/backfill and downgrade protection,
 interrupted transfer, reviewed cutover, migrated browser workflows and native
 restore. They are not a substitute for broader backend parity testing.
 
+The gate also runs the checkout's Mylar import service tests on both majors,
+separately from the packaged-browser rehearsal. Each case gets a new database
+cloned from an empty schema upgraded to Alembic head. A misleading filename
+must not transfer ownership between a Mylar-recorded issue and a neighboring
+Metron/GCD issue. Both copy and keep-in-place must leave unrecognized files
+unclaimed and preserve the original comics and Mylar database through rollback.
+Unknown or stale provider IDs alone cannot displace the recorded match; a
+newly proven conflict at placement must prevent writing. For an existing
+Mylar series this late conflict must be deselected, counted as unresolved and
+available in completed-import Follow-up. Follow-up must hide stale provider
+targets and skip only the disputed file.
+
 For a disposable first-start rehearsal, set `PULLBOX_TEST_MIGRATION_TARGET_DOCKER=1`
 and `PULLBOX_TEST_SQLITE_SNAPSHOT_IMAGE` to a local Pullbox runtime image, then run
 `pytest tests/integration/test_postgres_first_start.py`. The test uses the current

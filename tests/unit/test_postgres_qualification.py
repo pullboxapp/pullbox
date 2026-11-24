@@ -8,6 +8,24 @@ from pathlib import Path
 import pytest
 
 
+def test_gate_requires_mixed_folder_rollback_and_stale_conflict_recovery_on_both_majors():
+    from scripts.run_postgres_qualification import required_nodes
+
+    nodes = set(required_nodes())
+    module = "tests/integration/test_postgres_mylar.py::"
+    for major in (16, 18):
+        for provider in ("metron", "gcd"):
+            assert f"{module}test_conflict_followup[{major}-{provider}]" in nodes
+            for in_place in (False, True):
+                assert f"{module}test_mixed_folder[{major}-True-{in_place}-{provider}]" in nodes
+                assert f"{module}test_recheck_at_placement[{major}-{in_place}-{provider}]" in nodes
+                for state in ("unknown", "foreign_stale"):
+                    assert (
+                        f"{module}test_recorded_match[{major}-{state}-{in_place}-{provider}]"
+                        in nodes
+                    )
+
+
 @pytest.mark.parametrize(
     ("selection", "skip", "success"),
     [("", False, True), ("", True, False), ("-k one", False, False)],

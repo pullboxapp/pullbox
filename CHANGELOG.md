@@ -228,6 +228,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- If a verified Metron or GCD link changes after confirming a Mylar import
+  into an existing series, the disputed file now appears in Import Follow-up
+  instead of failing with no review action. You can inspect both issues or
+  skip the file without retrying the import or changing either comic.
+
 - What's New offers **Find & Add**, not a new **Watch**, for future issues of
   a series the release feed confirms is already published. Existing Watches
   can still be reviewed or cancelled.

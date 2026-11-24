@@ -10,8 +10,49 @@ from tests.e2e.conftest import _run_async_blocking
 from tests.e2e.pages.import_page import ImportPage
 from tests.integration.test_metron_folder_import import _archive
 from tests.integration.test_mylar_native_extras import seed_mylar_native_extra
+from tests.integration.test_mylar_recorded_native_identity import run_late_mylar_conflict
 
 pytestmark = pytest.mark.e2e
+
+
+@pytest.mark.parametrize("namespace", ["metron", "gcd"])
+def test_changed_link_after_confirm_can_be_reviewed_and_skipped(
+    authed_page, seeded_server, tmp_path, namespace, browser_name
+):
+    from pullbox.database import get_session_factory
+
+    base = (
+        84000000 + (10000 if browser_name == "firefox" else 0) + (1000 if namespace == "gcd" else 0)
+    )
+
+    async def seed():
+        async with get_session_factory()() as session:
+            job, _, file, native, recorded, originals = await run_late_mylar_conflict(
+                session, tmp_path, namespace, False, identity_base=base, admit=False
+            )
+            return job.id, file.import_series_id, file.id, native.id, recorded.id, originals
+
+    job, group, file, native, recorded, originals = _run_async_blocking(seed())
+    page = authed_page
+    page.goto(f"{seeded_server}/import?tab=follow-up&job_id={job}")
+    row = page.get_by_test_id(f"import-orphaned-row-{group}")
+    row.get_by_test_id(f"import-orphaned-recover-{group}").click()
+    dialog = page.get_by_test_id("import-orphaned-recovery-modal")
+    disputed = dialog.get_by_test_id(f"orphaned-recovery-file-{file}")
+    expect(disputed.get_by_role("link", name="Open recorded issue")).to_have_attribute(
+        "href", f"/issues/{recorded}"
+    )
+    label = "Metron" if namespace == "metron" else "GCD"
+    expect(disputed.get_by_role("link", name=f"Open {label} issue")).to_have_attribute(
+        "href", f"/issues/{native}"
+    )
+    disputed.get_by_test_id(f"orphaned-recovery-skip-{file}").click()
+    dialog.get_by_test_id("orphaned-recovery-save").click()
+    expect(row).to_have_count(0)
+    page.reload()
+    expect(page.get_by_test_id("import-follow-up-job-panel")).to_be_visible()
+    expect(row).to_have_count(0)
+    assert all(path.read_bytes() == content for path, content in originals.items())
 
 
 async def _seed(root, namespace, theme, action, mapped_source):

@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from sqlalchemy import select, tuple_
 
-from pullbox.core.exceptions import ValidationError
 from pullbox.core.metadata_identity_state import IdentityVerificationState
 from pullbox.models.issue import Issue
 from pullbox.models.metadata_identity import IssueExternalIdentity, SeriesExternalIdentity
@@ -138,13 +137,13 @@ def mylar_native_conflict(
     }
 
 
-async def revalidate_mylar_native_target(
+async def mylar_placement_conflict(
     session: AsyncSession, file: ImportedFile, issue: Issue
-) -> None:
+) -> dict[str, Any] | None:
     if not recorded_native_refs(file):
-        return
+        return None
     series = await session.get(Series, issue.series_id)
-    conflict = mylar_native_conflict(
+    return mylar_native_conflict(
         file,
         await load_mylar_native_owners(session, [file]),
         series_id=issue.series_id,
@@ -152,5 +151,3 @@ async def revalidate_mylar_native_target(
         issue_id=issue.id,
         issue_cv_id=issue.comicvine_id,
     )
-    if conflict:
-        raise ValidationError(conflict["rejection_reason"])

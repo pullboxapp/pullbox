@@ -18,6 +18,7 @@ from pullbox.models.import_job import (
     ImportSourceType,
 )
 from pullbox.models.issue import Issue
+from pullbox.services.import_counters import recompute_file_counters
 from pullbox.services.import_file_selection import set_review_file_selection
 
 if TYPE_CHECKING:
@@ -42,6 +43,25 @@ def mylar_duplicate(job: ImportJob, item: ImportedSeries) -> bool:
         and item.cv_match_method == "mylar3_cv_id"
         and item.series_id is not None
     )
+
+
+async def refresh_deferred_placement_counts(session: AsyncSession, job: ImportJob) -> None:
+    if job.source_type != ImportSourceType.MYLAR3:
+        return
+    # Read durable outcomes once after all placement workers finish, including on resume.
+    groups = list(
+        await session.scalars(
+            select(ImportedFile.import_series_id)
+            .distinct()
+            .where(
+                ImportedFile.import_job_id == job.id,
+                conflict_file(),
+                ImportedFile.diagnostics["conflict_stage"].as_string() == "placement",
+            )
+        )
+    )
+    if groups:
+        await recompute_file_counters(session, job, series_ids=groups)
 
 
 async def review_rows(

@@ -37,6 +37,27 @@ def run_required(cases: list[str]) -> int:
     return 0
 
 
+def required_nodes() -> list[str]:
+    nodes = []
+    for case in CASES:
+        module, test = case.split("::")
+        for major in (16, 18):
+            parameter = f"{major}-browser" if module == "test_postgres_source_handoff" else major
+            nodes.append(f"tests/integration/{module}.py::{test}[{parameter}]")
+    module = "tests/integration/test_postgres_mylar.py::"
+    for major in (16, 18):
+        for provider in ("metron", "gcd"):
+            nodes.append(f"{module}test_conflict_followup[{major}-{provider}]")
+            for in_place in (False, True):
+                nodes.append(f"{module}test_mixed_folder[{major}-True-{in_place}-{provider}]")
+                nodes.append(f"{module}test_recheck_at_placement[{major}-{in_place}-{provider}]")
+                for state in ("unknown", "foreign_stale"):
+                    nodes.append(
+                        f"{module}test_recorded_match[{major}-{state}-{in_place}-{provider}]"
+                    )
+    return nodes
+
+
 if __name__ == "__main__":
     if not os.environ.get("PULLBOX_TEST_SQLITE_SNAPSHOT_IMAGE"):
         sys.exit("A local production Pullbox image is required.")
@@ -45,10 +66,4 @@ if __name__ == "__main__":
         PULLBOX_TEST_MIGRATION_BROWSER="1",
         PULLBOX_TEST_PACKAGED_POSTGRES="1",
     )
-    nodes = []
-    for case in CASES:
-        module, test = case.split("::")
-        for major in (16, 18):
-            parameter = f"{major}-browser" if module == "test_postgres_source_handoff" else major
-            nodes.append(f"tests/integration/{module}.py::{test}[{parameter}]")
-    sys.exit(run_required(nodes))
+    sys.exit(run_required(required_nodes()))

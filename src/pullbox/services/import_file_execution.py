@@ -23,6 +23,7 @@ from pullbox.core.exceptions import (
     ImportDestinationValidationError,
     JobCancelledError,
     JobPausedError,
+    ValidationError,
 )
 from pullbox.core.file_ops import LibraryFileRegistrationOutcome
 from pullbox.core.file_safety import classify_resource_safety_exception
@@ -60,10 +61,12 @@ from pullbox.services.import_file_resolution import (
     load_importable_files,
     load_issue_lookup_for_series,
 )
+from pullbox.services.import_file_selection import set_review_file_selection
 from pullbox.services.import_folder_adoption import apply_import_series_folder_adoption
 from pullbox.services.import_job_actions import seed_action_sequence_cache
 from pullbox.services.import_metron_matching import revalidate_metron_import_target
-from pullbox.services.import_mylar_native_identity import revalidate_mylar_native_target
+from pullbox.services.import_mylar_followup import mylar_duplicate
+from pullbox.services.import_mylar_native_identity import mylar_placement_conflict
 from pullbox.services.import_placement_recovery import (
     has_completed_direct_move_placement_record,
 )
@@ -1201,7 +1204,32 @@ async def process_import_series_files(
                 placeholder_progress_live_only = False
                 continue
 
-            await revalidate_mylar_native_target(session, imp_file, resolved_issue)
+            if conflict := await mylar_placement_conflict(session, imp_file, resolved_issue):
+                if not mylar_duplicate(current_job, item):
+                    raise ValidationError(conflict["rejection_reason"])
+                # Use the same restricted Follow-up as a conflict proven during scanning.
+                imp_file.status = ImportedFileStatus.NO_MATCH
+                imp_file.matched_issue_id = imp_file.matched_issue_cv_id = None
+                imp_file.match_method = imp_file.match_confidence = None
+                imp_file.error_message = conflict["rejection_reason"]
+                imp_file.diagnostics = {
+                    **dict(imp_file.diagnostics or {}),
+                    **conflict,
+                    "conflict_stage": "placement",
+                }
+                set_review_file_selection(imp_file, False)
+                await log_event(
+                    session,
+                    job_id,
+                    "WARNING",
+                    "import_file_metadata_conflict",
+                    message=f"Mylar issue match changed before placement: {imp_file.file_name}",
+                    imported_file_id=imp_file.id,
+                    diagnostics=conflict,
+                )
+                await session.commit()
+                placeholder_progress_live_only = False
+                continue
             await revalidate_metron_import_target(session, imp_file, resolved_issue)
 
             confidence = _MATCH_CONFIDENCE_MAP.get(

@@ -87,6 +87,7 @@ from pullbox.services.import_managed_copy_preflight import (
     reopen_review_after_managed_copy_preflight_failure,
     validate_managed_copy_preflight,
 )
+from pullbox.services.import_mylar_followup import refresh_deferred_placement_counts
 from pullbox.services.import_progress_runtime import (
     ImportProgressSettings,
     current_item_payload,
@@ -744,6 +745,7 @@ async def execute_import_job(
     job.series_failed = failed_count
     job.total_files_imported = total_files_imported
     job.total_files_failed = total_files_failed
+    await refresh_deferred_placement_counts(session, job)
     placement_counts = await seal_import_story_arc_placement_origin(session, job_id)
     if placement_counts.total:
         job.status = ImportJobStatus.IMPORTING
