@@ -994,12 +994,12 @@ def test_grype_config_tracks_current_dhi_runtime() -> None:
     config = _load_yaml(GRYPE_CONFIG)
 
     assert "Docker Hardened Images Python 3.14 on Debian 13" in config_text
-    assert "Re-review by 2026-10-31 or the next base-image refresh" in config_text
+    assert "Re-review by 2026-11-30 or the next base-image refresh" in config_text
     assert (
         "All other High/Critical findings and changed package versions remain blocking"
         in config_text
     )
-    assert len(config["ignore"]) == 17
+    assert len(config["ignore"]) == 46
     assert all(entry["package"]["type"] == "deb" for entry in config["ignore"])
 
 

@@ -56,11 +56,10 @@ def validate_utility_setting(key: str, value: str) -> None:
         if days < 1 or days > 365:
             raise ValidationError(f"Trash retention days must be between 1 and 365, got: {days}")
 
-    elif key == "utility_log_level":
-        if value.upper() not in _VALID_LOG_LEVELS:
-            raise ValidationError(
-                f"Utility log level must be one of: DEBUG, INFO, WARNING, ERROR; got: {value}"
-            )
+    elif key == "utility_log_level" and value.upper() not in _VALID_LOG_LEVELS:
+        raise ValidationError(
+            f"Utility log level must be one of: DEBUG, INFO, WARNING, ERROR; got: {value}"
+        )
 
 
 def resolve_utility_directory(

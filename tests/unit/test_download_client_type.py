@@ -15,10 +15,9 @@ from typing import TYPE_CHECKING
 import pytest
 from sqlalchemy import String, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from pullbox.core.acquisition import AcquisitionProtocol
-from pullbox.models import Base
 from pullbox.models.download import DownloadClientType
 
 if TYPE_CHECKING:
@@ -45,7 +44,11 @@ def test_airdcpp_client_type_maps_to_dc_protocol() -> None:
 
 
 # Minimal model for round-trip testing without pulling in full DownloadHistory
-class _ClientTypeRecord(Base):
+class _ProbeBase(DeclarativeBase):
+    pass
+
+
+class _ClientTypeRecord(_ProbeBase):
     __tablename__ = "test_client_type_records"
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -57,7 +60,7 @@ async def db() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
     """Create an in-memory database with the test table."""
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_ProbeBase.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()

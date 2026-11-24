@@ -56,6 +56,7 @@ postgres = [
     "asyncpg~=0.30",
 ]
 dev = [
+    "asyncpg~=0.30",  # Exercise PostgreSQL connection handling even without a test server.
     "pytest>=9.0.3,<10.0",
     "pytest-asyncio~=1.3",
     "pytest-cov~=7.1",
@@ -67,8 +68,8 @@ dev = [
     "pip-audit~=2.7",
     "bandit~=1.9",
     "factory-boy~=3.3",
-    # Merged upstream NLTK removal (PR #913); retain until a fixed release is verified.
-    "safety @ https://github.com/pyupio/safety/archive/ac505430fc55403af338ece39489f3e3b01a7d97.tar.gz#sha256=01ec8c456a52a8b2605cf87ba0f422c62af815dbe02728dc9251a7ac72e0820a",
+    # Reviewed upstream PR #927 retains the NLTK removal and requires patched filelock.
+    "safety @ https://github.com/pyupio/safety/archive/7ac538872992709e9a689d686ed3b47efcc7e571.tar.gz#sha256=0dceefc0cdc42c8aef16f06c3f03b5b05bcfab3c71843c38326727bc5c645e21",
     "authlib>=1.6.11",  # transitive via safety — floor for GHSA-jj8c-mmj3-mmgv
     "types-defusedxml~=0.7",
     "types-psutil~=7.2",

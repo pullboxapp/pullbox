@@ -149,28 +149,40 @@ def test_local_and_remote_scanners_share_pins_and_blocking_policy() -> None:
     assert 'bash scripts/run_secret_scans.sh "$(GITLEAKS)" "$(SECRET_SCAN_BASE)"' in makefile
 
 
-def test_release_exceptions_are_limited_to_seventeen_exact_matches() -> None:
+def test_grype_exceptions_match_the_reviewed_november_inventory() -> None:
     config_text = (ROOT / ".grype.yaml").read_text()
     config = yaml.safe_load(config_text)
     expected = (
         {
-            (cve, name, "14.2.0-19+dhi5")
+            (cve, name, "14.2.0-19+deb13u0+dhi9")
             for cve in ("CVE-2026-102010", "CVE-2026-95619")
             for name in ("gcc-14-base", "libgcc-s1", "libstdc++6")
         }
-        | {(cve, "libc6", "2.41-12+deb13u4+dhi1") for cve in ("CVE-2026-5435", "CVE-2026-19499")}
+        | {("CVE-2026-84243", "libc6", "2.41-12+deb13u5+dhi0")}
+        | {
+            (f"CVE-2026-{num}", "libexpat1", "2.9.0-1~deb13u1+dhi3")
+            for num in (113351, 115506, 117610, 118370)
+        }
+        | {
+            (f"CVE-2026-{num}", "libsqlite3-0", "3.46.1-7+deb13u2+dhi4")
+            for num in (119373, 119374, 119379)
+        }
+        | {
+            (f"CVE-2026-{num}", name, "3.5.9-1~deb13u1+dhi1")
+            for num in (107493, 107496, 121482, 124709, 84786, 88823, 95691, 95692)
+            for name in ("libssl3t64", "openssl", "openssl-provider-legacy")
+        }
         | {
             (cve, "libuuid1", "2.41.5-0+deb13u1+dhi3")
             for cve in ("CVE-2026-76642", "CVE-2026-78408", "CVE-2026-78409", "CVE-2026-78410")
         }
-        | {("CVE-2026-85091", "zlib1g", "1:1.3.dfsg+really1.3.1-1+dhi4")}
         | {
-            ("CVE-2025-69720", name, "6.5+20250216-2+dhi4")
+            ("CVE-2025-69720", name, "6.5+20250216-2+deb13u0+dhi5")
             for name in ("libncursesw6", "libtinfo6", "ncurses-base", "ncurses-bin")
         }
     )
     entries = config["ignore"]
-    assert len(entries) == 17
+    assert len(entries) == len(expected) == 46
     assert {
         (entry["vulnerability"], entry["package"]["name"], entry["package"]["version"])
         for entry in entries
@@ -179,7 +191,8 @@ def test_release_exceptions_are_limited_to_seventeen_exact_matches() -> None:
         for cve, name, version in expected
     }
     for entry in entries:
-        assert set(entry) == {"vulnerability", "package"}
+        assert set(entry) == {"vulnerability", "package", "fix-state"}
+        assert entry["fix-state"] in {"not-fixed", "wont-fix"}
         assert set(entry["package"]) == {"name", "version", "type"}
         assert entry["package"]["type"] == "deb"
         pattern = entry["package"]["name"]
@@ -188,8 +201,8 @@ def test_release_exceptions_are_limited_to_seventeen_exact_matches() -> None:
         assert not re.search(pattern, name + "-dev")
         if name == "libstdc++6":
             assert not re.search(pattern, "libstdcc6")
-    assert "Approved by Adam Hernandez on 2026-10-20" in config_text
-    assert "Re-review by 2026-10-31 or the next base-image refresh" in config_text
+    assert "Approved by Adam Hernandez on 2026-11-23" in config_text
+    assert "Re-review by 2026-11-30 or the next base-image refresh" in config_text
     assert "Accepted risk, NOT fixes or false-positive claims" in config_text
     assert "dependency reachability remains unproven" in config_text
 
@@ -198,5 +211,5 @@ def test_obsolete_container_exceptions_do_not_hide_regressions() -> None:
     config = yaml.safe_load((ROOT / ".grype.yaml").read_text())
     for entry in config["ignore"]:
         pattern = entry["package"]["name"]
-        for name in ("python", "libexpat1", "libexpat1-dev", "openssl", "libc6-dev", "zlib1g-dev"):
+        for name in ("python", "libexpat1-dev", "libssl-dev", "libc6-dev", "zlib1g", "zlib1g-dev"):
             assert not re.search(pattern, name)

@@ -17,9 +17,9 @@ from packaging.requirements import Requirement
 
 from scripts import run_dependency_audit as audit
 
-COMMIT = "ac505430fc55403af338ece39489f3e3b01a7d97"
+COMMIT = "7ac538872992709e9a689d686ed3b47efcc7e571"
 URL = f"https://github.com/pyupio/safety/archive/{COMMIT}.tar.gz"
-SHA256 = "01ec8c456a52a8b2605cf87ba0f422c62af815dbe02728dc9251a7ac72e0820a"
+SHA256 = "0dceefc0cdc42c8aef16f06c3f03b5b05bcfab3c71843c38326727bc5c645e21"
 PIN = f"safety @ {URL}#sha256={SHA256}"
 DIRECT_URL = {
     "url": URL,
@@ -27,7 +27,7 @@ DIRECT_URL = {
 }
 
 
-def test_dev_toolchain_uses_merged_nltk_free_safety_source() -> None:
+def test_dev_toolchain_pins_reviewed_nltk_free_safety_with_patched_filelock() -> None:
     config = tomllib.loads(audit.PROJECT.read_text())
     dev = {
         Requirement(value).name: Requirement(value)

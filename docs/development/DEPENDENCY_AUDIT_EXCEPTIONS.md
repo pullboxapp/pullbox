@@ -6,10 +6,22 @@ remain blocking. Safety and Bandit retain their existing advisory status.
 
 ## NLTK Used By Safety
 
+### November 23 Remediation: Patched Filelock
+
+The October Safety pin below required filelock <4. CI reported 13 advisories
+on filelock 3.32.7; the complete set requires 4.2.1 or newer. Development
+now uses the reviewed revision of upstream [PR #927](https://github.com/pyupio/safety/pull/927),
+`7ac538872992709e9a689d686ed3b47efcc7e571`, archive SHA-256
+`0dceefc0cdc42c8aef16f06c3f03b5b05bcfab3c71843c38326727bc5c645e21`.
+This unmerged revision requires filelock >=4.2.1,<5 and retains the upstream
+NLTK removal. No advisory is ignored. The same exact source-provenance and
+complete inventory checks apply; Safety is not a runtime dependency. Replace
+the pin once an official release with both fixes has been verified.
+
 ### October 14 Remediation: Remove The Dependency
 
 The acceptance below expired and has **not** been renewed. NLTK still has no
-patched release. Instead, development installs pin Safety to its merged upstream
+patched release at that review. Development installs then pinned Safety to its merged upstream
 [PR #913](https://github.com/pyupio/safety/pull/913), commit
 `ac505430fc55403af338ece39489f3e3b01a7d97`. It removes NLTK and retains only the
 pure edit-distance algorithm, not the vulnerable model-file APIs. Pullbox's
@@ -34,7 +46,7 @@ dependency remains in the blocking audit; findings for Safety itself are not
 suppressed. The raw scanner report remains unchanged, with source provenance
 saved separately in `dependency-audit-report-provenance.json` and uploaded even
 on failure. This version-based vulnerability check does not independently scan
-the upstream source code; the exact merged patch must also be reviewed.
+the upstream source code; the exact pinned patch must also be reviewed.
 
 An existing virtual environment can retain orphaned NLTK after installing the
 new Safety build. Pip may also keep the released Safety wheel because the

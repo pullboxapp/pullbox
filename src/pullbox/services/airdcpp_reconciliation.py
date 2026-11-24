@@ -471,10 +471,10 @@ class AirDcppReconciler:
                     snapshot.bundle_id is not None
                     and complete_snapshot
                     and _missing_bundle_state_is_actionable(snapshot, now=now)
+                    and _active_snapshot_is_current(acquisition, snapshot)
                 ):
-                    if _active_snapshot_is_current(acquisition, snapshot):
-                        missing += 1
-                        changed += int(_apply_missing_bundle(acquisition, at=now))
+                    missing += 1
+                    changed += int(_apply_missing_bundle(acquisition, at=now))
                 await project_download_operation_progress(
                     session,
                     acquisition.download_history,

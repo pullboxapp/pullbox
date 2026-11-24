@@ -19,9 +19,9 @@ from packaging.utils import canonicalize_name
 PROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
 NLTK_ADVISORY_IDS = {"PYSEC-2026-3740", "GHSA-8mgp-746c-j5xp", "CVE-2026-81726"}
 NLTK_EXCEPTION_EXPIRES = date(2026, 10, 14)
-SAFETY_SOURCE_COMMIT = "ac505430fc55403af338ece39489f3e3b01a7d97"
+SAFETY_SOURCE_COMMIT = "7ac538872992709e9a689d686ed3b47efcc7e571"
 SAFETY_SOURCE_URL = f"https://github.com/pyupio/safety/archive/{SAFETY_SOURCE_COMMIT}.tar.gz"
-SAFETY_SOURCE_SHA256 = "01ec8c456a52a8b2605cf87ba0f422c62af815dbe02728dc9251a7ac72e0820a"
+SAFETY_SOURCE_SHA256 = "0dceefc0cdc42c8aef16f06c3f03b5b05bcfab3c71843c38326727bc5c645e21"
 SAFETY_SOURCE_VERSION = "3.8.1"
 
 

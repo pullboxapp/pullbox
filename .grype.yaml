@@ -1,132 +1,287 @@
-# Exact accepted-risk exceptions for the Pullbox edge release image.
 # Docker Hardened Images Python 3.14 on Debian 13.
-#
-# Approved by Adam Hernandez on 2026-10-20 for ONLY the 17 matches below.
-# Accepted risk, NOT fixes or false-positive claims.
-# Re-review by 2026-10-31 or the next base-image refresh, whichever comes first.
-# Remove entries when verified patched stable packages become available.
+# Approved by Adam Hernandez on 2026-11-23 for shared CI and the private lab/home rollout.
+# Re-review by 2026-11-30 or the next base-image refresh, whichever comes first.
+# Accepted risk, NOT fixes or false-positive claims. No public release is authorized.
 # All other High/Critical findings and changed package versions remain blocking.
-#
-# Reviewed with Grype 0.110.0 and a fresh database on 2026-10-21 UTC:
-# 17 distinct High package/CVE/version matches, zero Critical. Duplicate package
-# records do not expand this approval. Obsolete exceptions have been removed.
-# Refreshed system Expat 2.9.0 removes the five old Expat High findings.
-# Pillow 13.0.0 fixes the eight Python image-decoder findings; no Python package
-# or binary exceptions remain. Full native dependency reachability remains unproven.
-# This public-release approval is separate from earlier private canary waivers.
+# Debian trixie listed each advisory as open. Native dependency reachability remains unproven.
+# The pinned Grype 0.110.0 database dated 2026-11-23 reported 46 distinct High
+# matches and zero Critical on arm64; verify amd64 independently before deployment.
+# Explicit fix-state means a newly available package fix cannot match these rules.
 
 ignore:
-  # GCC PBDS erase_if and aligned-new findings. No direct Pullbox callers found;
-  # native dependency reachability remains unproven. No compiler is shipped.
-  # Debian 13 lists both as no-DSA, with no stable fixed package.
-  # https://security-tracker.debian.org/tracker/CVE-2026-102010
-  # https://security-tracker.debian.org/tracker/CVE-2026-95619
   - vulnerability: CVE-2026-102010
+    fix-state: wont-fix
     package:
       name: '^gcc-14-base$'
-      version: 14.2.0-19+dhi5
-      type: deb
-  - vulnerability: CVE-2026-102010
-    package:
-      name: '^libgcc-s1$'
-      version: 14.2.0-19+dhi5
-      type: deb
-  - vulnerability: CVE-2026-102010
-    package:
-      name: '^libstdc\+\+6$'
-      version: 14.2.0-19+dhi5
+      version: 14.2.0-19+deb13u0+dhi9
       type: deb
   - vulnerability: CVE-2026-95619
+    fix-state: wont-fix
     package:
       name: '^gcc-14-base$'
-      version: 14.2.0-19+dhi5
+      version: 14.2.0-19+deb13u0+dhi9
       type: deb
-  - vulnerability: CVE-2026-95619
+  - vulnerability: CVE-2026-84243
+    fix-state: wont-fix
+    package:
+      name: '^libc6$'
+      version: 2.41-12+deb13u5+dhi0
+      type: deb
+  - vulnerability: CVE-2026-113351
+    fix-state: wont-fix
+    package:
+      name: '^libexpat1$'
+      version: 2.9.0-1~deb13u1+dhi3
+      type: deb
+  - vulnerability: CVE-2026-115506
+    fix-state: wont-fix
+    package:
+      name: '^libexpat1$'
+      version: 2.9.0-1~deb13u1+dhi3
+      type: deb
+  - vulnerability: CVE-2026-117610
+    fix-state: not-fixed
+    package:
+      name: '^libexpat1$'
+      version: 2.9.0-1~deb13u1+dhi3
+      type: deb
+  - vulnerability: CVE-2026-118370
+    fix-state: not-fixed
+    package:
+      name: '^libexpat1$'
+      version: 2.9.0-1~deb13u1+dhi3
+      type: deb
+  - vulnerability: CVE-2026-102010
+    fix-state: wont-fix
     package:
       name: '^libgcc-s1$'
-      version: 14.2.0-19+dhi5
+      version: 14.2.0-19+deb13u0+dhi9
       type: deb
   - vulnerability: CVE-2026-95619
+    fix-state: wont-fix
+    package:
+      name: '^libgcc-s1$'
+      version: 14.2.0-19+deb13u0+dhi9
+      type: deb
+  - vulnerability: CVE-2025-69720
+    fix-state: wont-fix
+    package:
+      name: '^libncursesw6$'
+      version: 6.5+20250216-2+deb13u0+dhi5
+      type: deb
+  - vulnerability: CVE-2026-119373
+    fix-state: wont-fix
+    package:
+      name: '^libsqlite3-0$'
+      version: 3.46.1-7+deb13u2+dhi4
+      type: deb
+  - vulnerability: CVE-2026-119374
+    fix-state: wont-fix
+    package:
+      name: '^libsqlite3-0$'
+      version: 3.46.1-7+deb13u2+dhi4
+      type: deb
+  - vulnerability: CVE-2026-119379
+    fix-state: wont-fix
+    package:
+      name: '^libsqlite3-0$'
+      version: 3.46.1-7+deb13u2+dhi4
+      type: deb
+  - vulnerability: CVE-2026-107493
+    fix-state: not-fixed
+    package:
+      name: '^libssl3t64$'
+      version: 3.5.9-1~deb13u1+dhi1
+      type: deb
+  - vulnerability: CVE-2026-107496
+    fix-state: not-fixed
+    package:
+      name: '^libssl3t64$'
+      version: 3.5.9-1~deb13u1+dhi1
+      type: deb
+  - vulnerability: CVE-2026-121482
+    fix-state: not-fixed
+    package:
+      name: '^libssl3t64$'
+      version: 3.5.9-1~deb13u1+dhi1
+      type: deb
+  - vulnerability: CVE-2026-124709
+    fix-state: not-fixed
+    package:
+      name: '^libssl3t64$'
+      version: 3.5.9-1~deb13u1+dhi1
+      type: deb
+  - vulnerability: CVE-2026-84786
+    fix-state: not-fixed
+    package:
+      name: '^libssl3t64$'
+      version: 3.5.9-1~deb13u1+dhi1
+      type: deb
+  - vulnerability: CVE-2026-88823
+    fix-state: not-fixed
+    package:
+      name: '^libssl3t64$'
+      version: 3.5.9-1~deb13u1+dhi1
+      type: deb
+  - vulnerability: CVE-2026-95691
+    fix-state: not-fixed
+    package:
+      name: '^libssl3t64$'
+      version: 3.5.9-1~deb13u1+dhi1
+      type: deb
+  - vulnerability: CVE-2026-95692
+    fix-state: not-fixed
+    package:
+      name: '^libssl3t64$'
+      version: 3.5.9-1~deb13u1+dhi1
+      type: deb
+  - vulnerability: CVE-2026-102010
+    fix-state: wont-fix
     package:
       name: '^libstdc\+\+6$'
-      version: 14.2.0-19+dhi5
+      version: 14.2.0-19+deb13u0+dhi9
       type: deb
-
-  # Deprecated TSIG printing and strfmon/strfmon_l buffer writes. No direct
-  # Pullbox callers found; third-party reachability is not fully proven.
-  # Debian 13 has no stable fixed package.
-  # https://security-tracker.debian.org/tracker/CVE-2026-5435
-  # https://security-tracker.debian.org/tracker/CVE-2026-19499
-  - vulnerability: CVE-2026-5435
+  - vulnerability: CVE-2026-95619
+    fix-state: wont-fix
     package:
-      name: '^libc6$'
-      version: 2.41-12+deb13u4+dhi1
+      name: '^libstdc\+\+6$'
+      version: 14.2.0-19+deb13u0+dhi9
       type: deb
-  - vulnerability: CVE-2026-19499
+  - vulnerability: CVE-2025-69720
+    fix-state: wont-fix
     package:
-      name: '^libc6$'
-      version: 2.41-12+deb13u4+dhi1
+      name: '^libtinfo6$'
+      version: 6.5+20250216-2+deb13u0+dhi5
       type: deb
-
-  # Source-package findings concern privileged mount/nsenter helpers. The ARM64
-  # candidate contains libuuid1 but neither helper; it runs as UID/GID 65532.
-  # Both release architectures still require normal image validation.
-  # https://security-tracker.debian.org/tracker/CVE-2026-76642
-  # https://security-tracker.debian.org/tracker/CVE-2026-78408
-  # https://security-tracker.debian.org/tracker/CVE-2026-78409
-  # https://security-tracker.debian.org/tracker/CVE-2026-78410
   - vulnerability: CVE-2026-76642
+    fix-state: wont-fix
     package:
       name: '^libuuid1$'
       version: 2.41.5-0+deb13u1+dhi3
       type: deb
   - vulnerability: CVE-2026-78408
+    fix-state: wont-fix
     package:
       name: '^libuuid1$'
       version: 2.41.5-0+deb13u1+dhi3
       type: deb
   - vulnerability: CVE-2026-78409
+    fix-state: wont-fix
     package:
       name: '^libuuid1$'
       version: 2.41.5-0+deb13u1+dhi3
       type: deb
   - vulnerability: CVE-2026-78410
+    fix-state: wont-fix
     package:
       name: '^libuuid1$'
       version: 2.41.5-0+deb13u1+dhi3
       type: deb
-
-  # Non-blocking gzwrite followed by gzprintf/gzvprintf. No direct Pullbox calls
-  # found; Debian still lists this package as unfixed. Do not infer immunity
-  # from the runtime version string or suppress other zlib revisions.
-  # https://security-tracker.debian.org/tracker/CVE-2026-85091
-  - vulnerability: CVE-2026-85091
-    package:
-      name: '^zlib1g$'
-      version: 1:1.3.dfsg+really1.3.1-1+dhi4
-      type: deb
-
-  # infocmp analyze_string stack overflow. infocmp IS present in the runtime.
-  # No direct application invocation was found; this is accepted residual risk,
-  # not a claim that the vulnerable executable is absent or patched.
-  # https://security-tracker.debian.org/tracker/CVE-2025-69720
   - vulnerability: CVE-2025-69720
-    package:
-      name: '^libncursesw6$'
-      version: 6.5+20250216-2+dhi4
-      type: deb
-  - vulnerability: CVE-2025-69720
-    package:
-      name: '^libtinfo6$'
-      version: 6.5+20250216-2+dhi4
-      type: deb
-  - vulnerability: CVE-2025-69720
+    fix-state: wont-fix
     package:
       name: '^ncurses-base$'
-      version: 6.5+20250216-2+dhi4
+      version: 6.5+20250216-2+deb13u0+dhi5
       type: deb
   - vulnerability: CVE-2025-69720
+    fix-state: wont-fix
     package:
       name: '^ncurses-bin$'
-      version: 6.5+20250216-2+dhi4
+      version: 6.5+20250216-2+deb13u0+dhi5
+      type: deb
+  - vulnerability: CVE-2026-107493
+    fix-state: not-fixed
+    package:
+      name: '^openssl$'
+      version: 3.5.9-1~deb13u1+dhi1
+      type: deb
+  - vulnerability: CVE-2026-107496
+    fix-state: not-fixed
+    package:
+      name: '^openssl$'
+      version: 3.5.9-1~deb13u1+dhi1
+      type: deb
+  - vulnerability: CVE-2026-121482
+    fix-state: not-fixed
+    package:
+      name: '^openssl$'
+      version: 3.5.9-1~deb13u1+dhi1
+      type: deb
+  - vulnerability: CVE-2026-124709
+    fix-state: not-fixed
+    package:
+      name: '^openssl$'
+      version: 3.5.9-1~deb13u1+dhi1
+      type: deb
+  - vulnerability: CVE-2026-84786
+    fix-state: not-fixed
+    package:
+      name: '^openssl$'
+      version: 3.5.9-1~deb13u1+dhi1
+      type: deb
+  - vulnerability: CVE-2026-88823
+    fix-state: not-fixed
+    package:
+      name: '^openssl$'
+      version: 3.5.9-1~deb13u1+dhi1
+      type: deb
+  - vulnerability: CVE-2026-95691
+    fix-state: not-fixed
+    package:
+      name: '^openssl$'
+      version: 3.5.9-1~deb13u1+dhi1
+      type: deb
+  - vulnerability: CVE-2026-95692
+    fix-state: not-fixed
+    package:
+      name: '^openssl$'
+      version: 3.5.9-1~deb13u1+dhi1
+      type: deb
+  - vulnerability: CVE-2026-107493
+    fix-state: not-fixed
+    package:
+      name: '^openssl-provider-legacy$'
+      version: 3.5.9-1~deb13u1+dhi1
+      type: deb
+  - vulnerability: CVE-2026-107496
+    fix-state: not-fixed
+    package:
+      name: '^openssl-provider-legacy$'
+      version: 3.5.9-1~deb13u1+dhi1
+      type: deb
+  - vulnerability: CVE-2026-121482
+    fix-state: not-fixed
+    package:
+      name: '^openssl-provider-legacy$'
+      version: 3.5.9-1~deb13u1+dhi1
+      type: deb
+  - vulnerability: CVE-2026-124709
+    fix-state: not-fixed
+    package:
+      name: '^openssl-provider-legacy$'
+      version: 3.5.9-1~deb13u1+dhi1
+      type: deb
+  - vulnerability: CVE-2026-84786
+    fix-state: not-fixed
+    package:
+      name: '^openssl-provider-legacy$'
+      version: 3.5.9-1~deb13u1+dhi1
+      type: deb
+  - vulnerability: CVE-2026-88823
+    fix-state: not-fixed
+    package:
+      name: '^openssl-provider-legacy$'
+      version: 3.5.9-1~deb13u1+dhi1
+      type: deb
+  - vulnerability: CVE-2026-95691
+    fix-state: not-fixed
+    package:
+      name: '^openssl-provider-legacy$'
+      version: 3.5.9-1~deb13u1+dhi1
+      type: deb
+  - vulnerability: CVE-2026-95692
+    fix-state: not-fixed
+    package:
+      name: '^openssl-provider-legacy$'
+      version: 3.5.9-1~deb13u1+dhi1
       type: deb
