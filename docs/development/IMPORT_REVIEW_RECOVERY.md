@@ -270,6 +270,9 @@ it is the current referenced issue, and no other file or imported registration
 owns it. The issue ID and reader history are preserved. The old series identity
 is retained in the cleanup audit. A provisional issue is not offered under a
 folder series when independent file evidence identifies an unrelated series.
+In Step 3, even an undated filename or embedded title can rule out a number-only
+suggestion under the selected series. It is not proof of ownership elsewhere.
+Exact saved issue IDs still take precedence over filename hints.
 
 The deferred pass uses complete local catalogs first. Exact issue identity may
 correct stale Mylar ownership only when the file's title, issue number, type,

@@ -251,6 +251,33 @@ def test_provisional_issue_number_uses_requested_and_filename_fallbacks() -> Non
     assert provisional_issue_number_for_file(item, invalid, []) == 5.0
 
 
+@pytest.mark.parametrize(
+    ("name", "same_number_ok"),
+    [
+        ("042 - Thunderbolts 004 (converted).cbz", False),
+        ("King Dracula 004.cbz", True),
+        ("Unknown 004.cbz", True),
+        ("004.cbz", True),
+    ],
+)
+def test_provisional_and_number_suggestions_share_file_title_guard(name, same_number_ok):
+    from pullbox.services.import_reconcile_helpers import build_reconcile_file_rows
+
+    file = _file()
+    file.file_name = name
+    file.parsed_series = _series().cv_title
+
+    def review(options):
+        rows, _, _ = build_reconcile_file_rows(_series(), [file], options)
+        return rows[0]
+
+    options = [{"issue_cv_id": 123, "issue_number": 4.0}]
+    assert review([])["can_create_provisional_issue"] is same_number_ok
+    assert review(options)["suggested_issue_cv_id"] == (123 if same_number_ok else None)
+    file.comicvine_issue_id = 123
+    assert review(options)["suggested_issue_cv_id"] == 123
+
+
 def test_filename_issue_number_requires_parseable_matching_series() -> None:
     from pullbox.services.import_reconcile_helpers import (
         filename_issue_number_for_selected_series,

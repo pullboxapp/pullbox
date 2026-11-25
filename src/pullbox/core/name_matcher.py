@@ -299,3 +299,15 @@ class NameMatcher:
         if len(base.split()) < 2:
             return False
         return len(extra_words) >= 2
+
+
+def names_different_series(candidate: str, selected: str) -> bool:
+    """A recognizable foreign title can rule out a folder, not establish a new owner."""
+    normalized = NameMatcher.normalize(candidate)
+    if (
+        not normalized
+        or normalized in {"book", "comic", "issue", "scan", "unknown"}
+        or not any(character.isalpha() for character in candidate)
+    ):
+        return False
+    return not NameMatcher().match(candidate, selected).is_match

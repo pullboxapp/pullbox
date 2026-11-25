@@ -4704,6 +4704,53 @@ class TestImportReconciliation:
         assert file_row["suggested_issue_cv_id"] == 1166406
         assert file_row["suggested_issue_label"] == "#21 - Leading the Witness"
 
+    @pytest.mark.parametrize(
+        ("filename", "embedded"),
+        [
+            ("042 - Thunderbolts 105 (converted).cbz", None),
+            ("Heavy Metal 021.cbz", None),
+            ("Issue 105.cbz", "Thunderbolts"),
+        ],
+    )
+    async def test_foreign_title_cannot_create_provisional_issue_in_parent(
+        self, db_session, mock_series_service, mock_event_bus, filename, embedded
+    ):
+        job, item, file = await self._seed_reconcile_row(db_session)
+        item.cv_title = item.raw_series_name = file.parsed_series = "Fritzi Ritz"
+        file.file_name = filename
+        file.parsed_issue_number = 21 if "021" in filename else 105
+        file.diagnostics = {"source_metadata": {"comicinfo": {"series": embedded}}}
+        await db_session.flush()
+        metadata_service = AsyncMock()
+        metadata_service.get_issue_summaries_for_series.return_value = []
+        service = _make_service(
+            series_service=mock_series_service,
+            metadata_service=metadata_service,
+            event_bus=mock_event_bus,
+        )
+        context = await service.get_import_reconcile_context(db_session, job.id, item.id)
+        assert not context["files"][0]["can_create_provisional_issue"]
+        request = ImportReconcileRequest(
+            decisions=[
+                {
+                    "imported_file_id": file.id,
+                    "action": "provisional",
+                    "provisional_issue_number": file.parsed_issue_number,
+                }
+            ]
+        )
+        with pytest.raises(ValidationError, match="different series"):
+            await service.reconcile_import_series(db_session, job.id, item.id, request)
+        assert file.status == ImportedFileStatus.NO_MATCH
+        assert file.matched_issue_id is None
+        await service.reconcile_import_series(
+            db_session,
+            job.id,
+            item.id,
+            ImportReconcileRequest(decisions=[{"imported_file_id": file.id, "action": "skip"}]),
+        )
+        assert file.status == ImportedFileStatus.SKIPPED
+
     @pytest.mark.asyncio
     async def test_reconcile_context_offers_provisional_issue_for_missing_provider_target(
         self,

@@ -18,7 +18,7 @@ from pullbox.services.import_file_match_targets import (
     PROVIDER_MISSING_ISSUE_PLACEHOLDER_METHOD,
 )
 from pullbox.services.import_file_preparation import format_comicinfo_issue_number
-from pullbox.services.import_recovery_identity import catalog_file_identity
+from pullbox.services.import_recovery_identity import conflicts_with_review_series
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -136,6 +136,17 @@ def provisional_issue_number_for_file(
     issue_options: list[dict[str, Any]],
 ) -> float | None:
     """Return a safe local issue number when the selected provider series is missing it."""
+    if imp_file.status in {
+        ImportedFileStatus.NO_MATCH,
+        ImportedFileStatus.PENDING,
+    } and conflicts_with_review_series(imp_file, item.cv_title or item.raw_series_name):
+        return None
+    return _missing_issue_number(item, imp_file, issue_options)
+
+
+def _missing_issue_number(
+    item: ImportedSeries, imp_file: ImportedFile, issue_options: list[dict[str, Any]]
+) -> float | None:
     if imp_file.status not in {ImportedFileStatus.NO_MATCH, ImportedFileStatus.PENDING}:
         return None
     if item.cv_id is None and item.series_id is None and item.user_selected_cv_id is None:
@@ -144,15 +155,6 @@ def provisional_issue_number_for_file(
     diagnostics = dict(imp_file.diagnostics or {})
     if diagnostics.get("kind") == "metadata_conflict" or diagnostics.get("conflict_type"):
         return None
-    identity = catalog_file_identity(imp_file)
-    if (
-        identity is not None
-        and not NameMatcher()
-        .match(identity["query"], item.cv_title or item.raw_series_name)
-        .is_match
-    ):
-        return None
-
     issue_number = archive_entry_issue_number(imp_file)
     if issue_number is None:
         issue_number = imp_file.parsed_issue_number
@@ -251,6 +253,11 @@ def apply_reconcile_decisions(
         if decision.action == "provisional":
             provisional_issue_number = provisional_issue_number_by_file_id.get(imp_file.id)
             if provisional_issue_number is None:
+                if conflicts_with_review_series(imp_file, item.cv_title or item.raw_series_name):
+                    raise ValidationError(
+                        "This file names a different series. Use Different series in import "
+                        "review, or skip the file."
+                    )
                 raise ValidationError(
                     "A provisional issue can only be created when the selected series "
                     "has no matching provider issue for this file."
@@ -354,22 +361,25 @@ def build_reconcile_file_rows(
         if suggested_issue_cv_id is None and imp_file.comicvine_issue_id in issue_label_by_cv_id:
             suggested_issue_cv_id = imp_file.comicvine_issue_id
         archive_issue_number = archive_entry_issue_number(imp_file)
+        title_conflict = imp_file.status in unresolved_statuses and conflicts_with_review_series(
+            imp_file, item.cv_title or item.raw_series_name
+        )
         if (
             suggested_issue_cv_id is None
+            and not title_conflict
             and archive_issue_number is not None
             and len(issue_number_to_cv_ids.get(archive_issue_number, [])) == 1
         ):
             suggested_issue_cv_id = issue_number_to_cv_ids[archive_issue_number][0]
         if (
             suggested_issue_cv_id is None
+            and not title_conflict
             and imp_file.parsed_issue_number is not None
             and len(issue_number_to_cv_ids.get(imp_file.parsed_issue_number, [])) == 1
         ):
             suggested_issue_cv_id = issue_number_to_cv_ids[imp_file.parsed_issue_number][0]
-        provisional_issue_number = provisional_issue_number_for_file(
-            item,
-            imp_file,
-            issue_options,
+        provisional_issue_number = (
+            None if title_conflict else _missing_issue_number(item, imp_file, issue_options)
         )
 
         decision_locked = imp_file.status not in unresolved_statuses
@@ -398,6 +408,7 @@ def build_reconcile_file_rows(
                     else None
                 ),
                 "can_create_provisional_issue": provisional_issue_number is not None,
+                "review_series_disagrees": title_conflict and suggested_issue_cv_id is None,
                 "provisional_issue_number": provisional_issue_number,
                 "provisional_issue_label": (
                     f"#{format_comicinfo_issue_number(provisional_issue_number)}"

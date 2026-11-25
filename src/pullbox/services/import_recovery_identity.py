@@ -6,8 +6,8 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from pullbox.core.issue_numbers import normalize_issue_number_text
-from pullbox.core.name_matcher import NameMatcher
-from pullbox.core.release_parser import parse_release_title
+from pullbox.core.name_matcher import NameMatcher, names_different_series
+from pullbox.core.release_parser import ParsedRelease, parse_release_title
 from pullbox.core.story_arc_ordering import extract_story_arc_order_prefix
 from pullbox.models.import_job import ImportedFile
 
@@ -19,6 +19,34 @@ if TYPE_CHECKING:
 MIXED_IDENTITY_REVIEW_ERROR = (
     "Fresh ComicInfo does not prove the selected recovery issue. Review it in Follow-up."
 )
+
+
+def _parse_file_title(name: str, expected_series: tuple[str, ...]) -> ParsedRelease | None:
+    prefix = extract_story_arc_order_prefix(name)
+    if prefix is not None:
+        name = prefix.residual_file_name
+    name = re.sub(r"\s*\(converted\)\s*", " ", name, flags=re.IGNORECASE)
+    return parse_release_title(name, expected_series=expected_series)
+
+
+def conflicts_with_review_series(file: ImportedFile, title: str) -> bool:
+    """Veto number-only suggestions without redirecting a file to another series."""
+    source = (file.diagnostics or {}).get("source_metadata")
+    comicinfo = source.get("comicinfo") if isinstance(source, dict) else None
+    embedded = comicinfo.get("series") if isinstance(comicinfo, dict) else None
+    if isinstance(embedded, str) and names_different_series(embedded, title):
+        return True
+    identity = catalog_file_identity(file)
+    if identity is not None:
+        return not NameMatcher().match(identity["query"], title).is_match
+    # An undated filename cannot identify a catalog target, but its title can
+    # still contradict the selected folder. Never promote this hint to a match.
+    parsed = _parse_file_title(file.file_name or "", (title,))
+    return bool(
+        parsed
+        and parsed.issue_number is not None
+        and names_different_series(parsed.series_name or "", title)
+    )
 
 
 def catalog_file_identity(file: ImportedFile) -> dict[str, Any] | None:
@@ -44,12 +72,7 @@ def catalog_file_identity(file: ImportedFile) -> dict[str, Any] | None:
     use_sidecar = signals.get("series_name") == signals.get("issue_number") == "sidecar" and bool(
         file.parsed_series
     )
-    name = file.file_name
-    prefix = extract_story_arc_order_prefix(name)
-    if prefix is not None:
-        name = prefix.residual_file_name
-    name = re.sub(r"\s*\(converted\)\s*", " ", name, flags=re.IGNORECASE)
-    parsed = parse_release_title(name, expected_series=(embedded_title,) if use_embedded else ())
+    parsed = _parse_file_title(file.file_name, (embedded_title,) if use_embedded else ())
     if parsed is not None and parsed.is_pack:
         return None
     if use_embedded:

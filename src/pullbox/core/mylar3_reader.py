@@ -31,7 +31,7 @@ from pullbox.core.library_layout import (
     compile_source_layout,
     resolve_source_layout_spec,
 )
-from pullbox.core.name_matcher import NameMatcher
+from pullbox.core.name_matcher import names_different_series
 from pullbox.core.naming import parse_filename
 from pullbox.core.naming_type_detection import detect_issue_type
 from pullbox.core.release_parser import normalize_issue_number
@@ -42,20 +42,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
 logger = structlog.get_logger(__name__)
-
-_GENERIC_FILENAME_SERIES = frozenset({"book", "comic", "issue", "scan", "unknown"})
-
-
-def _foreign_filename_series(parsed_series: str, mylar_series: str) -> bool:
-    """Return whether a filename clearly names a different series than its Mylar folder."""
-    normalized = NameMatcher.normalize(parsed_series)
-    if (
-        not normalized
-        or normalized in _GENERIC_FILENAME_SERIES
-        or not any(character.isalpha() for character in parsed_series)
-    ):
-        return False
-    return not NameMatcher().match(parsed_series, mylar_series).is_match
 
 
 @dataclass(frozen=True, slots=True)
@@ -1428,7 +1414,7 @@ class Mylar3Reader:
             if (
                 issue_record is None
                 and release_series_candidate
-                and _foreign_filename_series(release_series_candidate, series_name)
+                and names_different_series(release_series_candidate, series_name)
             ):
                 parsed_series = release_series_candidate
                 metadata_signals["series_name"] = MetadataSignal.RELEASE_TITLE.value

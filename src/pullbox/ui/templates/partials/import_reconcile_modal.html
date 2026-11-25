@@ -127,6 +127,9 @@
                             <span class="pill pill-success">Suggested {{ file.suggested_issue_label }}</span>
                           {% endif %}
                         </div>
+                        {% if file.review_series_disagrees %}
+                          <p class="mt-1 text-xs text-pb-text-dim">This file names a different series. Check the series before choosing an issue, or skip this file.</p>
+                        {% endif %}
                       </div>
                     </td>
                     <td class="downloads-mono-cell is-right">

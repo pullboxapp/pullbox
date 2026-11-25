@@ -232,6 +232,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Step 3 no longer suggests an issue by number alone or offers to create a
+  provisional issue when a mixed-folder file names a different series. You can
+  review the series choice or skip the file; no comic is moved by this check.
+
 - If a verified Metron or GCD link changes after confirming a Mylar import
   into an existing series, the disputed file now appears in Import Follow-up
   instead of failing with no review action. You can inspect both issues or
