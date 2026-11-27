@@ -120,6 +120,18 @@ def test_new_account_survives_recreating_both_containers(fresh_stack, major):
             stdin=query,
         )
 
+    def sign_in(page, url, account_password):
+        login = LoginPage(page, url)
+        login.fill_username("freshoperator")
+        login.fill_password(account_password)
+        with page.expect_response(
+            lambda r: r.request.method == "POST" and r.url == url + "/api/v1/auth/login"
+        ) as login_response:
+            login.submit()
+        assert login_response.value.status == 200, "The packaged app refused sign-in"
+        expect(page.get_by_test_id("dashboard-page")).to_be_visible(timeout=30_000)
+        expect(page).to_have_url(url + "/")
+
     try:
         run("up", "-d", "--pull", "never", "--wait", "db")
         run(
@@ -165,12 +177,15 @@ def test_new_account_survives_recreating_both_containers(fresh_stack, major):
             setup.fill_username("freshoperator")
             setup.fill_password(account_password)
             setup.fill_confirm_password(account_password)
-            setup.submit_account()
+            with page.expect_response(
+                lambda r: r.request.method == "POST" and r.url == url + "/api/v1/system/setup"
+            ) as setup_response:
+                setup.submit_account()
+            assert setup_response.value.status == 201, "The packaged app refused account creation"
             page.wait_for_url("**/login")
-            LoginPage(page, url).login("freshoperator", account_password)
-            page.wait_for_url(url + "/")
             original_id = sql("SELECT id FROM users WHERE username='freshoperator'")
-            assert original_id.isdigit()
+            assert original_id.isdigit(), "Setup did not persist the account"
+            sign_in(page, url, account_password)
             metric_id = sql(
                 "SELECT id FROM dashboard_metric_rollups WHERE metric_key='active_downloads' "
                 "ORDER BY bucket_start DESC LIMIT 1"
@@ -184,8 +199,8 @@ def test_new_account_survives_recreating_both_containers(fresh_stack, major):
             run("up", "-d", "--pull", "never", "--wait", "--wait-timeout", "110")
             url = "http://" + run("port", "pullbox", "8585")
             page = browser.new_page()
-            LoginPage(page, url).login("freshoperator", account_password)
-            page.wait_for_url(url + "/")
+            LoginPage(page, url).goto()
+            sign_in(page, url, account_password)
             page.goto(url + "/system?tab=about")
             expect(page.get_by_text(f"PostgreSQL {major}.", exact=False).first).to_be_visible()
             assert sql("SELECT id FROM users WHERE username='freshoperator'") == original_id
