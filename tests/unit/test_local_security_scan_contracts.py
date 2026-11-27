@@ -168,8 +168,8 @@ def test_grype_exceptions_match_the_reviewed_november_inventory() -> None:
             for num in (119373, 119374, 119379)
         }
         | {
-            (f"CVE-2026-{num}", name, "3.5.9-1~deb13u1+dhi1")
-            for num in (107493, 107496, 121482, 124709, 84786, 88823, 95691, 95692)
+            (f"CVE-2026-{num}", name, "3.5.9-1~deb13u1+dhi2")
+            for num in (107493, 107494, 107496, 121482, 124709, 84786, 88823, 95691, 95692)
             for name in ("libssl3t64", "openssl", "openssl-provider-legacy")
         }
         | {
@@ -182,7 +182,7 @@ def test_grype_exceptions_match_the_reviewed_november_inventory() -> None:
         }
     )
     entries = config["ignore"]
-    assert len(entries) == len(expected) == 46
+    assert len(entries) == len(expected) == 49
     assert {
         (entry["vulnerability"], entry["package"]["name"], entry["package"]["version"])
         for entry in entries
@@ -201,7 +201,7 @@ def test_grype_exceptions_match_the_reviewed_november_inventory() -> None:
         assert not re.search(pattern, name + "-dev")
         if name == "libstdc++6":
             assert not re.search(pattern, "libstdcc6")
-    assert "Approved by Adam Hernandez on 2026-11-23" in config_text
+    assert "Approved by Adam Hernandez on 2026-11-26 for shared CI only" in config_text
     assert "Re-review by 2026-11-30 or the next base-image refresh" in config_text
     assert "Accepted risk, NOT fixes or false-positive claims" in config_text
     assert "dependency reachability remains unproven" in config_text

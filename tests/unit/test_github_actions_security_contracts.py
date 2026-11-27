@@ -999,7 +999,7 @@ def test_grype_config_tracks_current_dhi_runtime() -> None:
         "All other High/Critical findings and changed package versions remain blocking"
         in config_text
     )
-    assert len(config["ignore"]) == 46
+    assert len(config["ignore"]) == 49
     assert all(entry["package"]["type"] == "deb" for entry in config["ignore"])
 
 

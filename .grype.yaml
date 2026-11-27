@@ -1,11 +1,11 @@
 # Docker Hardened Images Python 3.14 on Debian 13.
-# Approved by Adam Hernandez on 2026-11-23 for shared CI and the private lab/home rollout.
+# Approved by Adam Hernandez on 2026-11-26 for shared CI only.
 # Re-review by 2026-11-30 or the next base-image refresh, whichever comes first.
-# Accepted risk, NOT fixes or false-positive claims. No public release is authorized.
+# Accepted risk, NOT fixes or false-positive claims. No deployment or release is authorized.
 # All other High/Critical findings and changed package versions remain blocking.
 # Debian trixie listed each advisory as open. Native dependency reachability remains unproven.
-# The pinned Grype 0.110.0 database dated 2026-11-23 reported 46 distinct High
-# matches and zero Critical on arm64; verify amd64 independently before deployment.
+# The reviewed arm64 image had 49 distinct High matches and zero Critical.
+# Relative to the previous private inventory, only the OpenSSL package revision changed.
 # Explicit fix-state means a newly available package fix cannot match these rules.
 
 ignore:
@@ -91,49 +91,55 @@ ignore:
     fix-state: not-fixed
     package:
       name: '^libssl3t64$'
-      version: 3.5.9-1~deb13u1+dhi1
+      version: 3.5.9-1~deb13u1+dhi2
+      type: deb
+  - vulnerability: CVE-2026-107494
+    fix-state: not-fixed
+    package:
+      name: '^libssl3t64$'
+      version: 3.5.9-1~deb13u1+dhi2
       type: deb
   - vulnerability: CVE-2026-107496
     fix-state: not-fixed
     package:
       name: '^libssl3t64$'
-      version: 3.5.9-1~deb13u1+dhi1
+      version: 3.5.9-1~deb13u1+dhi2
       type: deb
   - vulnerability: CVE-2026-121482
     fix-state: not-fixed
     package:
       name: '^libssl3t64$'
-      version: 3.5.9-1~deb13u1+dhi1
+      version: 3.5.9-1~deb13u1+dhi2
       type: deb
   - vulnerability: CVE-2026-124709
     fix-state: not-fixed
     package:
       name: '^libssl3t64$'
-      version: 3.5.9-1~deb13u1+dhi1
+      version: 3.5.9-1~deb13u1+dhi2
       type: deb
   - vulnerability: CVE-2026-84786
     fix-state: not-fixed
     package:
       name: '^libssl3t64$'
-      version: 3.5.9-1~deb13u1+dhi1
+      version: 3.5.9-1~deb13u1+dhi2
       type: deb
   - vulnerability: CVE-2026-88823
     fix-state: not-fixed
     package:
       name: '^libssl3t64$'
-      version: 3.5.9-1~deb13u1+dhi1
+      version: 3.5.9-1~deb13u1+dhi2
       type: deb
   - vulnerability: CVE-2026-95691
     fix-state: not-fixed
     package:
       name: '^libssl3t64$'
-      version: 3.5.9-1~deb13u1+dhi1
+      version: 3.5.9-1~deb13u1+dhi2
       type: deb
   - vulnerability: CVE-2026-95692
     fix-state: not-fixed
     package:
       name: '^libssl3t64$'
-      version: 3.5.9-1~deb13u1+dhi1
+      version: 3.5.9-1~deb13u1+dhi2
       type: deb
   - vulnerability: CVE-2026-102010
     fix-state: wont-fix
@@ -193,95 +199,107 @@ ignore:
     fix-state: not-fixed
     package:
       name: '^openssl$'
-      version: 3.5.9-1~deb13u1+dhi1
+      version: 3.5.9-1~deb13u1+dhi2
+      type: deb
+  - vulnerability: CVE-2026-107494
+    fix-state: not-fixed
+    package:
+      name: '^openssl$'
+      version: 3.5.9-1~deb13u1+dhi2
       type: deb
   - vulnerability: CVE-2026-107496
     fix-state: not-fixed
     package:
       name: '^openssl$'
-      version: 3.5.9-1~deb13u1+dhi1
+      version: 3.5.9-1~deb13u1+dhi2
       type: deb
   - vulnerability: CVE-2026-121482
     fix-state: not-fixed
     package:
       name: '^openssl$'
-      version: 3.5.9-1~deb13u1+dhi1
+      version: 3.5.9-1~deb13u1+dhi2
       type: deb
   - vulnerability: CVE-2026-124709
     fix-state: not-fixed
     package:
       name: '^openssl$'
-      version: 3.5.9-1~deb13u1+dhi1
+      version: 3.5.9-1~deb13u1+dhi2
       type: deb
   - vulnerability: CVE-2026-84786
     fix-state: not-fixed
     package:
       name: '^openssl$'
-      version: 3.5.9-1~deb13u1+dhi1
+      version: 3.5.9-1~deb13u1+dhi2
       type: deb
   - vulnerability: CVE-2026-88823
     fix-state: not-fixed
     package:
       name: '^openssl$'
-      version: 3.5.9-1~deb13u1+dhi1
+      version: 3.5.9-1~deb13u1+dhi2
       type: deb
   - vulnerability: CVE-2026-95691
     fix-state: not-fixed
     package:
       name: '^openssl$'
-      version: 3.5.9-1~deb13u1+dhi1
+      version: 3.5.9-1~deb13u1+dhi2
       type: deb
   - vulnerability: CVE-2026-95692
     fix-state: not-fixed
     package:
       name: '^openssl$'
-      version: 3.5.9-1~deb13u1+dhi1
+      version: 3.5.9-1~deb13u1+dhi2
       type: deb
   - vulnerability: CVE-2026-107493
     fix-state: not-fixed
     package:
       name: '^openssl-provider-legacy$'
-      version: 3.5.9-1~deb13u1+dhi1
+      version: 3.5.9-1~deb13u1+dhi2
+      type: deb
+  - vulnerability: CVE-2026-107494
+    fix-state: not-fixed
+    package:
+      name: '^openssl-provider-legacy$'
+      version: 3.5.9-1~deb13u1+dhi2
       type: deb
   - vulnerability: CVE-2026-107496
     fix-state: not-fixed
     package:
       name: '^openssl-provider-legacy$'
-      version: 3.5.9-1~deb13u1+dhi1
+      version: 3.5.9-1~deb13u1+dhi2
       type: deb
   - vulnerability: CVE-2026-121482
     fix-state: not-fixed
     package:
       name: '^openssl-provider-legacy$'
-      version: 3.5.9-1~deb13u1+dhi1
+      version: 3.5.9-1~deb13u1+dhi2
       type: deb
   - vulnerability: CVE-2026-124709
     fix-state: not-fixed
     package:
       name: '^openssl-provider-legacy$'
-      version: 3.5.9-1~deb13u1+dhi1
+      version: 3.5.9-1~deb13u1+dhi2
       type: deb
   - vulnerability: CVE-2026-84786
     fix-state: not-fixed
     package:
       name: '^openssl-provider-legacy$'
-      version: 3.5.9-1~deb13u1+dhi1
+      version: 3.5.9-1~deb13u1+dhi2
       type: deb
   - vulnerability: CVE-2026-88823
     fix-state: not-fixed
     package:
       name: '^openssl-provider-legacy$'
-      version: 3.5.9-1~deb13u1+dhi1
+      version: 3.5.9-1~deb13u1+dhi2
       type: deb
   - vulnerability: CVE-2026-95691
     fix-state: not-fixed
     package:
       name: '^openssl-provider-legacy$'
-      version: 3.5.9-1~deb13u1+dhi1
+      version: 3.5.9-1~deb13u1+dhi2
       type: deb
   - vulnerability: CVE-2026-95692
     fix-state: not-fixed
     package:
       name: '^openssl-provider-legacy$'
-      version: 3.5.9-1~deb13u1+dhi1
+      version: 3.5.9-1~deb13u1+dhi2
       type: deb
