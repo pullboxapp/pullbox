@@ -277,6 +277,7 @@ async def import_orphaned_recovery(
             request,
             user,
             imported_series=payload["imported_series"],
+            selected_series_title=payload.get("selected_series_title"),
             native_recovery=payload.get("native_recovery", False),
             mylar_conflicts_only=payload.get("mylar_conflicts_only", False),
             can_skip_without_assignment=payload.get("can_skip_without_assignment", False),

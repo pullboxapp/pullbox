@@ -930,6 +930,7 @@ class OrphanRecoveryFileRead(BaseModel):
     matched_issue_cv_id: int | None = None
     suggested_issue_cv_id: int | None = None
     suggested_issue_label: str | None = None
+    conflicting_comicinfo_series: str | None = None
     decision_locked: bool = False
     recorded_issue_id: int | None = None
     provider_issues: list[OrphanRecoveryProviderIssue] = Field(default_factory=list)
@@ -940,6 +941,7 @@ class OrphanRecoveryResponse(BaseModel):
     """Recovery modal payload for an orphaned import series."""
 
     imported_series: ImportedSeriesRead
+    selected_series_title: str | None = None
     native_recovery: bool = False
     mylar_conflicts_only: bool = False
     issue_options: list[OrphanRecoveryIssueOption] = Field(default_factory=list)

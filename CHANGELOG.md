@@ -240,6 +240,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   because an issue number matches. For example, Thunderbolts #21 in a Fritzi
   Ritz folder stays in Follow-up rather than being retried as Fritzi Ritz #21.
   If nothing queues, Follow-up refreshes so you can review or skip the file.
+  Opening **Match issues** directly also shows the series the choices belong
+  to. If ComicInfo names another series, the picker explains the difference
+  instead of preselecting an issue by number.
 
 - If Media Management cannot load naming settings, its previews now stop
   spinning. Choose **Reload this scope** to try again without leaving the page.

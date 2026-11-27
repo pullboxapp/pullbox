@@ -19,6 +19,7 @@ from pullbox.models.import_job import (
 )
 from pullbox.models.issue import Issue
 from pullbox.models.library import LibraryRoot
+from pullbox.models.series import Series
 from pullbox.services.import_file_issue_signals import recovery_issue_number_text
 from pullbox.services.import_mylar_followup import (
     has_mylar_conflict,
@@ -32,6 +33,7 @@ from pullbox.services.import_mylar_native_identity import (
     recorded_native_refs,
 )
 from pullbox.services.import_orphans import is_active_orphan_row, requires_orphan_issue_decision
+from pullbox.services.import_recovery_identity import conflicting_comicinfo_series
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -84,6 +86,11 @@ async def build_orphan_recovery_context(
     if item.cv_id is None and item.series_id is None:
         raise ValidationError("Choose a ComicVine match before starting recovery.")
 
+    selected_title = (
+        await session.scalar(select(Series.title).where(Series.id == item.series_id))
+        if item.series_id is not None
+        else item.cv_title
+    )
     if await needs_mylar_conflict_review(session, job, item):
         conflicts = await review_rows(session, item)
         disputed_files = [file for file, _ in conflicts]
@@ -107,6 +114,7 @@ async def build_orphan_recovery_context(
             ]
         return {
             "imported_series": item,
+            "selected_series_title": selected_title,
             "mylar_conflicts_only": True,
             "issue_options": [],
             "files": files_view,
@@ -132,7 +140,9 @@ async def build_orphan_recovery_context(
     issue_options = (
         [] if native else await _load_recovery_issue_options(session, item, metadata_service)
     )
-    file_rows, files_remaining, files_completed = _build_recovery_file_rows(files, issue_options)
+    file_rows, files_remaining, files_completed = _build_recovery_file_rows(
+        files, issue_options, selected_title=selected_title
+    )
 
     available_library_roots: list[dict[str, Any]] = []
     selected_library_root_id = job.target_library_root_id
@@ -150,6 +160,7 @@ async def build_orphan_recovery_context(
 
     return {
         "imported_series": item,
+        "selected_series_title": selected_title,
         "native_recovery": native,
         "can_skip_without_assignment": registered_mylar_series(job, item),
         "issue_options": issue_options,
@@ -218,6 +229,8 @@ async def _load_recovery_issue_options(
 def _build_recovery_file_rows(
     files: list[ImportedFile],
     issue_options: list[dict[str, Any]],
+    *,
+    selected_title: str | None = None,
 ) -> tuple[list[dict[str, Any]], int, int]:
     issue_label_by_cv_id: dict[int, str] = {}
     issue_number_to_cv_ids: dict[str, list[int]] = {}
@@ -250,12 +263,16 @@ def _build_recovery_file_rows(
         suggested_issue_cv_id = current_issue_cv_id
         if suggested_issue_cv_id is None and imp_file.comicvine_issue_id in issue_label_by_cv_id:
             suggested_issue_cv_id = imp_file.comicvine_issue_id
+        conflicting_title = None
         if (
             suggested_issue_cv_id is None
             and file_number is not None
             and len(issue_number_to_cv_ids.get(file_number, [])) == 1
         ):
-            suggested_issue_cv_id = issue_number_to_cv_ids[file_number][0]
+            if selected_title:
+                conflicting_title = conflicting_comicinfo_series(imp_file, selected_title)
+            if conflicting_title is None:
+                suggested_issue_cv_id = issue_number_to_cv_ids[file_number][0]
 
         # A terminal retry has already checked these IDs and numbers together.
         # Keep the stored evidence, but never preselect a target it refused.
@@ -287,6 +304,7 @@ def _build_recovery_file_rows(
                 "error_message": imp_file.error_message,
                 "matched_issue_cv_id": current_issue_cv_id,
                 "suggested_issue_cv_id": suggested_issue_cv_id,
+                "conflicting_comicinfo_series": conflicting_title,
                 "suggested_issue_label": (
                     issue_label_by_cv_id.get(suggested_issue_cv_id)
                     if suggested_issue_cv_id is not None

@@ -29,12 +29,19 @@ def _parse_file_title(name: str, expected_series: tuple[str, ...]) -> ParsedRele
     return parse_release_title(name, expected_series=expected_series)
 
 
-def conflicts_with_review_series(file: ImportedFile, title: str) -> bool:
-    """Veto number-only suggestions without redirecting a file to another series."""
+def conflicting_comicinfo_series(file: ImportedFile, title: str) -> str | None:
+    """Return the embedded title when it contradicts the reviewed series."""
     source = (file.diagnostics or {}).get("source_metadata")
     comicinfo = source.get("comicinfo") if isinstance(source, dict) else None
     embedded = comicinfo.get("series") if isinstance(comicinfo, dict) else None
     if isinstance(embedded, str) and names_different_series(embedded, title):
+        return embedded.strip()
+    return None
+
+
+def conflicts_with_review_series(file: ImportedFile, title: str) -> bool:
+    """Veto number-only suggestions without redirecting a file to another series."""
+    if conflicting_comicinfo_series(file, title):
         return True
     identity = catalog_file_identity(file)
     if identity is not None:

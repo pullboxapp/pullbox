@@ -1,5 +1,6 @@
 {% from "components/dropdown_select.html" import dropdown_select %}
 {% from "components/settings_shell.html" import inline_alert %}
+{% set display_title = selected_series_title or imported_series.cv_title or imported_series.raw_series_name %}
 
 <div
   class="modal-shell"
@@ -39,7 +40,7 @@
     <div class="modal-header shrink-0">
       <div class="space-y-1">
         <p class="text-[11px] font-medium uppercase tracking-[0.14em] text-pb-brand">Recover files</p>
-        <h3 id="orphaned-recovery-title-{{ imported_series.id }}" class="text-base font-semibold text-pb-text">{{ imported_series.cv_title or imported_series.raw_series_name }}</h3>
+        <h3 id="orphaned-recovery-title-{{ imported_series.id }}" class="text-base font-semibold text-pb-text">{{ display_title }}</h3>
         {% if mylar_conflicts_only %}
           <p class="text-xs leading-5 text-pb-text-dim">Mylar and the file identify different issues. If Mylar is right, open the recorded issue and use Import File with a corrected copy. If the comic belongs elsewhere, import it from that issue instead. Skip the old reference when you're done; this does not change either comic.</p>
         {% elif imported_series.status.value == 'imported' %}
@@ -65,11 +66,16 @@
         <div class="grid gap-3 md:grid-cols-4">
           <div class="rounded-lg border border-pb-border bg-pb-card px-3 py-3">
             <p class="text-[10px] font-medium uppercase tracking-[0.12em] text-pb-text-dim">Series</p>
-            <p class="mt-1 text-sm font-semibold text-pb-text">{{ imported_series.cv_title or imported_series.raw_series_name }}</p>
+            <p class="mt-1 text-sm font-semibold text-pb-text">{{ display_title }}</p>
           </div>
           <div class="rounded-lg border border-pb-border bg-pb-card px-3 py-3">
+            {% if display_title != imported_series.raw_series_name %}
+            <p class="text-[10px] font-medium uppercase tracking-[0.12em] text-pb-text-dim">Import group</p>
+            <p class="mt-1 text-sm font-semibold text-pb-text">{{ imported_series.raw_series_name }}</p>
+            {% else %}
             <p class="text-[10px] font-medium uppercase tracking-[0.12em] text-pb-text-dim">Publisher</p>
             <p class="mt-1 text-sm font-semibold text-pb-text">{{ imported_series.cv_publisher or imported_series.raw_publisher or '—' }}</p>
+            {% endif %}
           </div>
           <div class="rounded-lg border border-pb-border bg-pb-card px-3 py-3">
             <p class="text-[10px] font-medium uppercase tracking-[0.12em] text-pb-text-dim">{{ 'Conflicts left' if mylar_conflicts_only else 'Files left' }}</p>
@@ -189,6 +195,9 @@
                         </div>
                         {% if file.error_message and not mylar_conflicts_only %}
                           <p class="mt-2 text-xs text-pb-danger">{{ file.error_message }}</p>
+                        {% endif %}
+                        {% if file.conflicting_comicinfo_series and not file.decision_locked %}
+                          <p class="mt-2 text-xs text-pb-text-dim">ComicInfo names {{ file.conflicting_comicinfo_series }}, not {{ display_title }}. The issue number alone is not a match. If this file belongs to the other series, open the correct issue and use Import File.</p>
                         {% endif %}
                       </div>
                     </td>

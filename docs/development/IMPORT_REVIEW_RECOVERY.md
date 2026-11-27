@@ -268,6 +268,10 @@ The Follow-up issue picker matches exact issue numbers, not numeric sort
 values. For example, #50, #50-O, and #50-X are distinct choices. Conflicting
 suffixes do not preselect an issue. An existing decision or exact catalog
 issue ID still takes priority over a number-only suggestion.
+The picker labels its choices with the linked library series title (or selected
+catalog title for a new series), not the source group. If ComicInfo names a
+different series, the picker withholds a number-only suggestion and explains
+how to import the file from the correct issue. It does not assign a new owner.
 Terminal retries without a saved identity must also pass the exact-number
 check before queuing a file; this does not promote an ambiguous numeric match.
 These retries check the title against the linked library series, never the

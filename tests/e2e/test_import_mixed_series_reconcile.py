@@ -137,6 +137,44 @@ def test_retry_failed_shows_the_mixed_file_for_a_decision_without_reloading(
     assert _run_async_blocking(saved()) == (ImportedFileStatus.SKIPPED, None, None)
 
 
+def test_follow_up_shows_the_linked_series_and_explains_a_foreign_embedded_title(
+    authed_page, seeded_server, browser_name
+):
+    base = 91500000 + (10000 if browser_name == "firefox" else 0)
+    job, group, file = _run_async_blocking(_seed(21, base))
+
+    async def prepare():
+        async with get_session_factory().begin() as session:
+            record = await session.get(ImportJob, job)
+            record.status, record.source_type = ImportJobStatus.COMPLETED, ImportSourceType.MYLAR3
+            item = await session.get(ImportedSeries, group)
+            item.status, item.cv_match_method = ImportSeriesStatus.IMPORTED, "mylar3_cv_id"
+            item.raw_series_name, item.cv_title, item.files_no_match = "Mixed Shelf", None, 1
+            source = await session.get(ImportedFile, file)
+            source.status = ImportedFileStatus.NO_MATCH
+            source.diagnostics = {"source_metadata": {"comicinfo": {"series": "Thunderbolts"}}}
+
+    _run_async_blocking(prepare())
+    page = authed_page
+    page.goto(f"{seeded_server}/import?tab=follow-up&job_id={job}")
+    recover = page.get_by_test_id(f"import-orphaned-recover-{group}")
+    recover.click()
+    dialog = page.get_by_role("dialog", name="Fritzi Ritz", exact=True)
+    expect(dialog).to_be_visible()
+    row = dialog.get_by_test_id(f"orphaned-recovery-file-{file}")
+    expect(
+        row.get_by_text("ComicInfo names Thunderbolts, not Fritzi Ritz.", exact=False)
+    ).to_be_visible()
+    field = row.get_by_test_id(f"orphaned-recovery-issue-input-{file}")
+    expect(field).to_have_value("")
+    row.get_by_test_id(f"orphaned-recovery-issue-trigger-{file}").click()
+    page.get_by_role("option", name="#21", exact=True).click()
+    expect(field).to_have_value(str(base + 1))
+    dialog.get_by_role("button", name="Close recovery dialog").click()
+    recover.click()
+    expect(field).to_have_value("")
+
+
 def test_follow_up_picker_shows_both_lettered_issues(authed_page, seeded_server, browser_name):
     base = 91300000 + (10000 if browser_name == "firefox" else 0)
 

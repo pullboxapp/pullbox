@@ -605,6 +605,59 @@ async def test_get_orphan_recovery_context_prefers_issue_id_then_unique_issue_nu
 
 
 @pytest.mark.parametrize("local", [True, False])
+async def test_follow_up_number_suggestion_respects_embedded_series(db_session, local):
+    job = await _create_job_row(db_session)
+    group = await _create_imported_series(
+        db_session, job, name="Mixed Shelf", status=ImportSeriesStatus.RECOVERY_PENDING
+    )
+    title = "Fritzi Ritz"
+    group.cv_id, group.cv_title = 123, title
+    metadata = AsyncMock()
+    if local:
+        series = Series(title=title, sort_title=title)
+        db_session.add(series)
+        await db_session.flush()
+        group.series_id, group.cv_title = series.id, "Old import title"
+        db_session.add(Issue(series_id=series.id, issue_number=21, comicvine_id=501))
+    else:
+        metadata.get_issue_summaries_for_series.return_value = [
+            IssueSummary("501", 21, None, None, None, "issue")
+        ]
+    cases = [
+        ("Thunderbolts", None, None, None),
+        (title, None, None, 501),
+        ("Thunderbolts", 501, None, 501),
+        ("Thunderbolts", None, 501, 501),
+    ]
+    for index, (embedded, recorded, confirmed, _) in enumerate(cases):
+        db_session.add(
+            ImportedFile(
+                import_job_id=job.id,
+                import_series_id=group.id,
+                file_path=f"/imports/{index}/021.cbz",
+                file_name="021.cbz",
+                file_size=1024,
+                file_format="cbz",
+                parsed_issue_number=21,
+                comicvine_issue_id=recorded,
+                matched_issue_cv_id=confirmed,
+                diagnostics={"source_metadata": {"comicinfo": {"series": embedded}}},
+                status=ImportedFileStatus.NO_MATCH,
+            )
+        )
+    await db_session.flush()
+    payload = await _make_service(metadata_service=metadata).get_orphan_recovery_context(
+        db_session, group.id
+    )
+    response = OrphanRecoveryResponse.model_validate(payload)
+    assert [row.suggested_issue_cv_id for row in response.files] == [case[3] for case in cases]
+    assert response.selected_series_title == title
+    assert response.imported_series.raw_series_name == "Mixed Shelf"
+    if local:
+        metadata.get_issue_summaries_for_series.assert_not_awaited()
+
+
+@pytest.mark.parametrize("local", [True, False])
 @pytest.mark.parametrize("both_variants", [True, False])
 async def test_follow_up_distinguishes_exact_issue_designations(
     db_session: AsyncSession, local: bool, both_variants: bool
