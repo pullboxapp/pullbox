@@ -64,9 +64,9 @@
                      class="input-pb font-mono" aria-describedby="{{ preview_id }}">
               <div id="{{ preview_id }}" class="info-panel settings-media-preview-panel font-mono text-xs space-y-1 break-words"
                    :class="namingPreviewLoading && 'is-loading'" data-preview-ready="false"
-                   :data-preview-ready="namingPreviewLoading ? 'false' : 'true'" aria-live="polite" :aria-busy="namingPreviewLoading ? 'true' : 'false'">
+                   :data-preview-ready="!namingPreviewLoading && namingExamples.{{ field }}?.length ? 'true' : 'false'" aria-live="polite" :aria-busy="namingPreviewLoading ? 'true' : 'false'">
                 <span x-show="!namingExamples.{{ field }}" class="block italic text-pb-text-dim"
-                      x-text="namingExamples.{{ field }} ? '' : (namingPreviewError ? 'Correct the template to preview names.' : 'Loading preview…')"></span>
+                      x-text="namingExamples.{{ field }} ? '' : (!namingState && namingError ? 'Reload this scope to see naming examples.' : namingPreviewError ? 'Correct the template to preview names.' : 'Loading preview…')"></span>
                 <template x-for="(example, index) in (namingExamples.{{ field }} || [])" :key="index">
                   <div class="flex items-baseline flex-wrap gap-x-1">
                     <span class="text-pb-text-sec" x-text="example.input"></span>
@@ -171,6 +171,7 @@ function namingSettings() {
       ++this.namingPreviewSequence;
       clearTimeout(this.namingPreviewTimer);
       this.namingLoading = true;
+      this.namingPreviewLoading = true;
       this.namingError = '';
       this.namingExamples = {};
       try {
@@ -241,7 +242,7 @@ function namingSettings() {
       clearTimeout(this.namingPreviewTimer);
       const sequence = ++this.namingPreviewSequence;
       this.namingPreviewError = '';
-      this.namingPreviewLoading = true;
+      this.namingPreviewLoading = !!this.namingState;
       if (!this.namingState) return;
       this.namingPreviewTimer = setTimeout(() => this.previewNamingSettings(sequence), 300);
     },

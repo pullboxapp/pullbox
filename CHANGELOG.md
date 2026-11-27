@@ -232,6 +232,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- If Media Management cannot load naming settings, its previews now stop
+  spinning. Choose **Reload this scope** to try again without leaving the page.
+
 - On the import results page, **Check status** responds as soon as it appears,
   including after a check shows metadata updates are still pending.
 

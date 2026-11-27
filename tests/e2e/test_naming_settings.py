@@ -131,6 +131,32 @@ def test_scoped_naming_inheritance_saves_and_unsaved_changes(
     assert not errors
 
 
+def test_naming_examples_stop_loading_after_scope_failure_and_can_retry(
+    authed_page: Page, seeded_server: str
+) -> None:
+    page = authed_page
+    page.route(
+        "**/api/v1/config/naming",
+        lambda route: route.fulfill(
+            status=503, json={"error": {"message": "Naming settings temporarily unavailable."}}
+        ),
+        times=1,
+    )
+    page.goto(f"{seeded_server}/settings?tab=media#story-arc-files")
+    editor = page.get_by_test_id("settings-naming-editor")
+    expect(editor.get_by_role("alert")).to_contain_text("Naming settings temporarily unavailable.")
+    panels = editor.locator("[data-preview-ready]")
+    expect(panels).to_have_count(5)
+    for panel in panels.all():
+        expect(panel).to_have_attribute("aria-busy", "false")
+        expect(panel).to_have_attribute("data-preview-ready", "false")
+        expect(panel).to_contain_text("Reload this scope")
+    editor.get_by_role("button", name="Reload this scope").click()
+    expect(editor.locator("#preview-standard")).to_contain_text("Absolute Batman")
+    for panel in panels.all():
+        expect(panel).to_have_attribute("data-preview-ready", "true")
+
+
 def test_naming_errors_delayed_preview_and_accessibility(
     authed_page: Page, seeded_server: str
 ) -> None:
