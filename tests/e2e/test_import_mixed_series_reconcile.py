@@ -5,7 +5,12 @@ from playwright.sync_api import expect
 from sqlalchemy import select
 
 from pullbox.database import get_session_factory
-from pullbox.models.import_job import ImportedFile, ImportedFileStatus
+from pullbox.models.import_job import (
+    ImportedFile,
+    ImportedFileStatus,
+    ImportJobStatus,
+    ImportSeriesStatus,
+)
 from pullbox.models.issue import Issue
 from pullbox.models.series import Series
 from tests.e2e.conftest import _run_async_blocking
@@ -70,3 +75,45 @@ def test_foreign_file_can_be_skipped_without_suggesting_a_folder_issue(
             ).one()
 
     assert _run_async_blocking(saved()) == (ImportedFileStatus.SKIPPED, None)
+
+
+def test_follow_up_picker_shows_both_lettered_issues(authed_page, seeded_server, browser_name):
+    base = 91300000 + (10000 if browser_name == "firefox" else 0)
+
+    async def seed():
+        async with get_session_factory().begin() as session:
+            job, group, file = await _Reconciliation._seed_reconcile_row(session)
+            job.status = ImportJobStatus.COMPLETED
+            series = Series(title="X-O Manowar", sort_title="X-O Manowar", comicvine_id=base)
+            session.add(series)
+            await session.flush()
+            group.status = ImportSeriesStatus.RECOVERY_PENDING
+            group.series_id, group.cv_id, group.cv_title = series.id, base, series.title
+            for index, exact in enumerate(("50-X", "50-O"), start=1):
+                session.add(
+                    Issue(
+                        series_id=series.id,
+                        issue_number=50,
+                        issue_number_text=exact,
+                        comicvine_id=base + index,
+                    )
+                )
+            file.file_name = "X-O Manowar 50-o.cbz"
+            file.issue_number_raw, file.parsed_issue_number = "50-o", 50
+            return job.id, group.id, file.id
+
+    job, group, file = _run_async_blocking(seed())
+    authed_page.goto(f"{seeded_server}/import?tab=follow-up&job_id={job}")
+    authed_page.get_by_test_id(f"import-orphaned-recover-{group}").click()
+    row = authed_page.get_by_test_id(f"orphaned-recovery-file-{file}")
+    expect(row.get_by_text("Parsed #50-O", exact=True)).to_be_visible()
+    expect(row.get_by_text("Suggested #50-O", exact=True)).to_be_visible()
+    expect(row.get_by_test_id(f"orphaned-recovery-issue-input-{file}")).to_have_value(str(base + 2))
+    row.get_by_test_id(f"orphaned-recovery-issue-trigger-{file}").click()
+    for exact in ("50-X", "50-O"):
+        expect(authed_page.get_by_role("option", name=f"#{exact}", exact=True)).to_be_visible()
+    authed_page.get_by_role("option", name="#50-X", exact=True).click()
+    expect(row.get_by_test_id(f"orphaned-recovery-issue-input-{file}")).to_have_value(str(base + 1))
+    authed_page.get_by_role("button", name="Close recovery dialog", exact=True).click()
+    authed_page.get_by_test_id(f"import-orphaned-recover-{group}").click()
+    expect(row.get_by_test_id(f"orphaned-recovery-issue-input-{file}")).to_have_value(str(base + 2))

@@ -901,6 +901,7 @@ class OrphanRecoveryIssueOption(BaseModel):
 
     issue_cv_id: int
     issue_number: float
+    issue_number_text: str | None = None
     title: str | None = None
     release_date: str | None = None
     already_imported: bool = False
@@ -921,6 +922,7 @@ class OrphanRecoveryFileRead(BaseModel):
     file_path: str
     file_format: str
     parsed_issue_number: float | None = None
+    parsed_issue_number_text: str | None = None
     parsed_year: int | None = None
     comicvine_issue_id: int | None = None
     status: ImportedFileStatus

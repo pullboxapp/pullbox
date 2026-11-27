@@ -232,6 +232,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Import Follow-up distinguishes lettered issues in the recovery picker. For
+  example, X-O Manowar #50-O and #50-X appear as separate choices. A file
+  labeled simply #50 is not suggested as either variant. **Retry failed**
+  leaves a file in Follow-up instead of queuing a different variant.
+
 - If Media Management cannot load naming settings, its previews now stop
   spinning. Choose **Reload this scope** to try again without leaving the page.
 

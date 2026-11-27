@@ -161,7 +161,7 @@
                   {% set selected_issue_cv_id = file.matched_issue_cv_id or file.suggested_issue_cv_id %}
                   {% set dropdown_state = namespace(options=[["", "Choose an issue…"]]) %}
                   {% for option in issue_options %}
-                    {% set option_label = "#" ~ (option.issue_number|issue_num) ~ (" — " ~ option.title if option.title else "") %}
+                    {% set option_label = "#" ~ (option.issue_number_text or option.issue_number|issue_num) ~ (" — " ~ option.title if option.title else "") %}
                     {% set dropdown_state.options = dropdown_state.options + [[option.issue_cv_id|string, option_label]] %}
                   {% endfor %}
                   <tr
@@ -177,8 +177,8 @@
                           <span class="block truncate" data-tooltip-measure>{{ file.file_name }}</span>
                         </span>
                         <div class="mt-1 flex flex-wrap items-center gap-2 text-xs text-pb-text-dim">
-                          {% if file.parsed_issue_number is not none %}
-                            <span class="pill pill-neutral">Parsed #{{ file.parsed_issue_number|issue_num }}</span>
+                          {% if file.parsed_issue_number_text %}
+                            <span class="pill pill-neutral">Parsed #{{ file.parsed_issue_number_text }}</span>
                           {% endif %}
                           {% if file.comicvine_issue_id %}
                             <span class="pill pill-info">{{ 'Mylar CV' if mylar_conflicts_only else 'ComicInfo CV' }} {{ file.comicvine_issue_id }}</span>
@@ -195,8 +195,8 @@
                     <td class="downloads-mono-cell is-right">
                       {% if selected_issue_cv_id and file.suggested_issue_label %}
                         {{ file.suggested_issue_label }}
-                      {% elif file.parsed_issue_number is not none %}
-                        #{{ file.parsed_issue_number|issue_num }}
+                      {% elif file.parsed_issue_number_text %}
+                        #{{ file.parsed_issue_number_text }}
                       {% else %}
                         —
                       {% endif %}

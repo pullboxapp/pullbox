@@ -6,8 +6,10 @@ import re
 from typing import TYPE_CHECKING
 
 from pullbox.core.issue_numbers import (
+    format_issue_number,
     issue_number_text_matches_numeric,
     normalize_issue_number_text,
+    parse_issue_number_text,
 )
 from pullbox.core.release_parser import normalize_issue_number, parse_release_title
 
@@ -117,3 +119,42 @@ def candidate_issue_number_text(imp_file: ImportedFile) -> str | None:
     if not issue_number_text_matches_numeric(issue_number, normalized):
         return None
     return normalized
+
+
+def recovery_issue_number_text(file: ImportedFile, number: float | None) -> str | None:
+    """Refine an eligible recovery number without guessing between conflicting variants."""
+    if number is None:
+        return None
+    evidence: set[str] = set()
+    embedded = comicinfo_issue_number_raw(file)
+    for raw in (file.issue_number_raw, embedded):
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            continue
+        token = str(raw).strip().removeprefix("#").strip()
+        # Strip only the series total, never the suffix on the actual issue.
+        token = re.sub(
+            r"(?:\[\s*(?:of\s+)?\d+\s*\]|\(\s*of\s+\d+\s*\)|\bof\s+\d+)$", "", token, flags=re.I
+        )
+        try:
+            numeric, exact = parse_issue_number_text(token)
+        except ValueError:
+            # Keep legacy numeric fractions; a failed lettered designation
+            # must never fall back to its numeric sort value.
+            if any(char.isalpha() for char in token) or normalize_issue_number(token) != number:
+                return None
+            numeric, exact = number, format_issue_number(number)
+        if numeric != number:
+            return None
+        evidence.add(exact)
+
+    # Older scans can retain the suffix only in the filename. A bare number
+    # there is compatible with a more specific designation of the same issue.
+    parsed = parse_release_title(file.file_name or "")
+    plain = format_issue_number(number)
+    if parsed and not parsed.is_pack and parsed.issue_number is not None:
+        filename_exact = parsed.issue_number_text
+        if filename_exact and filename_exact != format_issue_number(parsed.issue_number):
+            evidence.add(filename_exact)
+        if parsed.issue_number != number and any(exact != plain for exact in evidence):
+            return None
+    return next(iter(evidence), plain) if len(evidence) <= 1 else None

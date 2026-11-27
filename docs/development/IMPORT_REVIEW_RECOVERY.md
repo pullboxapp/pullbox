@@ -264,6 +264,13 @@ Conflicting embedded identities, manual decisions, unsafe sources and duplicate
 copies remain protected. Unresolved catalog candidates retain their proposed
 series, issue and reason in `mixed_folder_recovery` diagnostics.
 
+The Follow-up issue picker matches exact issue numbers, not numeric sort
+values. For example, #50, #50-O, and #50-X are distinct choices. Conflicting
+suffixes do not preselect an issue. An existing decision or exact catalog
+issue ID still takes priority over a number-only suggestion.
+Terminal retries without a saved identity must also pass the exact-number
+check before queuing a file; this does not promote an ambiguous numeric match.
+
 An issue mistakenly registered under the parent series can itself be reassigned
 only when its embedded ComicVine issue ID agrees with the unique catalog target,
 it is the current referenced issue, and no other file or imported registration

@@ -29,6 +29,7 @@ from pullbox.services.import_file_issue_signals import (
     candidate_issue_number_text,
     comicinfo_issue_number,
     filename_issue_number,
+    recovery_issue_number_text,
     volume_issue_number,
 )
 from pullbox.services.import_file_resolution import load_issue_lookup_for_series
@@ -201,7 +202,12 @@ async def _resolve_proven_failed_target(
     else:
         issue_number = _failed_target_issue_number(file)
         issue = number_to_issue.get(issue_number) if issue_number is not None else None
-    return issue if issue is not None and _source_issue_type_matches(file, issue) else None
+    if (
+        issue is None
+        or recovery_issue_number_text(file, issue.issue_number) != issue.effective_issue_number_text
+    ):
+        return None
+    return issue if _source_issue_type_matches(file, issue) else None
 
 
 def _prepare_exact_target_retry(file: ImportedFile, issue: Issue) -> None:

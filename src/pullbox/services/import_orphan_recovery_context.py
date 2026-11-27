@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 
 from pullbox.core.exceptions import NotFoundError, ValidationError
-from pullbox.core.issue_numbers import format_issue_number
+from pullbox.core.issue_numbers import format_issue_number, parse_issue_number_text
 from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
@@ -19,6 +19,7 @@ from pullbox.models.import_job import (
 )
 from pullbox.models.issue import Issue
 from pullbox.models.library import LibraryRoot
+from pullbox.services.import_file_issue_signals import recovery_issue_number_text
 from pullbox.services.import_mylar_followup import (
     has_mylar_conflict,
     needs_mylar_conflict_review,
@@ -181,6 +182,8 @@ async def _load_recovery_issue_options(
                 {
                     "issue_cv_id": issue.comicvine_id,
                     "issue_number": issue.issue_number,
+                    "issue_number_text": issue.issue_number_text
+                    or format_issue_number(issue.issue_number),
                     "title": issue.title,
                     "release_date": (
                         issue.release_date.isoformat() if issue.release_date is not None else None
@@ -202,6 +205,8 @@ async def _load_recovery_issue_options(
             {
                 "issue_cv_id": int(summary.provider_id),
                 "issue_number": summary.issue_number,
+                "issue_number_text": summary.issue_number_text
+                or format_issue_number(summary.issue_number),
                 "title": summary.title,
                 "release_date": summary.release_date,
                 "already_imported": False,
@@ -215,20 +220,28 @@ def _build_recovery_file_rows(
     issue_options: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], int, int]:
     issue_label_by_cv_id: dict[int, str] = {}
-    issue_number_to_cv_ids: dict[float, list[int]] = {}
+    issue_number_to_cv_ids: dict[str, list[int]] = {}
     for option in issue_options:
         issue_cv_id = int(option["issue_cv_id"])
-        issue_number = float(option["issue_number"])
-        label = f"#{format_issue_number(issue_number)}"
+        issue_number = option.get("issue_number_text") or format_issue_number(
+            option["issue_number"]
+        )
+        label = f"#{issue_number}"
         if option.get("title"):
             label = f"{label} - {option['title']}"
         issue_label_by_cv_id[issue_cv_id] = label
-        issue_number_to_cv_ids.setdefault(issue_number, []).append(issue_cv_id)
+        try:
+            numeric, exact = parse_issue_number_text(issue_number)
+        except ValueError:
+            continue
+        if numeric == option["issue_number"]:
+            issue_number_to_cv_ids.setdefault(exact, []).append(issue_cv_id)
 
     file_rows: list[dict[str, Any]] = []
     files_remaining = 0
     files_completed = 0
     for imp_file in files:
+        file_number = recovery_issue_number_text(imp_file, imp_file.parsed_issue_number)
         current_issue_cv_id = (
             imp_file.matched_issue_cv_id
             if imp_file.matched_issue_cv_id in issue_label_by_cv_id
@@ -239,10 +252,10 @@ def _build_recovery_file_rows(
             suggested_issue_cv_id = imp_file.comicvine_issue_id
         if (
             suggested_issue_cv_id is None
-            and imp_file.parsed_issue_number is not None
-            and len(issue_number_to_cv_ids.get(imp_file.parsed_issue_number, [])) == 1
+            and file_number is not None
+            and len(issue_number_to_cv_ids.get(file_number, [])) == 1
         ):
-            suggested_issue_cv_id = issue_number_to_cv_ids[imp_file.parsed_issue_number][0]
+            suggested_issue_cv_id = issue_number_to_cv_ids[file_number][0]
 
         decision_locked = not requires_orphan_issue_decision(imp_file)
         if decision_locked:
@@ -257,6 +270,7 @@ def _build_recovery_file_rows(
                 "file_path": imp_file.file_path,
                 "file_format": imp_file.file_format,
                 "parsed_issue_number": imp_file.parsed_issue_number,
+                "parsed_issue_number_text": file_number,
                 "parsed_year": imp_file.parsed_year,
                 "comicvine_issue_id": imp_file.comicvine_issue_id,
                 "status": imp_file.status,

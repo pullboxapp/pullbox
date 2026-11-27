@@ -24,7 +24,11 @@ from pullbox.models.issue import Issue, IssueStatus, IssueType
 from pullbox.models.library import LibraryRoot
 from pullbox.models.series import Series, SeriesStatus, SeriesType
 from pullbox.providers.base import IssueSummary, SeriesMetadata
-from pullbox.schemas.import_job import OrphanRecoveryDecision, RecoverOrphanRequest
+from pullbox.schemas.import_job import (
+    OrphanRecoveryDecision,
+    OrphanRecoveryResponse,
+    RecoverOrphanRequest,
+)
 from pullbox.services.import_service import ImportService
 
 if TYPE_CHECKING:
@@ -600,6 +604,87 @@ async def test_get_orphan_recovery_context_prefers_issue_id_then_unique_issue_nu
     assert payload["files"][1]["suggested_issue_cv_id"] == 502
 
 
+@pytest.mark.parametrize("local", [True, False])
+@pytest.mark.parametrize("both_variants", [True, False])
+async def test_follow_up_distinguishes_exact_issue_designations(
+    db_session: AsyncSession, local: bool, both_variants: bool
+) -> None:
+    title = "X-O Manowar"
+    job = await _create_job_row(db_session)
+    group = await _create_imported_series(
+        db_session, job, name=title, status=ImportSeriesStatus.RECOVERY_PENDING
+    )
+    metadata = AsyncMock()
+    variants = {"50-X": 501}
+    if both_variants:
+        variants["50-O"] = 502
+        variants["50"] = 503
+    group.cv_id, group.cv_title = 123, title
+    if local:
+        series = Series(title=title, sort_title=title)
+        db_session.add(series)
+        await db_session.flush()
+        group.series_id = series.id
+        for exact, cv_id in variants.items():
+            db_session.add(
+                Issue(
+                    series_id=series.id,
+                    issue_number=50,
+                    issue_number_text=exact,
+                    comicvine_id=cv_id,
+                )
+            )
+    else:
+        metadata.get_issue_summaries_for_series.return_value = [
+            IssueSummary(str(cv_id), 50, None, None, None, "issue", issue_number_text=exact)
+            for exact, cv_id in variants.items()
+        ]
+    cases = [
+        ("50", "50", None, "50"),
+        ("50-o", "50-o", None, "50-O"),
+        ("50-x", "50-x", None, "50-X"),
+        ("50-o (legacy)", None, None, "50-O"),
+        ("49", "50-O", None, None),
+        ("49 (stale parsed number)", "50-X", None, None),
+        ("50-o (different filename suffix)", "50-X", None, None),
+        ("50-x (different embedded suffix)", "50-X", "50-O", None),
+        ("050", None, "50-x", "50-X"),
+        ("050 (hash)", None, "#50-x", "50-X"),
+        ("050 (limited)", None, "50-o (of 60)", "50-O"),
+        ("050 (bracketed)", None, "50 [60]", "50"),
+    ]
+    expected = {}
+    for filename_number, raw, embedded, designation in cases:
+        name = f"{title} {filename_number}.cbz"
+        expected[name] = designation
+        db_session.add(
+            ImportedFile(
+                import_job_id=job.id,
+                import_series_id=group.id,
+                file_path=f"/imports/{name}",
+                file_name=name,
+                file_format="cbz",
+                file_size=1024,
+                parsed_issue_number=49 if filename_number == "49" else 50,
+                issue_number_raw=raw,
+                diagnostics={"source_metadata": {"comicinfo": {"number": embedded}}},
+                status=ImportedFileStatus.NO_MATCH,
+            )
+        )
+    await db_session.flush()
+    result = await _make_service(metadata_service=metadata).get_orphan_recovery_context(
+        db_session, group.id
+    )
+    response = OrphanRecoveryResponse.model_validate(result)
+    assert len(response.files) == len(cases)
+    for row in response.files:
+        exact = expected[row.file_name]
+        assert row.suggested_issue_cv_id == (variants.get(exact) if exact else None)
+        assert row.suggested_issue_label == (f"#{exact}" if exact in variants else None)
+        assert row.parsed_issue_number_text == exact
+    assert {o.issue_number_text: o.issue_cv_id for o in response.issue_options} == variants
+
+
 async def test_get_orphan_recovery_context_allows_imported_rows_with_unresolved_files(
     db_session: AsyncSession,
 ) -> None:
@@ -1033,6 +1118,48 @@ async def test_retry_failed_requeues_unique_local_issue_target(db_session):
     assert failed_file.matched_issue_id == 3218
     assert failed_file.include_in_import is True
     assert failed_file.match_method == "completed_import_exact_target"
+
+
+@pytest.mark.parametrize(
+    ("filename_number", "stored_number", "expected"),
+    [("50-o", None, False), ("50", None, False), ("50-o", "50-X", False), ("50-x", None, True)],
+)
+async def test_retry_failed_never_requeues_a_different_lettered_issue(
+    db_session, filename_number, stored_number, expected
+):
+    job = await _create_job_row(db_session)
+    item = await _create_imported_series(
+        db_session, job, name="X-O Manowar", status=ImportSeriesStatus.IMPORTED
+    )
+    series = Series(title="X-O Manowar", sort_title="X-O Manowar")
+    db_session.add(series)
+    await db_session.flush()
+    item.series_id = series.id
+    item.cv_id = 15700
+    issue = Issue(series_id=series.id, issue_number=50, issue_number_text="50-X", comicvine_id=501)
+    name = f"X-O Manowar {filename_number}.cbz"
+    file = ImportedFile(
+        import_job_id=job.id,
+        import_series_id=item.id,
+        file_path=f"/imports/{name}",
+        file_name=name,
+        file_format="cbz",
+        file_size=1024,
+        parsed_issue_number=50,
+        issue_number_raw=stored_number,
+        status=ImportedFileStatus.FAILED,
+        error_message="Could not resolve to a library issue",
+    )
+    db_session.add_all([issue, file])
+    await db_session.flush()
+    _, count = await _make_service().retry_failed_series(db_session, job.id)
+    assert count == int(expected)
+    assert file.matched_issue_id == (issue.id if expected else None)
+    assert file.status == (
+        ImportedFileStatus.CONFIRMED if expected else ImportedFileStatus.NO_MATCH
+    )
+    assert file.include_in_import == expected
+    assert file.library_file_id is None
 
 
 async def test_retry_failed_does_not_use_issue_number_after_provider_id_conflict(db_session):
