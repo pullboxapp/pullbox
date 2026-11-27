@@ -8911,12 +8911,13 @@ function importResultsData(config) {
 
         var payload = await response.json();
         if (Math.max(0, Number(payload.retrying_count) || 0) === 0) {
-          var blockedMessage =
-            "No failed files passed source revalidation. Review the updated failure details before retrying.";
-          this.retryError = blockedMessage;
+          var reviewMessage =
+            "No files were queued for retry. Check Follow-up for issue matches or remaining file problems.";
+          this.retryError = reviewMessage;
           if (typeof showToast === "function") {
-            showToast({ message: blockedMessage, level: "warning" });
+            showToast({ message: reviewMessage, level: "info" });
           }
+          this.refreshResults();
           return;
         }
 

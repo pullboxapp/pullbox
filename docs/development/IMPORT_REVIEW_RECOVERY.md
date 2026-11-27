@@ -270,6 +270,11 @@ suffixes do not preselect an issue. An existing decision or exact catalog
 issue ID still takes priority over a number-only suggestion.
 Terminal retries without a saved identity must also pass the exact-number
 check before queuing a file; this does not promote an ambiguous numeric match.
+These retries check the title against the linked library series, never the
+source folder name. A conflicting filename or ComicInfo title leaves the
+file for review; an already proven issue ID keeps its existing precedence.
+When that retry explicitly requires an issue decision, the picker reopens
+without a selected issue. Saved evidence is not erased by viewing the form.
 
 An issue mistakenly registered under the parent series can itself be reassigned
 only when its embedded ComicVine issue ID agrees with the unique catalog target,

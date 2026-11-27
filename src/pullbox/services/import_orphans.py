@@ -43,6 +43,7 @@ from pullbox.services.import_mylar_followup import (
     registered_mylar_series,
     skip_conflicts,
 )
+from pullbox.services.import_recovery_identity import conflicts_with_review_series
 from pullbox.services.import_retry_helpers import require_retained_import_destination
 from pullbox.services.import_review_recheck import prepare_retryable_failed_sources_for_retry
 from pullbox.services.import_terminal_recovery import allows_terminal_import_recovery
@@ -205,6 +206,7 @@ async def _resolve_proven_failed_target(
     if (
         issue is None
         or recovery_issue_number_text(file, issue.issue_number) != issue.effective_issue_number_text
+        or conflicts_with_review_series(file, issue.series.title)
     ):
         return None
     return issue if _source_issue_type_matches(file, issue) else None

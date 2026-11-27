@@ -257,6 +257,16 @@ def _build_recovery_file_rows(
         ):
             suggested_issue_cv_id = issue_number_to_cv_ids[file_number][0]
 
+        # A terminal retry has already checked these IDs and numbers together.
+        # Keep the stored evidence, but never preselect a target it refused.
+        previous_review = (imp_file.diagnostics or {}).get("completed_import_follow_up")
+        if (
+            imp_file.status is ImportedFileStatus.NO_MATCH
+            and isinstance(previous_review, dict)
+            and previous_review.get("resolution") == "issue_decision_required"
+        ):
+            suggested_issue_cv_id = None
+
         decision_locked = not requires_orphan_issue_decision(imp_file)
         if decision_locked:
             files_completed += 1

@@ -236,6 +236,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   example, X-O Manowar #50-O and #50-X appear as separate choices. A file
   labeled simply #50 is not suggested as either variant. **Retry failed**
   leaves a file in Follow-up instead of queuing a different variant.
+- **Retry failed** no longer queues a comic under the wrong series just
+  because an issue number matches. For example, Thunderbolts #21 in a Fritzi
+  Ritz folder stays in Follow-up rather than being retried as Fritzi Ritz #21.
+  If nothing queues, Follow-up refreshes so you can review or skip the file.
 
 - If Media Management cannot load naming settings, its previews now stop
   spinning. Choose **Reload this scope** to try again without leaving the page.

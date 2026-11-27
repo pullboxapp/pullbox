@@ -1291,7 +1291,7 @@ class TestImportShellRouteContracts:
 
         assert "var payload = await response.json();" in results_controller
         assert "payload.retrying_count" in results_controller
-        assert "No failed files passed source revalidation." in results_controller
+        assert "No files were queued for retry." in results_controller
 
     async def test_import_collection_exposes_stable_step_mounts(
         self,

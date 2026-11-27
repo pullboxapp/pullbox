@@ -1162,6 +1162,63 @@ async def test_retry_failed_never_requeues_a_different_lettered_issue(
     assert file.library_file_id is None
 
 
+@pytest.mark.parametrize(
+    ("name", "embedded", "saved_cv_id", "should_retry"),
+    [
+        ("042 - Thunderbolts 021 (converted).cbz", None, None, False),
+        ("Fritzi Ritz 021.cbz", "Thunderbolts", None, False),
+        ("Fritzi Ritz 021.cbz", None, None, True),
+        ("021.cbz", None, None, True),
+        ("Thunderbolts 021.cbz", None, 501, True),
+    ],
+)
+async def test_retrying_a_number_match_respects_the_linked_series(
+    db_session, name, embedded, saved_cv_id, should_retry
+):
+    job = await _create_job_row(db_session)
+    item = await _create_imported_series(
+        db_session, job, name="Mixed shelf", status=ImportSeriesStatus.IMPORTED
+    )
+    await _create_series_with_issue(
+        db_session, series_id=160, issue_id=3218, title="Fritzi Ritz", issue_number=21
+    )
+    issue = await db_session.get(Issue, 3218)
+    assert issue is not None
+    issue.comicvine_id = 501
+    item.series_id, item.cv_id = 160, 15700
+    failed = ImportedFile(
+        import_job_id=job.id,
+        import_series_id=item.id,
+        file_path=f"/imports/mixed/{name}",
+        file_name=name,
+        file_format="cbz",
+        file_size=1024,
+        parsed_issue_number=21,
+        parsed_series="Fritzi Ritz",
+        matched_issue_cv_id=saved_cv_id,
+        status=ImportedFileStatus.FAILED,
+        error_message="Could not resolve to a library issue",
+        diagnostics={"source_metadata": {"comicinfo": {"series": embedded}}},
+    )
+    db_session.add(failed)
+    await db_session.flush()
+
+    _, count = await _make_service().retry_failed_series(db_session, job.id)
+    assert count == int(should_retry)
+    assert failed.matched_issue_id == (issue.id if should_retry else None)
+    assert failed.include_in_import == should_retry
+    assert failed.library_file_id is None
+    if not should_retry:
+        assert failed.status is ImportedFileStatus.NO_MATCH
+        assert job.status is ImportJobStatus.COMPLETED
+        assert item.status is ImportSeriesStatus.IMPORTED
+        context = await _make_service().get_orphan_recovery_context(db_session, item.id)
+        row = OrphanRecoveryResponse.model_validate(context).files[0]
+        assert not row.decision_locked
+        assert row.suggested_issue_cv_id is None
+        assert row.suggested_issue_label is None
+
+
 async def test_retry_failed_does_not_use_issue_number_after_provider_id_conflict(db_session):
     service = _make_service()
     job = await _create_job_row(db_session)

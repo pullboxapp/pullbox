@@ -158,7 +158,7 @@
               </thead>
               <tbody>
                 {% for file in files %}
-                  {% set selected_issue_cv_id = file.matched_issue_cv_id or file.suggested_issue_cv_id %}
+                  {% set selected_issue_cv_id = file.suggested_issue_cv_id %}
                   {% set dropdown_state = namespace(options=[["", "Choose an issue…"]]) %}
                   {% for option in issue_options %}
                     {% set option_label = "#" ~ (option.issue_number_text or option.issue_number|issue_num) ~ (" — " ~ option.title if option.title else "") %}

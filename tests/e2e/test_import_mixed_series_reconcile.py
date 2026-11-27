@@ -8,8 +8,11 @@ from pullbox.database import get_session_factory
 from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
+    ImportedSeries,
+    ImportJob,
     ImportJobStatus,
     ImportSeriesStatus,
+    ImportSourceType,
 )
 from pullbox.models.issue import Issue
 from pullbox.models.series import Series
@@ -75,6 +78,63 @@ def test_foreign_file_can_be_skipped_without_suggesting_a_folder_issue(
             ).one()
 
     assert _run_async_blocking(saved()) == (ImportedFileStatus.SKIPPED, None)
+
+
+@pytest.mark.parametrize("conflicting_ids", [False, True])
+def test_retry_failed_shows_the_mixed_file_for_a_decision_without_reloading(
+    authed_page, seeded_server, browser_name, conflicting_ids
+):
+    base = 91400000 + int(conflicting_ids) * 10 + (10000 if browser_name == "firefox" else 0)
+    job, group, file = _run_async_blocking(_seed(21, base))
+
+    async def mark_failed():
+        async with get_session_factory().begin() as session:
+            record = await session.get(ImportJob, job)
+            item = await session.get(ImportedSeries, group)
+            source = await session.get(ImportedFile, file)
+            record.status, record.source_type = ImportJobStatus.COMPLETED, ImportSourceType.MYLAR3
+            item.status, item.cv_match_method = ImportSeriesStatus.IMPORTED, "mylar3_cv_id"
+            item.files_no_match = 0
+            source.status = ImportedFileStatus.FAILED
+            source.error_message = "Could not resolve to a library issue"
+            if conflicting_ids:
+                source.matched_issue_cv_id, source.comicvine_issue_id = base + 1, base + 2
+                session.add(Issue(series_id=item.series_id, issue_number=22, comicvine_id=base + 2))
+
+    _run_async_blocking(mark_failed())
+    page = authed_page
+    page.goto(f"{seeded_server}/import?tab=follow-up&job_id={job}")
+    recover = page.get_by_test_id(f"import-orphaned-recover-{group}")
+    expect(recover).to_have_count(0)
+    with page.expect_response(f"**/api/v1/import/{job}/retry-failed") as response:
+        page.get_by_test_id("import-results-retry-action").click()
+    assert response.value.ok
+    assert response.value.json()["retrying_count"] == 0
+    expect(recover).to_be_visible()
+    recover.click()
+    row = page.get_by_test_id(f"orphaned-recovery-file-{file}")
+    expect(row.get_by_test_id(f"orphaned-recovery-issue-input-{file}")).to_have_value("")
+    if conflicting_ids:
+
+        async def stored_evidence():
+            async with get_session_factory()() as session:
+                source = await session.get(ImportedFile, file)
+                return source.matched_issue_cv_id, source.comicvine_issue_id
+
+        assert _run_async_blocking(stored_evidence()) == (base + 1, base + 2)
+    row.get_by_test_id(f"orphaned-recovery-skip-{file}").click()
+    page.get_by_test_id("orphaned-recovery-save").click()
+    expect(recover).to_have_count(0)
+    page.reload()
+    expect(page.get_by_test_id("import-follow-up-job-panel")).to_be_visible()
+    expect(recover).to_have_count(0)
+
+    async def saved():
+        async with get_session_factory()() as session:
+            source = await session.get(ImportedFile, file)
+            return source.status, source.matched_issue_id, source.library_file_id
+
+    assert _run_async_blocking(saved()) == (ImportedFileStatus.SKIPPED, None, None)
 
 
 def test_follow_up_picker_shows_both_lettered_issues(authed_page, seeded_server, browser_name):
