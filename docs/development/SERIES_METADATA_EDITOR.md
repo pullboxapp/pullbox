@@ -60,6 +60,11 @@ read-only preview. It explains each folder's status, including files kept in
 place. After correcting a writable folder, use **Write series.json** in that
 preview; there is no need to contact a provider or repeat the catalog refresh.
 
+Starting another preview clears the previous approval. If a write response is
+lost, **Check series.json folders** reads the current files without writing.
+**Up to date** describes what is on disk, not which request wrote it. Only a
+fresh preview with remaining changes enables **Write series.json** again.
+
 ## Field Inventory
 
 | Field | Scope and output |

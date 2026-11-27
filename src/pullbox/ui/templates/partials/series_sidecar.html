@@ -11,6 +11,7 @@
           <p class="text-sm text-pb-error" role="alert" x-show="error" x-text="error"></p>
           <p class="text-sm text-pb-text-sec" x-show="busy" x-text="preview ? 'Writing series metadata...' : 'Preparing series metadata preview...'"></p>
           <p class="text-sm text-pb-text" role="status" x-show="result" x-text="summary()"></p>
+          <p class="text-sm text-pb-text-sec" x-show="checkedFolders" role="status">Folder check complete. This check did not write any files. Review the current folder results below.</p>
           <div class="space-y-3" x-show="preview">
             <div class="rounded-lg border border-pb-border p-3 space-y-2">
               <p class="text-sm font-semibold text-pb-text" x-text="preview && preview.snapshot.values.title"></p>
@@ -39,7 +40,7 @@
         </div>
         <footer class="modal-footer">
           <button type="button" class="btn-ghost" @click="close()">Close</button>
-          <button type="button" class="btn-ghost" @click="loadPreview()" :disabled="busy">Preview again</button>
+          <button type="button" class="btn-ghost" x-ref="checkFolders" @click="loadPreview()" :disabled="busy" x-text="unconfirmed ? 'Check series.json folders' : 'Preview again'">Preview again</button>
           <button type="button" class="btn-primary" @click="write()" :disabled="busy || !preview || !preview.ready || !!result">Write series.json</button>
         </footer>
       </section>

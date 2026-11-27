@@ -284,6 +284,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reopening **Edit metadata** on a series after a successful save now shows a
   fresh preview. Unfinished sidecar writes still show their recovery actions.
 
+- If a series.json write loses its response, **Check series.json folders**
+  shows what is on disk without writing again. A failed preview no longer
+  leaves an older **Write series.json** action enabled.
+
 - Removing a manual issue metadata override no longer rewrites a comic whose
   embedded metadata already matches. The editor confirms when only provider
   control changed; a later refresh can update the library value.

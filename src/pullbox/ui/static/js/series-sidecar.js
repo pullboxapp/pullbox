@@ -3,16 +3,18 @@ function seriesSidecar(seriesId) {
   const endpoint = "/api/v1/series/" + seriesId + "/sidecar";
   return {
     open: false, busy: false, preview: null, result: null, error: "", trigger: null,
-    generation: 0, disposed: false,
+    generation: 0, disposed: false, unconfirmed: false, checkedFolders: false,
     destroy() { this.disposed = true; this.generation += 1; },
     async request(action, body) {
       const response = await fetch(endpoint + "/" + action, {
         method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": readCsrfTokenFromBody() },
         body: JSON.stringify(body),
       });
-      const data = await response.json();
-      if (!response.ok) throw new Error(_extractApiErrorMessage(response, data, "Could not prepare series metadata. Try again."));
-      return data;
+      if (!response.ok) {
+        const data = await _readJsonBody(response);
+        throw Object.assign(new Error(_extractApiErrorMessage(response, data, "Could not check series metadata. Try again.")), { status: response.status });
+      }
+      return response.json();
     },
     async show() {
       this.trigger = document.activeElement;
@@ -30,19 +32,27 @@ function seriesSidecar(seriesId) {
       if (this.busy) return;
       const generation = ++this.generation;
       this.busy = true; this.error = "";
+      this.preview = null; this.result = null; this.checkedFolders = false;
       try {
         const data = await this.request("preview", {});
         if (this.disposed || generation !== this.generation) return;
-        this.preview = data; this.result = null;
+        if (data?.series_id !== seriesId || typeof data.ready !== "boolean" || !/^[0-9a-f]{64}$/.test(data.review_key) ||
+            !data.snapshot?.values || !Array.isArray(data.targets)) {
+          throw new Error("Pullbox could not verify the folder preview. Check the folders again.");
+        }
+        this.preview = data; this.checkedFolders = this.unconfirmed; this.unconfirmed = false;
       } catch (error) {
         if (!this.disposed && generation === this.generation) this.error = error.message;
       } finally { if (!this.disposed) this.busy = false; }
     },
     async write() {
       if (this.busy || !this.preview || !this.preview.ready || this.result) return;
-      this.busy = true; this.error = "";
+      this.busy = true; this.error = ""; this.checkedFolders = false;
       try {
         const data = await this.request("write", { review_key: this.preview.review_key });
+        if (!Array.isArray(data?.targets) || !Number.isSafeInteger(data.written) || !Number.isSafeInteger(data.unchanged)) {
+          throw new Error("Missing write confirmation.");
+        }
         if (!this.disposed) {
           this.result = data;
           this.$dispatch("series-sidecar-written", { seriesId, counts: {
@@ -50,7 +60,14 @@ function seriesSidecar(seriesId) {
           } });
         }
       } catch (error) {
-        if (!this.disposed) { this.error = error.message; this.preview.ready = false; }
+        if (!this.disposed) {
+          this.preview = null;
+          this.unconfirmed = !error.status || error.status === 408 || error.status >= 500;
+          this.error = this.unconfirmed
+            ? "Pullbox could not confirm which series.json files were written. Check the folders before writing again."
+            : error.message;
+          if (this.open) this.$nextTick(() => this.$refs.checkFolders?.focus({ preventScroll: true }));
+        }
       } finally { if (!this.disposed) this.busy = false; }
     },
     targets() { return this.result ? this.result.targets : this.preview ? this.preview.targets : []; },
