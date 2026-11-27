@@ -222,7 +222,7 @@
           {% if (pending_writes or catalog_sync_pending_count) and job.status.value == 'completed' %}
           <button type="button" class="btn-secondary btn-sm" @click="document.getElementById('import-results-summary').focus({preventScroll: true})"
                   hx-get="/import/{{ job.id }}/results-partial" hx-select="#import-results-status" hx-target="#import-results-status"
-                  hx-select-oob="#import-results-follow-up-entry" hx-swap="outerHTML" hx-push-url="false" hx-disabled-elt="this">Check status</button>
+                  hx-select-oob="#import-results-follow-up-entry" hx-swap="outerHTML settle:0ms" hx-push-url="false" hx-disabled-elt="this">Check status</button>
           {% endif %}
         </div>
       </div>

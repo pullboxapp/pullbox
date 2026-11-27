@@ -2971,7 +2971,7 @@ function importCollectionPage(config) {
       this.loadedPanels[targetId] = key;
       htmx.ajax("GET", url, {
         target: "#" + targetId,
-        swap: "innerHTML",
+        swap: targetId === "import-step-results" ? "innerHTML settle:0ms" : "innerHTML",
       });
     },
 

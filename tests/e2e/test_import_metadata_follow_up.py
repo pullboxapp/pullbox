@@ -165,6 +165,15 @@ def test_results_check_pending_metadata_without_reimporting(
 
     _run_async_blocking(set_write_state("pending"))
     page = authed_page
+    # A visible Check status must accept the first keyboard action, even on a slow settle.
+    page.add_init_script("""document.addEventListener("htmx:beforeSwap", (e) => {
+        if (!["import-step-results", "import-results-status"].includes(e.detail.target.id)) return;
+        const previous = htmx.config.defaultSettleDelay;
+        htmx.config.defaultSettleDelay = 30000;
+        document.addEventListener("htmx:afterSwap", () => {
+            htmx.config.defaultSettleDelay = previous;
+        }, {once: true});
+    });""")
     url = f"{seeded_server}/import?tab=collection&resume_job_id={job_id}&resume_step=5"
     page.goto(url)
     results = page.get_by_test_id("import-collection-results")
@@ -174,8 +183,14 @@ def test_results_check_pending_metadata_without_reimporting(
     expect(follow_up).to_have_count(0)
     page.evaluate("window.importStatusProbe = true")
 
-    _run_async_blocking(set_write_state(outcome))
     check = results.get_by_role("button", name="Check status", exact=True)
+    check.evaluate("el => el.setAttribute('data-initial-status-check', '')")
+    with page.expect_response(lambda r: r.url.endswith(f"/import/{job_id}/results-partial")):
+        check.press("Enter")
+    expect(results.locator("[data-initial-status-check]")).to_have_count(0)
+    expect(check).to_be_visible()
+
+    _run_async_blocking(set_write_state(outcome))
     check.focus()
     page.keyboard.press("Enter")
     expect(check).to_have_count(0)

@@ -232,6 +232,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- On the import results page, **Check status** responds as soon as it appears,
+  including after a check shows metadata updates are still pending.
+
 - Step 3 no longer suggests an issue by number alone or offers to create a
   provisional issue when a mixed-folder file names a different series. You can
   review the series choice or skip the file; no comic is moved by this check.
